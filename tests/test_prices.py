@@ -252,9 +252,10 @@ def test_sold_out_completion_uses_each_markets_last_trading_day(
     sessions = [MagicMock() for _ in range(3)]
     for session in sessions:
         session.execute.return_value.all.return_value = []
-    # There is no stored row on the sale date to satisfy the old completion check.
-    sessions[1].scalar.side_effect = [price_day, None, None, None]
-    sessions[2].scalar.side_effect = [fx_day, None, None]
+    price_terminal = price_day if price_day == holding.calendar.last_trading_day(sale) else None
+    fx_terminal = fx_day if fx_day == fetch.calendars.FX.last_trading_day(sale) else None
+    sessions[1].scalar.side_effect = [price_day, price_terminal, None, None]
+    sessions[2].scalar.side_effect = [fx_day, fx_terminal, None]
     factory = MagicMock(side_effect=sessions)
     monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
     monkeypatch.setattr(fetch, "held_instruments", lambda *args: [holding])
@@ -379,8 +380,17 @@ def test_takeover_skips_prices_and_sold_only_fx_with_a_carried_final_value(
     assert len(report.outcomes) == 2
 
 
-def test_takeover_with_stale_rows_through_sale_does_not_refetch_delisted_symbol(engine):
-    first, sale = date(2023, 3, 1), date(2023, 3, 8)
+@pytest.mark.parametrize(
+    ("sale", "terminal", "carried"),
+    [
+        (date(2023, 3, 8), date(2023, 3, 8), 3),
+        (date(2023, 3, 11), date(2023, 3, 10), 5),
+    ],
+)
+def test_takeover_with_stale_rows_through_sale_does_not_refetch_delisted_symbol(
+    engine, sale, terminal, carried
+):
+    first = date(2023, 3, 1)
     instrument_id = _seed_trade(engine, currency="AUD", code="TAKEOVER")
     with session_scope(engine) as session:
         session.get(Instrument, instrument_id).exchange = "NZX"
@@ -405,22 +415,25 @@ def test_takeover_with_stale_rows_through_sale_does_not_refetch_delisted_symbol(
     now = datetime(2026, 10, 3, 5, 30, tzinfo=UTC)
     report = run_fetch(engine, Sources(prices, [fx]), now=now, base_currency="NZD", backfill=True)
     assert report.ok
-    assert [outcome.carried_forward for outcome in report.outcomes] == [3, 3]
+    assert [outcome.carried_forward for outcome in report.outcomes] == [carried, carried]
     with session_scope(engine) as session:
-        assert session.get(Price, (instrument_id, sale)).is_stale
-        assert session.get(FxRate, (sale, "AUD", "NZD")).is_stale
+        assert session.get(Price, (instrument_id, terminal)).is_stale
+        assert session.get(FxRate, (terminal, "AUD", "NZD")).is_stale
+        if terminal != sale:
+            assert session.get(Price, (instrument_id, sale)) is None
+            assert session.get(FxRate, (sale, "AUD", "NZD")) is None
         # Later stored rows must not hide the completed sale-day range.
         session.add(
             Price(
                 instrument_id=instrument_id,
-                price_date=date(2023, 3, 9),
+                price_date=date(2023, 3, 13),
                 close=Decimal("11"),
                 source="test",
             )
         )
         session.add(
             FxRate(
-                rate_date=date(2023, 3, 9),
+                rate_date=date(2023, 3, 13),
                 currency="AUD",
                 base_currency="NZD",
                 rate=Decimal("1.2"),

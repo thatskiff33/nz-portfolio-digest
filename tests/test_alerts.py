@@ -121,9 +121,7 @@ def test_cooldown_repeats_only_when_elapsed(sample):
     rules = config(cooldown_hours=2)
     alerts.run_alerts(session, rules, now=NOW)
     session.flush()
-    # SQLite drops timezone information on reload; Postgres preserves it in production.
-    for state in session.scalars(select(AlertState)):
-        state.sent_at = state.sent_at.replace(tzinfo=UTC)
+    session.expire_all()
     assert not alerts.run_alerts(session, rules, now=NOW + timedelta(hours=1))
     assert alerts.run_alerts(session, rules, now=NOW + timedelta(hours=2))
     assert alerts.send.call_count == 2
@@ -183,3 +181,185 @@ def test_push_off_by_default(monkeypatch):
     monkeypatch.setattr(alerts, "urlopen", request)
     alerts.push("Made up")
     request.assert_not_called()
+
+
+def test_partial_override_inherits_global_stale_threshold(sample):
+    session, portfolio, _ = sample
+    monday = datetime(2026, 10, 19, 7, tzinfo=UTC)
+    states = alerts.evaluate(
+        session,
+        portfolio,
+        config(stale_trading_days=0, holdings={"NZX:MADEUP": HoldingRules(daily_percent=D(25))}),
+        monday,
+    )
+    assert states["stale:NZX:MADEUP"] is not None
+
+
+def test_daily_movement_ignores_trading_costs_and_adjusts_splits(sample):
+    from portfolio_digest.models import Split
+
+    session, portfolio, instrument = sample
+    session.add(
+        Trade(
+            portfolio_id=portfolio.id,
+            instrument_id=instrument.id,
+            trade_date=date(2026, 10, 16),
+            trade_type="buy",
+            quantity=D(1),
+            price=D(8),
+            currency="NZD",
+            fees=D(100),
+            source="manual",
+            external_ref="invented-costs",
+        )
+    )
+    assert "-20.00%" in alerts.evaluate(session, portfolio, config(), NOW)["daily:NZX:MADEUP"].text
+    session.add(
+        Split(
+            instrument_id=instrument.id,
+            split_date=date(2026, 10, 16),
+            shares_before=D(1),
+            shares_after=D(2),
+            source="registry",
+        )
+    )
+    assert "+60.00%" in alerts.evaluate(session, portfolio, config(), NOW)["daily:NZX:MADEUP"].text
+
+
+def test_threshold_is_strict_and_missing_close_is_unknown(sample):
+    session, portfolio, instrument = sample
+    assert (
+        alerts.evaluate(session, portfolio, config(daily_percent=D(20)), NOW)["daily:NZX:MADEUP"]
+        is None
+    )
+    price = session.scalar(
+        select(Price).where(Price.instrument_id == instrument.id, Price.price_date == NOW.date())
+    )
+    price.is_stale = True
+    assert "daily:NZX:MADEUP" not in alerts.evaluate(session, portfolio, config(), NOW)
+
+
+def test_disabled_alerts_do_not_send(sample):
+    session, _, _ = sample
+    assert alerts.run_alerts(session, config(enabled=False), now=NOW) == []
+    alerts.send.assert_not_called()
+    alerts.push.assert_not_called()
+
+
+def test_pushover_request_contains_env_credentials_only_in_body(monkeypatch):
+    from urllib.parse import parse_qs
+
+    monkeypatch.delenv("ALERT_NTFY_URL", raising=False)
+    monkeypatch.setenv("ALERT_PUSHOVER_TOKEN", "invented-app-token")
+    monkeypatch.setenv("ALERT_PUSHOVER_USER", "invented-user-key")
+    response = Mock()
+    response.__enter__ = Mock(return_value=Mock(status=200))
+    response.__exit__ = Mock(return_value=False)
+    request = Mock(return_value=response)
+    monkeypatch.setattr(alerts, "urlopen", request)
+    alerts.push("Made-up alert")
+    sent = request.call_args.args[0]
+    assert sent.full_url == "https://api.pushover.net/1/messages.json"
+    assert parse_qs(sent.data.decode()) == {
+        "token": ["invented-app-token"],
+        "user": ["invented-user-key"],
+        "message": ["Made-up alert"],
+    }
+
+
+def test_cli_dry_run_prints_without_delivering(sample, monkeypatch, capsys):
+    from contextlib import nullcontext
+
+    from portfolio_digest import cli
+
+    session, _, _ = sample
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext(session))
+    monkeypatch.setattr(cli, "read_config", lambda _: config())
+    run = alerts.run_alerts
+    monkeypatch.setattr(cli, "run_alerts", lambda *a, **kw: run(*a, **kw, now=NOW))
+    assert cli.main(["alerts", "check", "--dry-run"]) == 0
+    assert "-20.00%" in capsys.readouterr().out
+    alerts.send.assert_not_called()
+    alerts.push.assert_not_called()
+    assert not session.scalars(select(AlertState)).all()
+
+
+@pytest.mark.parametrize("fetch_result", [0, 1])
+def test_scheduler_checks_alerts_after_success_or_partial_fetch(monkeypatch, fetch_result):
+    from argparse import Namespace
+    from contextlib import nullcontext
+    from datetime import time
+
+    from portfolio_digest import cli
+    from portfolio_digest.scheduling import Schedule
+
+    events = []
+    rules = config()
+    monkeypatch.setattr(cli, "read_config", lambda _: rules)
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext("session"))
+    monkeypatch.setattr(
+        cli, "cmd_prices_fetch", lambda _: events.append("fetch committed") or fetch_result
+    )
+    monkeypatch.setattr(cli, "run_alerts", lambda s, c: events.append((s, c)))
+
+    def run(_, execute):
+        return execute(Schedule(name="prices", kind="prices", frequency="daily", at=time(18)), NOW)
+
+    monkeypatch.setattr(cli.Scheduler, "run", run)
+    assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == fetch_result
+    assert events == ["fetch committed", ("session", rules)]
+
+
+def test_portfolio_threshold_is_strict(sample):
+    session, portfolio, _ = sample
+    assert (
+        alerts.evaluate(session, portfolio, config(portfolio_drop_percent=D(20)), NOW)["portfolio"]
+        is None
+    )
+    assert (
+        alerts.evaluate(session, portfolio, config(portfolio_drop_percent=D(19)), NOW)["portfolio"]
+        is not None
+    )
+
+
+def test_dry_run_does_not_clear_sent_state(sample, monkeypatch):
+    session, _, _ = sample
+    alerts.run_alerts(session, config(), now=NOW)
+    session.commit()
+    monkeypatch.setattr(alerts, "evaluate", lambda *a: {"daily:NZX:MADEUP": None})
+    assert not alerts.run_alerts(session, config(), dry_run=True, now=NOW)
+    assert session.get(AlertState, (1, "daily:NZX:MADEUP")) is not None
+    assert alerts.send.call_count == 1
+
+
+def test_no_price_counts_staleness_from_first_trade(sample):
+    session, portfolio, instrument = sample
+    for price in session.scalars(select(Price).where(Price.instrument_id == instrument.id)):
+        session.delete(price)
+    states = alerts.evaluate(session, portfolio, config(), NOW)
+    assert "no fresh price since first trade 2026-10-01" in states["stale:NZX:MADEUP"].text
+    assert "daily:NZX:MADEUP" not in states
+    assert "portfolio" not in states
+
+
+def test_sold_holding_clears_both_holding_rules(sample):
+    session, portfolio, instrument = sample
+    session.add(
+        Trade(
+            portfolio_id=portfolio.id,
+            instrument_id=instrument.id,
+            trade_date=date(2026, 10, 16),
+            trade_type="sell",
+            quantity=D(10),
+            price=D(8),
+            currency="NZD",
+            fees=D(0),
+            source="manual",
+            external_ref="invented-sale",
+        )
+    )
+    states = alerts.evaluate(session, portfolio, config(), NOW)
+    assert states["daily:NZX:MADEUP"] is None
+    assert states["stale:NZX:MADEUP"] is None

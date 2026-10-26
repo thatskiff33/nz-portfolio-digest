@@ -15,9 +15,9 @@ from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import mail_settings, message, send
-from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Trade
+from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.calendars import for_exchange
-from portfolio_digest.returns import ReturnError
+from portfolio_digest.returns import ReturnError, units_at
 from portfolio_digest.returns_loader import load_returns
 
 logger = logging.getLogger(__name__)
@@ -85,38 +85,64 @@ def evaluate(session, portfolio, config, now):
     ).all()
     for instrument in instruments:
         label = f"{instrument.exchange}:{instrument.code}"
-        limits = rules.holdings.get(label, rules)
+        override = rules.holdings.get(label)
+        limits = (
+            rules.model_copy(update=override.model_dump(exclude_unset=True)) if override else rules
+        )
         calendar = for_exchange(instrument.exchange)
         end = calendar.latest_closed_day(now)
         start = calendar.last_trading_day(end - timedelta(days=1))
-        try:
-            report = load_returns(session, portfolio.name, f"{start}:{end}")
-            row = next((r for r in report.holdings if r.label == label), None)
-        except ReturnError:
-            row = None
-        # A separate lifetime report identifies held units even when recent prices are absent.
-        try:
-            held = next(
-                (
-                    r
-                    for r in load_returns(session, portfolio.name, "all", today=today).holdings
-                    if r.label == label
-                ),
-                None,
+        trades = session.scalars(
+            select(Trade)
+            .where(
+                Trade.portfolio_id == portfolio.id,
+                Trade.instrument_id == instrument.id,
+                Trade.trade_date <= today,
             )
+            .order_by(Trade.trade_date, Trade.id)
+        ).all()
+        splits = session.scalars(
+            select(Split)
+            .where(
+                Split.instrument_id == instrument.id,
+                Split.split_date <= today,
+            )
+            .order_by(Split.split_date)
+        ).all()
+        # Unit ownership does not require a price or FX history. In particular,
+        # a newly bought holding with no prices must still get a stale alert.
+        try:
+            units = units_at(trades, splits, today)
         except ReturnError:
-            held = None
-        if held is not None and held.units <= 0:
+            continue
+        if units <= 0:
             states[f"daily:{label}"] = states[f"stale:{label}"] = None
             continue
-        if row is not None and not row.flags and row.units > 0 and row.percentages is not None:
-            movement = row.percentages.capital + row.percentages.currency
+        # Compare actual adjacent closes in the listing currency. Trades, fees and
+        # FX do not change a quoted price. Rescale the opening price for splits.
+        prices = {
+            price.price_date: price.close
+            for price in session.scalars(
+                select(Price).where(
+                    Price.instrument_id == instrument.id,
+                    Price.price_date.in_((start, end)),
+                    Price.is_stale.is_(False),
+                )
+            )
+        }
+        if start in prices and end in prices and prices[start] > 0:
+            opening = prices[start]
+            for split in splits:
+                if start < split.split_date <= end:
+                    opening = opening * split.shares_before / split.shares_after
+            movement = (prices[end] / opening - 1) * Decimal(100)
             key = f"daily:{label}"
             states[key] = (
                 Trigger(
                     key,
                     f"{label} moved {movement:+.2f}% ({start} to {end}); "
-                    f"closing price {row.price} {row.currency}.",
+                    f"closing prices {opening} to {prices[end]} {instrument.currency} "
+                    "(split-adjusted).",
                 )
                 if abs(movement) > limits.daily_percent
                 else None
@@ -149,7 +175,7 @@ def evaluate(session, portfolio, config, now):
             )
     start = today - timedelta(days=rules.period_days)
     try:
-        report = load_returns(session, portfolio.name, f"{start}:{today}")
+        report = load_returns(session, portfolio.name, f"{start}:{today}", today=today)
         total = report.total
         if not total.flags and total.opening > 0:
             change = total.change / total.opening * Decimal(100)
@@ -197,7 +223,10 @@ def run_alerts(session, config, *, dry_run=False, now=None):
                     continue
                 cooldown = config.alerts.cooldown_hours
                 if previous is None or (
-                    cooldown is not None and now - previous.sent_at >= timedelta(hours=cooldown)
+                    cooldown is not None
+                    # SQLite returns naive timestamps; the stored instant is always UTC.
+                    and now - previous.sent_at.replace(tzinfo=previous.sent_at.tzinfo or UTC)
+                    >= timedelta(hours=cooldown)
                 ):
                     due.append(trigger)
             if not due:

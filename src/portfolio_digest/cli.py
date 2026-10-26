@@ -16,9 +16,9 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from portfolio_digest import __version__, migrate, validation
 from portfolio_digest.actions import KINDS, record_action
-from portfolio_digest.alerts import run_alerts
 from portfolio_digest.akahu import AkahuClient, AkahuError, push_success
 from portfolio_digest.akahu_sync import sync
+from portfolio_digest.alerts import run_alerts
 from portfolio_digest.config import (
     ConfigError,
     akahu_account_ids,

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, SettingsError
 
+from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES
 from portfolio_digest.validation import currency_code
 
 
@@ -32,8 +33,14 @@ class Settings(BaseSettings):
     # Every value is reported in this currency, and new portfolios use it by default.
     base_currency: str = "NZD"
 
-    # Timezone used for schedules and "today".
+    # Timezone used for "today".
     timezone: str = "Pacific/Auckland"
+
+    # Where daily prices come from. Only "yahoo" for now; a paid source slots in later.
+    price_source: str = "yahoo"
+
+    # Where exchange rates come from, tried in order until one works.
+    fx_sources: str = "yahoo,frankfurter"
 
     @field_validator("base_currency")
     @classmethod
@@ -48,6 +55,26 @@ class Settings(BaseSettings):
         except (ZoneInfoNotFoundError, ValueError):
             raise ValueError("not a known timezone such as Pacific/Auckland") from None
         return value
+
+    @field_validator("price_source")
+    @classmethod
+    def _check_price_source(cls, value: str) -> str:
+        name = value.strip().lower()
+        if name not in PRICE_SOURCES:
+            raise ValueError(f"must be one of {', '.join(PRICE_SOURCES)}")
+        return name
+
+    @field_validator("fx_sources")
+    @classmethod
+    def _check_fx_sources(cls, value: str) -> str:
+        names = [name.strip().lower() for name in value.split(",") if name.strip()]
+        if not names or any(name not in FX_SOURCES for name in names):
+            raise ValueError(f"must list one or more of {', '.join(FX_SOURCES)}")
+        return ",".join(names)
+
+    @property
+    def fx_source_names(self) -> list[str]:
+        return self.fx_sources.split(",")
 
 
 @lru_cache
@@ -64,3 +91,37 @@ def get_settings() -> Settings:
         raise ConfigError(
             f"Missing or invalid setting: {', '.join(names)}. See .env.example."
         ) from None
+
+
+class GmailSettings(BaseSettings):
+    """OAuth details for reading ASB contract-note emails from one Gmail label.
+
+    Kept apart from `Settings` so `gmail authorise` can run on a laptop with no database.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GMAIL_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+    # Written by `portfolio-digest gmail authorise`. Read-only access to the mailbox.
+    refresh_token: SecretStr | None = None
+    # Only emails with this label are read, e.g. "ASB contract notes".
+    label: str | None = None
+
+    def require(self, *names: str) -> None:
+        missing = [f"GMAIL_{n.upper()}" for n in names if not getattr(self, n)]
+        if missing:
+            raise ConfigError(f"Missing setting: {', '.join(missing)}. See .env.example.")
+
+
+@lru_cache
+def get_gmail_settings() -> GmailSettings:
+    try:
+        return GmailSettings()
+    except ValidationError as exc:
+        names = sorted(
+            {f"GMAIL_{error['loc'][0]}".upper() for error in exc.errors() if error["loc"]}
+        )
+        raise ConfigError(f"Invalid setting: {', '.join(names)}. See .env.example.") from None

@@ -22,7 +22,7 @@ from portfolio_digest.models import (
     Portfolio,
     Trade,
 )
-from portfolio_digest.reconcile import ledger_units, reconcile
+from portfolio_digest.reconcile import compare, ledger_units, reconcile, stored_units
 
 APP = "made-up-app-secret"
 USER = "made-up-user-secret"
@@ -264,6 +264,11 @@ def test_ledger_sells_adjustments_opening_balance_and_drp(local_engine):
         )
         session.commit()
         assert ledger_units(session, 1) == {1: Decimal("8.75")}
+        labelled = stored_units(session, 1)
+        assert list(labelled.values()) == [Decimal("8.75")]
+        assert compare(labelled, labelled) == []
+        assert compare(labelled, {})[0].app_units == Decimal("8.75")
+        assert compare({}, labelled)[0].snapshot_units == Decimal("8.75")
     assert reconcile({1: Decimal("8.75")}, {1: Decimal("8.75")}) == []
 
 

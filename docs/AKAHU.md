@@ -71,14 +71,24 @@ Akahu's next refresh after recent trades, then rerun. Never overwrite trades fro
 
 ## Nightly run and monitoring
 
-This checkout has no application scheduler or price-fetch job yet. Add this to the server
-user's crontab alongside the price-fetch entry when it is available. Replace the project
-path and portfolio name. Cron uses the server's timezone; choose the equivalent of 03:15
-Pacific/Auckland if your server uses UTC. Keep logs private.
+Use the systemd user timer alongside the price-fetch timers described in
+[the deployment guide](DEPLOY.md#twice-daily-schedule). It runs at 03:15
+Pacific/Auckland and catches up after downtime. The service assumes the checkout is at
+`~/portfolio-digest` and the portfolio is called `Personal`. Edit `WorkingDirectory` and
+`--portfolio` in the installed service to match your server before enabling it.
 
-```cron
-15 3 * * * cd /srv/portfolio-digest && docker compose run --rm migrate akahu sync --portfolio 'Personal'
+```sh
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/portfolio-digest-akahu.{service,timer} ~/.config/systemd/user/
+# Edit the installed service for your checkout path and portfolio name.
+systemctl --user daemon-reload
+systemctl --user enable --now portfolio-digest-akahu.timer
+systemctl --user list-timers portfolio-digest-akahu.timer
 ```
+
+Use `journalctl --user -u portfolio-digest-akahu.service` to inspect runs. Keep logs
+private. Enable user lingering as described in the deployment guide so the timer runs
+while you are logged out.
 
 The Compose command reads credentials from the project's `.env`. Build the image and run
 migrations after deploying changes. Use your scheduler's non-zero exit alerts for drift.

@@ -37,6 +37,8 @@ providers are currently parked; do not add a Sharesight integration.
    users can resolve errors. Follow `docs/WORKING-AGREEMENT.md`, review financial accuracy,
    privacy and failure modes, then run the affected tests and ruff checks.
 
-The checkout currently has the ledger schema but no historical broker importer. New
-importers should use these shared models and reconciliation functions rather than create
-a separate ledger or their own unit comparison algorithm.
+Use the existing `importers.base` parser interface and helpers, register file parsers in
+`importing.FILE_IMPORTERS`, and use the shared import workflow for validation, deduplication
+and undo. See [IMPORTING.md](IMPORTING.md) and the Sharesies and ASB implementations for
+examples. Holdings-only providers should share reconciliation rather than create a
+separate ledger or their own unit comparison algorithm.

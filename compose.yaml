@@ -32,6 +32,11 @@ services:
       AKAHU_USER_TOKEN: ${AKAHU_USER_TOKEN:-}
       AKAHU_ACCOUNT_IDS: ${AKAHU_ACCOUNT_IDS:-[]}
       UPTIME_KUMA_PUSH_URL: ${UPTIME_KUMA_PUSH_URL:-}
+
+      BASE_CURRENCY: ${BASE_CURRENCY:-NZD}
+      TIMEZONE: ${TIMEZONE:-Pacific/Auckland}
+      PRICE_SOURCE: ${PRICE_SOURCE:-yahoo}
+      FX_SOURCES: ${FX_SOURCES:-yahoo,frankfurter}
     depends_on:
       db:
         condition: service_healthy

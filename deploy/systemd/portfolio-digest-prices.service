@@ -1,0 +1,7 @@
+[Unit]
+Description=Fetch portfolio prices and exchange rates
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/portfolio-digest
+ExecStart=/usr/bin/env docker compose run --rm migrate prices fetch

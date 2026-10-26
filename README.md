@@ -25,7 +25,31 @@ portfolio-digest migrate          # bring the database up to date
 portfolio-digest health           # check the database is reachable and migrated
 portfolio-digest portfolio add "Personal"            # --base-currency AUD for others
 portfolio-digest portfolio list
+portfolio-digest prices fetch --backfill              # initial price and FX history
+portfolio-digest prices fetch                         # normal scheduled/incremental run
+portfolio-digest prices check                         # missing, stale, zero or suspect data
+
+# Import a complete trade history, then prove its units against a current snapshot.
+portfolio-digest import sharesies transactions.csv --portfolio "Personal"
+portfolio-digest import asb-statement statement.txt --portfolio "Personal"
+portfolio-digest import sharesight-csv trades.csv --portfolio "Personal"
+portfolio-digest reconcile sharesies holdings.csv --portfolio "Personal"
+
+portfolio-digest import list
+portfolio-digest import undo 12
 ```
+
+NZX and ASX codes map automatically to Yahoo's `.NZ` and `.AX` symbols. NASDAQ and NYSE
+codes are used as-is. Set an exception for a right, renamed or delisted security with
+`portfolio-digest prices symbol NZX:AIRRG AIRRG.NZ`. See the deployment guide for the
+twice-daily schedule and recovery commands. Stored closes are raw, unadjusted prices in
+major currency units. ADJUSTMENT trades are the single source of quantity changes for the
+returns engine (#4). Split rows are used only for price un-adjustment and quality checks;
+do not apply them to quantities or split-adjust these closes again.
+
+The app also reads ASB Securities contract notes from one Gmail label with read-only
+access, and supports manual corrections, gifted shares and opening balances. See
+[docs/IMPORTING.md](docs/IMPORTING.md) for file layouts, Gmail setup and the full workflow.
 
 ## Development
 

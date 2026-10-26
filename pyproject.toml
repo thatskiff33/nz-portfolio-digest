@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "portfolio-digest"
+version = "0.1.0"
+description = "Self-hosted NZ share portfolio tracker with scheduled email and dashboard reports."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=2.0.30",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "pydantic-settings>=2.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+portfolio-digest = "portfolio_digest.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/portfolio_digest"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
+ignore = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

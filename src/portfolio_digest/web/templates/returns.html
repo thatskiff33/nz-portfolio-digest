@@ -1,0 +1,10 @@
+{% macro returns(result) %}
+    {% for field in ['capital', 'dividends', 'currency', 'total'] %}
+        <td>{{ (result.amounts|attr(field) if result else none)|money }}
+            <small>{{ (result.percentages|attr(field))|money ~ '%' if result and result.percentages else 'n/a' }}</small>
+        </td>
+    {% endfor %}
+    {% for field in ['gross_dividends', 'withholding_tax', 'imputation_gross_up'] %}
+        <td>{{ (result|attr(field) if result else none)|money }}</td>
+    {% endfor %}
+{% endmacro %}

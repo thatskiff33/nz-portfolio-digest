@@ -5,7 +5,7 @@ import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import inspect, text
+from sqlalchemy import CheckConstraint, inspect, text
 from sqlalchemy.exc import IntegrityError, StatementError
 
 from portfolio_digest import migrate
@@ -285,9 +285,16 @@ def test_nan_is_refused_by_the_database(engine, table, column):
             ),
             {"i": instrument.id},
         )
-    with pytest.raises(IntegrityError), engine.begin() as conn:
-        # Table and column names come from our own metadata, not from input.
+    guard = f"ck_{table}_{column}_not_nan"
+    with pytest.raises(IntegrityError) as exc, engine.begin() as conn:
+        # Other checks (e.g. net <= gross) can reject NaN by chance. Drop them for this
+        # transaction, which rolls back, so only the NaN guard is being tested.
+        # Table, column and constraint names come from our own metadata, not from input.
+        for other in Base.metadata.tables[table].constraints:
+            if isinstance(other, CheckConstraint) and other.name != guard:
+                conn.execute(text(f"ALTER TABLE {table} DROP CONSTRAINT {other.name}"))
         conn.execute(text(f"UPDATE {table} SET {column} = 'NaN'"))  # noqa: S608
+    assert exc.value.orig.diag.constraint_name == guard
 
 
 @pytest.mark.parametrize("value", [0.1, float("nan"), Decimal("NaN"), Decimal("Infinity")])

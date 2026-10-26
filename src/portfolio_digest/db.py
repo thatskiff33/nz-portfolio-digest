@@ -14,8 +14,9 @@ def make_engine(url: str | None = None) -> Engine:
     url = url or get_settings().database_url.get_secret_value()
     try:
         return create_engine(url, pool_pre_ping=True)
-    except (ArgumentError, ValueError):
-        # The original message can quote the URL, password and all.
+    except (ArgumentError, ValueError, ImportError):
+        # The original message can quote the URL, password and all. ImportError means a
+        # driver we do not ship, such as mysql://.
         raise ConfigError("DATABASE_URL is not a valid database URL. See .env.example.") from None
 
 

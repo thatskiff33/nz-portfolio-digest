@@ -38,6 +38,7 @@ def test_invalid_settings_are_reported_without_their_value(
         "s3cret-pass",
         "postgresql+psycopg://portfolio:s3cret-pass@db:notaport/portfolio",
         "nosuchdriver://portfolio:s3cret-pass@db/portfolio",
+        "mysql://portfolio:s3cret-pass@db/portfolio",
     ],
 )
 def test_a_malformed_database_url_is_never_echoed(url):

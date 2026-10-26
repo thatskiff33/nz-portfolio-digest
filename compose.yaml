@@ -60,8 +60,9 @@ services:
     # Shows as unhealthy in `docker compose ps` when no dump has been written for 26 hours.
     healthcheck:
       test: ["CMD-SHELL", "find /backups -maxdepth 1 -name 'portfolio-*.dump' -mmin -1560 | grep -q ."]
-      interval: 15m
+      interval: 5m
       timeout: 10s
+      retries: 1
       start_period: 5m
     depends_on:
       db:

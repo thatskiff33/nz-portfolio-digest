@@ -33,7 +33,7 @@ Take a fresh backup first, so a migration that goes wrong costs nothing:
 ```sh
 cd ~/portfolio-digest
 git pull
-docker compose run --rm backup --once            # prints "backup: wrote ..."
+docker compose run --rm backup --once            # stop here unless it prints "backup: wrote"
 docker compose up -d db backup
 docker compose run --rm --build migrate
 docker compose run --rm migrate health
@@ -46,7 +46,8 @@ The `backup` service dumps the database when it starts and every 24 hours after 
 that user can read them. Copy the folder into your normal off-server backups.
 
 Dumps older than `BACKUP_KEEP_DAYS` (default 14) are deleted, but only straight after a
-new dump succeeds. If backups start failing, the old ones stay until it is fixed.
+new dump succeeds. If backups start failing, the old ones stay until it is fixed, and the
+service tries again every 5 minutes.
 
 To check backups are working:
 
@@ -73,7 +74,7 @@ stop after `mkdir -p backups`. Then start only the database, restore as above, a
 from `migrate`:
 
 ```sh
-docker compose up -d db
+docker compose up -d --wait db                   # waits until the database is ready
 docker compose exec -T db pg_restore -U postgres --clean --if-exists --single-transaction \
   -d portfolio < backups/portfolio-YYYYMMDDTHHMMSSZ.dump
 docker compose up -d backup

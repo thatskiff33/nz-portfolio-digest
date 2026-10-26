@@ -2,7 +2,8 @@
 # Dumps the portfolio database with pg_dump. Connection details come from the usual PG*
 # environment variables.
 #
-#   backup.sh          dump now and then every 24 hours (the `backup` service)
+#   backup.sh          dump now and then every 24 hours (the `backup` service); a failed
+#                      dump is retried every 5 minutes, e.g. while the database starts up
 #   backup.sh --once   dump once and exit, non-zero if it failed (e.g. before an update)
 #
 # Dumps older than BACKUP_KEEP_DAYS are pruned, but only straight after a dump succeeds, so
@@ -36,7 +37,7 @@ dump_once() {
     echo "backup: FAILED at $stamp. Older backups have been kept." >&2
     return 1
   fi
-  mv "$target.partial" "$target"
+  mv "$target.partial" "$target" || return 1
   echo "backup: wrote $target"
 
   find "$DUMP_DIR" -maxdepth 1 -name 'portfolio-*.dump' \
@@ -51,6 +52,9 @@ if [ "${1:-}" = "--once" ]; then
 fi
 
 while true; do
-  dump_once || true
-  sleep 86400
+  if dump_once; then
+    sleep 86400
+  else
+    sleep 300
+  fi
 done

@@ -470,3 +470,12 @@ class ImportIncomeMatch(Base):
     income_id: Mapped[int] = mapped_column(
         ForeignKey("income.id", ondelete="CASCADE"), primary_key=True, index=True
     )
+
+
+class AlertState(Base):
+    """Last delivery per portfolio, rule and holding; cleared rules are removed."""
+
+    __tablename__ = "alert_states"
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id"), primary_key=True)
+    rule_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

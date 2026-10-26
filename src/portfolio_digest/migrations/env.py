@@ -17,9 +17,7 @@ if context.config.config_file_name is not None:
 
 
 def _url() -> str:
-    # A connection passed in by the CLI or tests takes priority over settings.
-    configured = context.config.attributes.get("database_url")
-    return configured or get_settings().database_url.get_secret_value()
+    return get_settings().database_url.get_secret_value()
 
 
 def _render_item(type_, obj, autogen_context):
@@ -45,6 +43,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    # A connection passed in by the CLI or tests takes priority over settings.
     connection = context.config.attributes.get("connection")
     if connection is not None:
         _run(connection)

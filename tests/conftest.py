@@ -35,28 +35,22 @@ def database_url() -> str:
 
 
 @pytest.fixture
-def engine(database_url: str, monkeypatch: pytest.MonkeyPatch) -> Engine:
-    """A freshly migrated, empty database. The CLI sees it through DATABASE_URL."""
+def empty_engine(database_url: str, monkeypatch: pytest.MonkeyPatch) -> Engine:
+    """A database with no tables at all. The CLI sees it through DATABASE_URL."""
     monkeypatch.setenv("DATABASE_URL", database_url)
     get_settings.cache_clear()
     eng = make_engine(database_url)
     _reset_schema(eng)
-    migrate.upgrade(eng)
     yield eng
     eng.dispose()
     get_settings.cache_clear()
 
 
 @pytest.fixture
-def empty_engine(database_url: str, monkeypatch: pytest.MonkeyPatch) -> Engine:
-    """A database with no tables at all."""
-    monkeypatch.setenv("DATABASE_URL", database_url)
-    get_settings.cache_clear()
-    eng = make_engine(database_url)
-    _reset_schema(eng)
-    yield eng
-    eng.dispose()
-    get_settings.cache_clear()
+def engine(empty_engine: Engine) -> Engine:
+    """A freshly migrated, empty database."""
+    migrate.upgrade(empty_engine)
+    return empty_engine
 
 
 @pytest.fixture

@@ -3,6 +3,7 @@ from sqlalchemy import text
 
 from portfolio_digest import __version__
 from portfolio_digest.cli import main
+from portfolio_digest.validation import PORTFOLIO_NAME_MAX
 
 UNREACHABLE = "postgresql+psycopg://user:s3cret-pass@127.0.0.1:1/nowhere"
 
@@ -99,7 +100,7 @@ def test_portfolio_add_rejects_duplicate_names_ignoring_case(engine, capsys, dup
     "args",
     [
         ["   "],
-        ["x" * 121],
+        ["x" * (PORTFOLIO_NAME_MAX + 1)],
         ["Other", "--base-currency", "nz"],
         ["Other", "--base-currency", "dollars"],
     ],

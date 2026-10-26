@@ -62,10 +62,8 @@ def test_migrations_create_every_named_constraint_and_index(engine):
 
 
 def test_downgrade_then_upgrade_round_trips(engine):
-    config = migrate.alembic_config(engine)
     with engine.begin() as conn:
-        config.attributes["connection"] = conn
-        command.downgrade(config, "base")
+        command.downgrade(migrate.alembic_config(conn), "base")
     assert EXPECTED_TABLES.isdisjoint(inspect(engine).get_table_names())
     migrate.upgrade(engine)
     assert migrate.current_revision(engine) == migrate.head_revision()
@@ -146,17 +144,21 @@ def test_instrument_codes_must_be_upper_case_without_spaces(engine, exchange, co
         session.add(Instrument(exchange=exchange, code=code, name="x", currency="NZD"))
 
 
+def _fx_rate(**overrides):
+    values = {
+        "rate_date": date(2026, 10, 1),
+        "currency": "AUD",
+        "base_currency": "NZD",
+        "rate": Decimal("1.1"),
+        "source": "test",
+    }
+    values.update(overrides)
+    return FxRate(**values)
+
+
 def test_fx_rate_cannot_convert_a_currency_to_itself(engine):
     with pytest.raises(IntegrityError), session_scope(engine) as session:
-        session.add(
-            FxRate(
-                rate_date=date(2026, 10, 1),
-                currency="NZD",
-                base_currency="NZD",
-                rate=Decimal(1),
-                source="test",
-            )
-        )
+        session.add(_fx_rate(currency="NZD", rate=Decimal(1)))
 
 
 @pytest.mark.parametrize("name", ["", "   "])
@@ -269,15 +271,7 @@ def test_nan_is_refused_by_the_database(engine, table, column):
         portfolio, instrument = _seed(session)
         session.add(_trade(portfolio, instrument))
         session.add(_income(portfolio, instrument))
-        session.add(
-            FxRate(
-                rate_date=date(2026, 10, 1),
-                currency="AUD",
-                base_currency="NZD",
-                rate=Decimal("1.1"),
-                source="test",
-            )
-        )
+        session.add(_fx_rate())
         session.execute(
             text(
                 "INSERT INTO prices (instrument_id, price_date, close, source) "

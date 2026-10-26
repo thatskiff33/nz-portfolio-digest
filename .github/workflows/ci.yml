@@ -67,6 +67,6 @@ jobs:
       - run: docker build -t portfolio-digest:ci .
       - run: docker run --rm portfolio-digest:ci --version
       - name: Compose file is valid
-        run: POSTGRES_ADMIN_PASSWORD=x APP_DB_PASSWORD=x docker compose config --quiet
+        run: POSTGRES_ADMIN_PASSWORD=x APP_DB_PASSWORD=x DASHBOARD_PASSWORD=x docker compose config --quiet
       - name: Shell scripts are valid
         run: shellcheck scripts/backup.sh scripts/db-init/*.sh

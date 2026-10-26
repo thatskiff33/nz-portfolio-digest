@@ -4,6 +4,7 @@ import csv
 import io
 from html import escape
 
+from portfolio_digest.formatting import display_number
 from portfolio_digest.returns import _financial_math
 from portfolio_digest.year_end import NOTES, YearEnd
 
@@ -55,9 +56,6 @@ def render_csv(report: YearEnd) -> str:
 
 @_financial_math
 def render_html(report: YearEnd, name: str) -> str:
-    def money(value):
-        return f"{value:,.2f}"
-
     def table(headers, rows):
         head = "".join(
             f'<th scope="col" style="padding:8px;text-align:left">{escape(h)}</th>' for h in headers
@@ -81,7 +79,7 @@ def render_html(report: YearEnd, name: str) -> str:
     tax = table(
         ["Holding", *(title for _, title in COLUMNS)],
         [
-            [row.label, *(money(getattr(row, f)) for f, _ in COLUMNS)]
+            [row.label, *(display_number(getattr(row, f)) for f, _ in COLUMNS)]
             for row in (*report.rows, report.total)
         ],
     )
@@ -90,10 +88,10 @@ def render_html(report: YearEnd, name: str) -> str:
         [
             [
                 r.label,
-                money(r.opening),
-                money(r.closing),
-                money(r.amounts.total),
-                f"{r.percentages.total:.2f}%" if r.percentages else "N/A",
+                display_number(r.opening),
+                display_number(r.closing),
+                display_number(r.amounts.total),
+                f"{display_number(r.percentages.total)}%" if r.percentages else "N/A",
             ]
             for r in (*report.performance.holdings, report.performance.total)
         ],
@@ -128,7 +126,7 @@ def render_html(report: YearEnd, name: str) -> str:
 <h2>Portfolio performance</h2>
 <p>Opening: 31 March {report.year - 1}. Closing: 31 March {report.year}.</p>{performance}
 <h2>Foreign shares cost</h2>
-<p>Peak historical cost: <strong>NZ${money(report.foreign_peak)}</strong>
+<p>Peak historical cost: <strong>NZ${display_number(report.foreign_peak)}</strong>
  on {report.foreign_peak_day}. {warning}</p>
 <h2>How to read this summary</h2><ul>{notes}</ul>
 <h2>Data quality</h2><ul>{flags or "<li>No carried-forward data flags.</li>"}</ul>

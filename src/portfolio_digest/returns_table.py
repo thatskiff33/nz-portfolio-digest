@@ -1,16 +1,8 @@
 """Plain text Sharesight-style columns; round only for display."""
 
-from decimal import ROUND_HALF_UP, Decimal, localcontext
-
+from portfolio_digest.formatting import display_number
 from portfolio_digest.returns import Report, Result
 from portfolio_digest.terminal import terminal_text
-
-
-def _number(value: Decimal) -> str:
-    with localcontext() as context:
-        # Integer digits, two fractional places and a possible rounding carry.
-        context.prec = max(context.prec, value.adjusted() + 4)
-        return f"{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
 
 
 def render_table(report: Report) -> str:
@@ -28,11 +20,11 @@ def render_table(report: Report) -> str:
         percentages = result.percentages
         values = [
             terminal_text(result.label) + (" *" if result.flags else ""),
-            _number(result.closing),
+            display_number(result.closing),
         ]
         for field in ("capital", "dividends", "currency", "total"):
-            percent = f"{_number(getattr(percentages, field))}%" if percentages else "n/a"
-            values.append(f"{_number(getattr(result.amounts, field))} ({percent})")
+            percent = f"{display_number(getattr(percentages, field))}%" if percentages else "n/a"
+            values.append(f"{display_number(getattr(result.amounts, field))} ({percent})")
         return values
 
     rows = [headers]

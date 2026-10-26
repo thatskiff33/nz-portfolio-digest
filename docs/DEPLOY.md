@@ -83,30 +83,122 @@ also fails the source request, allowing other instruments and FX fallbacks to co
 For rows fetched before this convention was introduced, run
 `portfolio-digest prices fetch --backfill` once to replace any existing adjusted closes.
 
-### Twice-daily schedule
+### Shared price and report schedule
 
-The checked-in systemd user timer runs at 10:30 and 18:30 in `Pacific/Auckland`, including
-daylight-saving changes. The first run follows the US close and the second follows the NZX
-and ASX closes. From early November to mid-March (the second Sunday in March),
-the US uses standard time while NZ uses daylight time. The FX day then closes at
-17:00 New York, which is 11:00 NZDT.
-The 10:30 run gets US share closes, but the previous day's exchange rate only arrives
-at the 18:30 run. Both scheduled times remain as decided by the owner.
-Install it as the server account that owns this checkout:
+The `scheduler` container reads `schedules.toml`. This is the one place to change times,
+report periods and recipients. Prices run at 10:30 and 18:30 Auckland time. Weekly reports
+run Sunday at 20:00 for the preceding seven completed calendar days. Monthly reports run
+on the 1st at 08:00 for the previous calendar month. Today's unfinished markets are excluded.
+All schedules use `Pacific/Auckland`, including daylight saving. The US FX close can fall
+after the morning fetch during NZ summer, so the evening fetch supplies that day's rate.
+
+If you previously installed the price systemd timer, disable it before starting the
+container, so price fetching has just one scheduler:
 
 ```sh
-mkdir -p ~/.config/systemd/user
-cp deploy/systemd/portfolio-digest-prices.{service,timer} ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now portfolio-digest-prices.timer
-systemctl --user list-timers portfolio-digest-prices.timer
+systemctl --user disable --now portfolio-digest-prices.timer
+# After completing the mail settings below:
+docker compose up -d --build scheduler
 ```
 
-The service expects the checkout at `~/portfolio-digest`; edit its `WorkingDirectory` if
-you installed elsewhere. Enable lingering once with
-`loginctl enable-linger "$USER"` if user services do not run while logged out. Inspect the
-last scheduled run with
-`journalctl --user -u portfolio-digest-prices.service --since today`.
+Edit the server copy of `schedules.toml`, then `docker compose restart scheduler`.
+`recipients = []` uses `MAIL_OWNER`; otherwise supply a list of mailbox addresses, for example
+`recipients = ["owner@example.invalid", "other@example.invalid"]`. It applies to every report.
+Keep real addresses and private monitoring URLs in the server copy only, never commit them.
+An optional `kuma_push_url` is pinged only after successful delivery. Ping failures are
+logged without the URL and do not fail the send.
+
+Each `[[schedules]]` needs a unique `name`, `kind` (`prices` or `report`), `frequency`
+(`daily`, `weekly` or `monthly`) and local `at = "HH:MM"`. Weekly schedules use a lower-case
+`weekday`; monthly schedules use `day` (1 to 28). Reports use `days` (1 to 3660, default 7)
+or `period = "last_month"`. Unknown fields and invalid settings fail before jobs start.
+A time inside the spring clock gap runs at the first valid minute afterwards. A repeated
+autumn time runs once, at its first occurrence.
+
+Pending runs live in the `scheduler-state` volume. First startup schedules future jobs;
+restarts run one catch-up per schedule for a missed occurrence, retaining its original
+report period, then resume future runs. Failed jobs exit non-zero, are logged and are retried
+by Compose on restart. Mail delivery is at least once: a crash after provider acceptance
+but before saving state can cause a duplicate. Partial recipient rejection also fails the
+send; some recipients may already have received it. Check the provider before a manual retry.
+Run only one scheduler replica. Inspect it with `docker compose logs scheduler`.
+
+## Email reports
+
+### Gmail (default)
+
+Enable Google 2-Step Verification on the sending account. In Google Account → Security →
+App passwords (or https://myaccount.google.com/apppasswords), create an app password named
+"Portfolio digest". If App passwords is unavailable, the account administrator may block
+it; use another mail provider. Put the generated app password, without grouping spaces,
+in the server's private `.env`, never the normal account password:
+
+```dotenv
+MAILER=gmail
+MAIL_FROM=digest@example.invalid
+MAIL_OWNER=owner@example.invalid
+GMAIL_SMTP_USERNAME=digest@example.invalid
+GMAIL_APP_PASSWORD=<app password, server only>
+```
+
+Use the authenticated Gmail address as `MAIL_FROM`, or a verified Gmail send-as alias.
+Delivery uses Gmail SMTP on port 587 with STARTTLS and certificate verification. Outgoing
+mail settings are separate from the read-only OAuth credentials used by the ASB importer.
+
+### Postmark
+
+Verify the sender/domain in Postmark. Set `MAILER=postmark`, `MAIL_FROM`, `MAIL_OWNER` and
+`POSTMARK_SERVER_TOKEN` (the Server API token, not the account token). Delivery uses the
+HTTPS email API with both HTML and plain text. The first recipient is in To; additional
+recipients are in Bcc. SMTP and SES use private envelope recipients.
+
+### AWS SES
+
+Verify the sender identity in your chosen SES region. In the SES sandbox, verify recipients
+too, or request production access. Set `MAILER=ses`, `AWS_REGION`, `MAIL_FROM` and `MAIL_OWNER`.
+For SMTP, create SES SMTP credentials and set `SES_SMTP_USERNAME` and `SES_SMTP_PASSWORD`.
+These are different from IAM API keys. SMTP uses STARTTLS on port 587.
+
+Alternatively set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, plus `AWS_SESSION_TOKEN`
+for temporary credentials. Supplying the access key selects the boto3 SES API instead of
+SMTP. Grant only `ses:SendRawEmail` for the sending identity. Do not set API keys when
+using SES SMTP. Provider errors never print credentials or email contents.
+
+### Other SMTP servers
+
+Set `MAILER=smtp`, `SMTP_HOST`, `SMTP_PORT`, `MAIL_FROM` and `MAIL_OWNER`. Authentication
+uses optional `SMTP_USERNAME` and `SMTP_PASSWORD`. `SMTP_TLS=starttls` is the default;
+use `SMTP_TLS=ssl` with port 465 for implicit TLS. Certificate verification is always on.
+
+### Send and preview
+
+```sh
+docker compose run --rm migrate report send-now --schedule weekly
+# Preview locally, without loading mail credentials or making any outbound calls:
+portfolio-digest report send-now --schedule weekly --dry-run --out report.html
+# Docker: mount a private writable directory (owned by uid 10001) to retrieve previews:
+docker compose run --rm -v "$PWD/previews:/previews" migrate report send-now \
+  --schedule monthly --dry-run --out /previews/report.html
+```
+
+Dry-run writes `report.html` and `report.txt`. Keep real previews private and out of git.
+The email uses inline styles and table layout, including a table-based value chart that
+works without downloading images. Each market has the requested Sharesight-style columns
+and subtotals, followed by the portfolio total. Missing price/FX data fails the entire
+report with a non-zero exit instead of quietly omitting a holding. Stored stale data can
+be used but is flagged. A failed send also exits non-zero and never pings monitoring.
+
+The reusable model combines all portfolios by listing and reports NZD dollar gains.
+Opening value is the close before the first date; closing value is the last available
+close on or before the last date. Capital gain is local value movement less trade flows
+and fees, translated at closing FX. Currency gain is the residual after actual NZD flows.
+Net dividends exclude withholding tax and imputation credits. These are period dollar
+returns, not percentage or annualised returns. Split adjustments must match stored split
+events and their exact unit ratio. Other adjustments are transfers valued at their
+recorded price, or market price when zero. DRP adjustments matching a dividend's units,
+portfolio and payment date use its net amount as the reinvestment flow. Use one matching
+adjustment per DRP payment; do not also record a buy for the same reinvestment.
+
 
 ## Updating
 
@@ -119,6 +211,7 @@ docker compose run --rm backup --once            # stop here unless it prints "b
 docker compose up -d db backup
 docker compose run --rm --build migrate
 docker compose run --rm migrate health
+docker compose up -d --build scheduler
 ```
 
 ## Backups
@@ -164,6 +257,7 @@ docker compose exec -T db pg_restore -U portfolio --clean --if-exists --single-t
 docker compose up -d backup
 docker compose run --rm --build migrate
 docker compose run --rm migrate health
+docker compose up -d --build scheduler
 ```
 
 ## Notes
@@ -173,3 +267,19 @@ docker compose run --rm migrate health
 - The app and the backups log in as the `portfolio` role, which owns its own database but
   is not a superuser and cannot connect to any other database. The `postgres` superuser
   password is only given to the database container.
+
+## Optional Sekreton deployment action
+
+After first install, the manual `server` action in `.sekreton/config.toml` runs
+`scripts/deploy.sh` over SSH. The server must already have Docker Compose, a `main`
+checkout, its private `.env`, and a working backup directory. Disable the old systemd
+price timer as described above before the first action. Under Settings → Deploy & Publish,
+set `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_CHECKOUT` (absolute path without spaces),
+`DEPLOY_SSH_KEY` and `DEPLOY_KNOWN_HOSTS` (a host key verified independently).
+The deployment identity needs access to that checkout and Docker. Mail and database
+credentials stay in the server's `.env`; the action does not receive them.
+
+The script preserves the server's schedule configuration, fast-forwards `main`, takes a
+backup, builds the app, stops the scheduler while migrating, checks database health and
+starts the services. If a migration fails, the scheduler stays stopped for investigation.
+Deployment does not run automatically on merge.

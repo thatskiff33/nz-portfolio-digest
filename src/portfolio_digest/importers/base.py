@@ -22,7 +22,7 @@ from decimal import ROUND_HALF_EVEN, Decimal, DecimalException, InvalidOperation
 
 from portfolio_digest import markets
 from portfolio_digest.models import TradeType
-from portfolio_digest.validation import InvalidInput
+from portfolio_digest.validation import InvalidInput, contains_control_characters
 
 # Matches the database columns: Quantity is Numeric(24, 8), Money is Numeric(20, 6) and
 # Rate is Numeric(20, 10).
@@ -257,6 +257,13 @@ def checked_money(number: Decimal, what: str) -> Decimal:
     if not number.is_finite() or number.copy_abs() >= Decimal("1e14"):
         raise RowProblem(f"{what} is outside the supported money range.")
     return number
+
+
+def checked_text(value: str, what: str) -> str:
+    """Reject control characters before a field reaches storage."""
+    if contains_control_characters(value):
+        raise RowProblem(f"{what} cannot contain control characters or invalid text.")
+    return value
 
 
 def parse_security_name(value: str | None) -> str | None:

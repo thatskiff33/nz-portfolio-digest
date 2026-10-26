@@ -93,6 +93,18 @@ def test_manual_adjustment_changes_reconciliation_and_mismatch_is_visible(engine
 @pytest.mark.parametrize(
     "old,new,reason",
     [
+        (
+            b"Security code: FPH",
+            b"Security code: FP\x00H",
+            "security code cannot contain control characters",
+        ),
+        (
+            b"Security name: Example Healthcare Limited",
+            b"Security name: Example\x00Healthcare",
+            "security name cannot contain control characters",
+        ),
+        (b"charset=utf-8", b'charset="utf-8\x00"', "encoding we cannot read"),
+        (None, None, "could not read this message"),
         (b"Quantity: 100\n", b"", "contract note is missing: quantity"),
         (
             b"Brokerage: NZD 30.00\nGST: NZD 4.50",
@@ -109,7 +121,7 @@ def test_manual_adjustment_changes_reconciliation_and_mismatch_is_visible(engine
 def test_gmail_cli_builds_importer_and_imports_with_fake_client(
     engine, monkeypatch, capsys, old, new, reason
 ):
-    from portfolio_digest import cli
+    from portfolio_digest import cli, gmail
     from portfolio_digest.config import GmailSettings
 
     class FakeClient:
@@ -127,10 +139,18 @@ def test_gmail_cli_builds_importer_and_imports_with_fake_client(
         def raw_message(self, message_id):
             original = (FIXTURES / "asb-contract-note.eml").read_bytes()
             if message_id == "unreadable":
-                return original.replace(old, new)
+                return original.replace(old, new) if old is not None else b"made-up-unexpected"
             assert message_id == "made-up-message"
             return original
 
+    parse = gmail.parse_contract_note
+
+    def parse_with_unexpected_error(raw, where):
+        if raw == b"made-up-unexpected":
+            raise RuntimeError("made-up-private-message-content")
+        return parse(raw, where)
+
+    monkeypatch.setattr(gmail, "parse_contract_note", parse_with_unexpected_error)
     monkeypatch.setattr(cli, "GmailClient", FakeClient)
     monkeypatch.setattr(cli, "get_gmail_settings", lambda: GmailSettings(label="Made-up ASB label"))
     assert main(["portfolio", "add", "Personal"]) == 0
@@ -139,6 +159,7 @@ def test_gmail_cli_builds_importer_and_imports_with_fake_client(
         output = capsys.readouterr().out
         assert expected + ", skipped 1" in output
         assert f"Skipped message unreadable: {reason}" in output
+        assert "made-up-private-message-content" not in output
     with Session(engine) as session:
         trade = session.scalars(select(Trade)).one()
         assert trade.external_ref == "contract:40012345"

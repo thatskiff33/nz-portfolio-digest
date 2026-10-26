@@ -152,6 +152,14 @@ def test_authorise_cli_passes_force_and_names_env_variable_without_exposing_toke
 @pytest.mark.parametrize(
     "old,new,reason",
     [
+        (b"Security code: FPH", b"Security code: FP\x00H", "control characters"),
+        (
+            b"Security name: Example Healthcare Limited",
+            b"Security name: Example\x00Healthcare",
+            "control characters",
+        ),
+        (b"charset=utf-8", b'charset="utf-8\x00"', "encoding we cannot read"),
+        (None, None, "could not read this message"),
         (b"Market: NZX", b"Market: LSE", "exchange"),
         (
             b"Brokerage: NZD 30.00\nGST: NZD 4.50",
@@ -168,7 +176,9 @@ def test_authorise_cli_passes_force_and_names_env_variable_without_exposing_toke
         (b"charset=utf-8", b"charset=made-up-encoding", "encoding we cannot read"),
     ],
 )
-def test_unreadable_gmail_notes_are_skipped_without_blocking_later_messages(old, new, reason):
+def test_unreadable_gmail_notes_are_skipped_without_blocking_later_messages(
+    monkeypatch, old, new, reason
+):
     original = (FIXTURES / "asb-contract-note.eml").read_bytes()
 
     class Client:
@@ -179,8 +189,20 @@ def test_unreadable_gmail_notes_are_skipped_without_blocking_later_messages(old,
             return iter(("unreadable", "valid"))
 
         def raw_message(self, message_id):
-            return original.replace(old, new) if message_id == "unreadable" else original
+            if message_id == "unreadable":
+                return original.replace(old, new) if old is not None else b"made-up-unexpected"
+            return original
 
+    from portfolio_digest import gmail
+
+    parse = gmail.parse_contract_note
+
+    def parse_with_unexpected_error(raw, where):
+        if raw == b"made-up-unexpected":
+            raise RuntimeError("made-up-private-message-content")
+        return parse(raw, where)
+
+    monkeypatch.setattr(gmail, "parse_contract_note", parse_with_unexpected_error)
     importer = AsbGmailImporter(Client(), "ASB notes")
     for _ in range(2):
         result = importer.fetch()
@@ -189,3 +211,20 @@ def test_unreadable_gmail_notes_are_skipped_without_blocking_later_messages(old,
         assert len(result.skipped) == 1
         assert result.skipped[0].where == "message unreadable"
         assert reason in result.skipped[0].message
+        assert "made-up-private-message-content" not in str(result.skipped[0])
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, SystemExit])
+def test_gmail_message_interrupts_propagate(failure):
+    class Client:
+        def label_id(self, name):
+            return "made-up-label"
+
+        def message_ids(self, label_id):
+            return iter(("interrupted",))
+
+        def raw_message(self, message_id):
+            raise failure()
+
+    with pytest.raises(failure):
+        AsbGmailImporter(Client(), "ASB notes").fetch()

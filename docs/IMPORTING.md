@@ -58,7 +58,11 @@ including any GST, as email fees include both amounts. No tax amount is inferred
 The combined brokerage and GST must be less than 100,000,000,000,000.
 Contract numbers must be 1 to 119 digits. Security names must be 255 characters or
 fewer; longer names are refused rather than shortened. Gmail skips these unreadable
-notes and continues with later messages.
+notes and continues with later messages. Extracted email fields, share codes and
+Sharesight Comments containing control characters or invalid text are refused before
+storage. Invalid email encodings are skipped too. Unexpected errors reading an individual
+Gmail message produce a generic skip notice with its message ID and no message contents;
+find that message under the configured label and correct it explicitly.
 
 Each unreadable row is named by line number and the whole run fails, so a damaged row can
 never silently leave the holding short. A saved contract-note email can also be tested or

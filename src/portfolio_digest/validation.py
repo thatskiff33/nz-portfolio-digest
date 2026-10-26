@@ -36,3 +36,8 @@ def portfolio_name(value: str) -> str:
     if len(name) > PORTFOLIO_NAME_MAX:
         raise InvalidInput(f"Portfolio name must be {PORTFOLIO_NAME_MAX} characters or fewer.")
     return name
+
+
+def contains_control_characters(value: str) -> bool:
+    """Control characters and lone surrogates cannot form valid stored fields."""
+    return any(unicodedata.category(ch) in ("Cc", "Cs") for ch in value)

@@ -342,3 +342,62 @@ def test_asb_email_security_name_column_boundary(length):
         assert not result.trades
         assert result.errors[0].where == "email"
         assert "Security name must be 255 characters or fewer" in result.errors[0].message
+
+
+@pytest.mark.parametrize("control", ["\x00", "\x01", "\t", "\x0b", "\x7f", "\x85"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "Security code: FPH",
+        "Security name: Example Healthcare Limited",
+        "Contract note number: 40012345",
+    ],
+)
+def test_asb_email_fields_refuse_controls(field, control):
+    label, value = field.split(": ", 1)
+    content = fixture("asb-contract-note.eml").replace(
+        field.encode(), f"{label}: {value}{control}".encode()
+    )
+    result = AsbEmailImporter().parse(content, ParseContext())
+    assert not result.trades
+    assert result.errors[0].where == "email"
+    assert "control characters" in result.errors[0].message
+
+
+def test_asb_email_invalid_charset_is_a_file_problem():
+    content = fixture("asb-contract-note.eml").replace(b"charset=utf-8", b'charset="utf-8\x00"')
+    with pytest.raises(FileProblem, match="encoding we cannot read"):
+        AsbEmailImporter().parse(content, ParseContext())
+
+
+def test_statement_nul_in_share_code_is_a_located_row_error():
+    result = AsbStatementImporter().parse(
+        b"Heading\n14/03/2016 30001234 Buy FP\x00H NZX 100 9.8500 30.00 985.00\n",
+        ParseContext(),
+    )
+    assert not result.trades
+    assert len(result.errors) == 1
+    assert result.errors[0].where == "line 2"
+    assert "control characters" in result.errors[0].message
+
+
+def test_sharesight_nul_in_comments_is_a_located_row_error():
+    result = SharesightCsvImporter().parse(
+        b"Trade Date,Instrument Code,Market Code,Quantity,Price in Dollars,"
+        b"Transaction Type,Comments\n"
+        b"03/06/2024,AIR,NZX,1,1,BUY,Made-up\x00comment\n",
+        ParseContext(),
+    )
+    assert not result.trades
+    assert len(result.errors) == 1
+    assert result.errors[0].where == "line 2"
+    assert "Comments cannot contain control characters" in result.errors[0].message
+
+
+@pytest.mark.parametrize("control", ["\x00", "\x01", "\x7f", "\x85", "\t", "\n"])
+def test_instrument_codes_refuse_controls(control):
+    from portfolio_digest.markets import instrument_code
+    from portfolio_digest.validation import InvalidInput
+
+    with pytest.raises(InvalidInput, match="control characters"):
+        instrument_code(f"FPH{control}")

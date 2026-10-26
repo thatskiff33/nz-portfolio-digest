@@ -52,6 +52,7 @@ from portfolio_digest.importers.base import (
     RowError,
     RowProblem,
     checked_money,
+    checked_text,
     decode_text,
     listing,
     parse_date,
@@ -138,14 +139,14 @@ def email_text(raw: bytes) -> tuple[str, str]:
         return subject, ""
     try:
         body = part.get_content()
-    except (LookupError, UnicodeError):
+    except (LookupError, UnicodeError, ValueError):
         raise FileProblem("The email's text is in an encoding we cannot read.") from None
     if part.get_content_type() == "text/html":
         body = _html_to_text(body)
     return subject, body
 
 
-_LABEL_LINE = re.compile(r"^\s*([A-Za-z][A-Za-z .'/&-]*?)\s*(?::|\t+)\s*(\S.*?)\s*$")
+_LABEL_LINE = re.compile(r"^\s*([A-Za-z][A-Za-z .'/&-]*?)\s*(?::|\t+)(.*)$")
 
 _LABELS = {
     "contract": ("contract note number", "contract note no", "contract number", "contract no"),
@@ -167,13 +168,16 @@ _CURRENCY_PREFIX = re.compile(r"^\s*([A-Z]{3})\b")
 
 def _fields(body: str) -> dict[str, str]:
     fields: dict[str, str] = {}
-    for line in body.splitlines():
-        match = _LABEL_LINE.match(line)
+    for line in body.split("\n"):
+        # CRLF is a line ending, not part of a field. Keep other controls for validation.
+        match = _LABEL_LINE.match(line.removesuffix("\r"))
         if not match:
             continue
         ours = _LABEL_LOOKUP.get(" ".join(match.group(1).lower().split()))
-        if ours and ours not in fields:
-            fields[ours] = match.group(2)
+        if ours:
+            value = checked_text(match.group(2), _LABELS[ours][0]).strip()
+            if value and ours not in fields:
+                fields[ours] = value
     return fields
 
 

@@ -5,7 +5,7 @@ goes through `exchange_code()` so an instrument is stored once, under one name, 
 file it came from.
 """
 
-from portfolio_digest.validation import InvalidInput
+from portfolio_digest.validation import InvalidInput, contains_control_characters
 
 # Canonical exchange code -> the currency its listings trade in.
 EXCHANGE_CURRENCY = {
@@ -49,6 +49,8 @@ def exchange_currency(exchange: str) -> str:
 
 def instrument_code(value: str) -> str:
     """A listing code as the exchange writes it: upper case, no spaces."""
+    if contains_control_characters(value):
+        raise InvalidInput("Share code cannot contain control characters or invalid text.")
     code = value.strip().upper()
     if not code or any(ch.isspace() for ch in code):
         raise InvalidInput(f"{value!r} is not a share code such as AIR or FPH.")

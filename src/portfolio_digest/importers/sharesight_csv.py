@@ -25,6 +25,7 @@ from portfolio_digest.importers.base import (
     ParseResult,
     RowError,
     RowProblem,
+    checked_text,
     invert_rate,
     listing,
     parse_date,
@@ -122,5 +123,5 @@ class SharesightCsvImporter(Importer):
             fx_rate=fx_rate,
             fx_base=base if fx_rate is not None else None,
             external_ref=refs.ref(trade_date, kind, exchange, code, quantity, price, fees),
-            notes=row.get("comments") or None,
+            notes=checked_text(row.get("comments", ""), "Comments") or None,
         )

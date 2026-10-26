@@ -168,6 +168,12 @@ class AsbGmailImporter:
                 result.skipped.append(RowError(where, "not an ASB contract note"))
             except (FileProblem, RowProblem) as exc:
                 result.skipped.append(RowError(where, str(exc)))
+            except Exception:
+                result.skipped.append(
+                    RowError(
+                        where, "could not read this message; check it and correct it explicitly"
+                    )
+                )
         return result
 
 

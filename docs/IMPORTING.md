@@ -55,7 +55,10 @@ portfolio-digest import asb-statement imports/asb-history.txt --portfolio "Perso
 Statement fees include brokerage plus GST when a separate GST column appears between
 Brokerage and Consideration. Without that column, Brokerage must contain the total fee
 including any GST, as email fees include both amounts. No tax amount is inferred.
-Contract numbers must be 1 to 119 digits.
+The combined brokerage and GST must be less than 100,000,000,000,000.
+Contract numbers must be 1 to 119 digits. Security names must be 255 characters or
+fewer; longer names are refused rather than shortened. Gmail skips these unreadable
+notes and continues with later messages.
 
 Each unreadable row is named by line number and the whole run fails, so a damaged row can
 never silently leave the holding short. A saved contract-note email can also be tested or
@@ -111,7 +114,7 @@ portfolio-digest trade add --portfolio "Personal" --date 2024-06-30 \
 
 Types are `buy`, `sell`, `opening_balance` and `adjustment`. Buy, sell and opening-balance
 quantities must be positive. Adjustments may be positive or negative. Manual fees cannot
-be negative.
+be negative. An optional `--name` must be 255 characters or fewer.
 
 ## Reconciliation
 

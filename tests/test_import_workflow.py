@@ -90,7 +90,25 @@ def test_manual_adjustment_changes_reconciliation_and_mismatch_is_visible(engine
     assert "holding(s) do not match" in output.err
 
 
-def test_gmail_cli_builds_importer_and_imports_with_fake_client(engine, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "old,new,reason",
+    [
+        (b"Quantity: 100\n", b"", "contract note is missing: quantity"),
+        (
+            b"Brokerage: NZD 30.00\nGST: NZD 4.50",
+            b"Brokerage: NZD 99999999999999\nGST: NZD 1",
+            "Fees is outside the supported money range",
+        ),
+        (
+            b"Security name: Example Healthcare Limited",
+            b"Security name: " + b"A" * 300,
+            "Security name must be 255 characters or fewer",
+        ),
+    ],
+)
+def test_gmail_cli_builds_importer_and_imports_with_fake_client(
+    engine, monkeypatch, capsys, old, new, reason
+):
     from portfolio_digest import cli
     from portfolio_digest.config import GmailSettings
 
@@ -109,7 +127,7 @@ def test_gmail_cli_builds_importer_and_imports_with_fake_client(engine, monkeypa
         def raw_message(self, message_id):
             original = (FIXTURES / "asb-contract-note.eml").read_bytes()
             if message_id == "unreadable":
-                return original.replace(b"Quantity: 100\n", b"")
+                return original.replace(old, new)
             assert message_id == "made-up-message"
             return original
 
@@ -120,7 +138,7 @@ def test_gmail_cli_builds_importer_and_imports_with_fake_client(engine, monkeypa
         assert main(["import", "asb-gmail", "--portfolio", "Personal"]) == 0
         output = capsys.readouterr().out
         assert expected + ", skipped 1" in output
-        assert "Skipped message unreadable: contract note is missing: quantity" in output
+        assert f"Skipped message unreadable: {reason}" in output
     with Session(engine) as session:
         trade = session.scalars(select(Trade)).one()
         assert trade.external_ref == "contract:40012345"
@@ -407,3 +425,36 @@ def test_manual_negative_fees_are_refused(capsys):
         == 2
     )
     assert "Fees cannot be negative" in capsys.readouterr().err
+
+
+def test_manual_oversized_security_name_is_refused_before_storage(monkeypatch, capsys):
+    from portfolio_digest import cli
+
+    def unexpected_database_access():
+        pytest.fail("Invalid security names must be refused before database access.")
+
+    monkeypatch.setattr(cli, "make_engine", unexpected_database_access)
+    assert (
+        main(
+            [
+                "trade",
+                "add",
+                "--portfolio",
+                "Made-up",
+                "--date",
+                "2024-01-01",
+                "--type",
+                "buy",
+                "--exchange",
+                "NZX",
+                "--code",
+                "AIR",
+                "--quantity",
+                "1",
+                "--name",
+                "A" * 256,
+            ]
+        )
+        == 2
+    )
+    assert "Security name must be 255 characters or fewer" in capsys.readouterr().err

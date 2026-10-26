@@ -300,3 +300,45 @@ def test_sharesight_brokerage_arithmetic_error_is_a_located_row_error():
         result = SharesightCsvImporter().parse(content, ParseContext())
     assert not result.trades
     assert str(result.errors[0]) == "line 2: Brokerage is outside the supported money range."
+
+
+@pytest.mark.parametrize(
+    "gst,expected",
+    [("0.999999", Decimal("99999999999999.999999")), ("1", None), ("1.000001", None)],
+)
+@pytest.mark.parametrize("source", ["email", "statement"])
+def test_asb_combined_fees_fit_money_column(source, gst, expected):
+    if source == "email":
+        content = fixture("asb-contract-note.eml").replace(
+            b"Brokerage: NZD 30.00\nGST: NZD 4.50",
+            f"Brokerage: NZD 99999999999999\nGST: NZD {gst}".encode(),
+        )
+        result = AsbEmailImporter().parse(content, ParseContext())
+        where = "email"
+    else:
+        content = f"14/03/2016 30001234 Buy FPH NZX 100 9.8500 99999999999999 {gst} 985.00".encode()
+        result = AsbStatementImporter().parse(content, ParseContext())
+        where = "line 1"
+    if expected is None:
+        assert not result.trades
+        assert len(result.errors) == 1
+        assert result.errors[0].where == where
+        assert "Fees is outside the supported money range" in result.errors[0].message
+    else:
+        assert not result.errors
+        assert result.trades[0].fees == expected
+
+
+@pytest.mark.parametrize("length", [255, 256])
+def test_asb_email_security_name_column_boundary(length):
+    content = fixture("asb-contract-note.eml").replace(
+        b"Security name: Example Healthcare Limited", b"Security name: " + b"A" * length
+    )
+    result = AsbEmailImporter().parse(content, ParseContext())
+    if length == 255:
+        assert not result.errors
+        assert result.trades[0].name == "A" * length
+    else:
+        assert not result.trades
+        assert result.errors[0].where == "email"
+        assert "Security name must be 255 characters or fewer" in result.errors[0].message

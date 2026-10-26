@@ -22,6 +22,7 @@ from portfolio_digest.importers.base import (
     parse_money,
     parse_price,
     parse_quantity,
+    parse_security_name,
 )
 from portfolio_digest.importing import (
     FILE_IMPORTERS,
@@ -196,6 +197,7 @@ def cmd_trade_add(args: argparse.Namespace) -> int:
         quantity = _manual_quantity(args.quantity, kind)
         price = parse_price(args.price, "Price", currency=currency)
         fees = parse_money(args.fees, "Fees", currency=currency, allow_negative=False)
+        name = parse_security_name(args.name)
     except (RowProblem, ValueError) as exc:
         _fail(str(exc))
         return 2
@@ -203,7 +205,7 @@ def cmd_trade_add(args: argparse.Namespace) -> int:
     try:
         with session_scope(make_engine()) as session:
             portfolio = portfolio_named(session, args.portfolio, lock=True)
-            instrument = find_or_create_instrument(session, exchange, code, currency, args.name)
+            instrument = find_or_create_instrument(session, exchange, code, currency, name)
             trade = Trade(
                 portfolio_id=portfolio.id,
                 instrument_id=instrument.id,

@@ -153,6 +153,16 @@ def test_authorise_cli_passes_force_and_names_env_variable_without_exposing_toke
     "old,new,reason",
     [
         (b"Market: NZX", b"Market: LSE", "exchange"),
+        (
+            b"Brokerage: NZD 30.00\nGST: NZD 4.50",
+            b"Brokerage: NZD 99999999999999\nGST: NZD 1",
+            "Fees is outside the supported money range",
+        ),
+        (
+            b"Security name: Example Healthcare Limited",
+            b"Security name: " + b"A" * 300,
+            "Security name must be 255 characters or fewer",
+        ),
         (b"Quantity: 100\n", b"", "missing: quantity"),
         (b"Brokerage: NZD", b"Brokerage: AUD", "expected NZD"),
         (b"charset=utf-8", b"charset=made-up-encoding", "encoding we cannot read"),

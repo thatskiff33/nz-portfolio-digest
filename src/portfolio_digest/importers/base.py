@@ -241,8 +241,7 @@ def parse_money(
     if not value.strip():
         return Decimal(0)
     number = parse_decimal(value, what, currency=currency)
-    if number.copy_abs() >= Decimal("1e14"):
-        raise RowProblem(f"{what} is outside the supported money range.")
+    checked_money(number, what)
     if number < 0:
         if not allow_negative:
             raise RowProblem(f"{what} cannot be negative ({value!r}).")
@@ -251,6 +250,20 @@ def parse_money(
     if _places(number) > MONEY_PLACES:
         raise RowProblem(f"{what} {value!r} has more than {MONEY_PLACES} decimal places.")
     return number
+
+
+def checked_money(number: Decimal, what: str) -> Decimal:
+    """Check a cash amount, including a calculated total, fits the money column range."""
+    if not number.is_finite() or number.copy_abs() >= Decimal("1e14"):
+        raise RowProblem(f"{what} is outside the supported money range.")
+    return number
+
+
+def parse_security_name(value: str | None) -> str | None:
+    """Refuse names that cannot fit the instrument name column."""
+    if value is not None and len(value) > 255:
+        raise RowProblem("Security name must be 255 characters or fewer.")
+    return value
 
 
 def invert_rate(value: str, what: str = "exchange rate") -> Decimal:

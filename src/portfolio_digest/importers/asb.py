@@ -51,6 +51,7 @@ from portfolio_digest.importers.base import (
     ParseResult,
     RowError,
     RowProblem,
+    checked_money,
     decode_text,
     listing,
     parse_date,
@@ -58,6 +59,7 @@ from portfolio_digest.importers.base import (
     parse_money,
     parse_price,
     parse_quantity,
+    parse_security_name,
 )
 from portfolio_digest.models import TradeType
 
@@ -217,8 +219,10 @@ def parse_contract_note(raw: bytes, where: str) -> ParsedTrade:
             price_text,
             parse_money(fields["consideration"], "Consideration", currency=currency),
         )
-    fees = parse_money(fields.get("brokerage", ""), "Brokerage", currency=currency) + parse_money(
-        fields.get("gst", ""), "GST", currency=currency
+    fees = checked_money(
+        parse_money(fields.get("brokerage", ""), "Brokerage", currency=currency)
+        + parse_money(fields.get("gst", ""), "GST", currency=currency),
+        "Fees",
     )
     return ParsedTrade(
         where=where,
@@ -230,7 +234,7 @@ def parse_contract_note(raw: bytes, where: str) -> ParsedTrade:
         price=price,
         currency=currency,
         fees=fees,
-        name=fields.get("name"),
+        name=parse_security_name(fields.get("name")),
         external_ref=_ref(fields["contract"]),
     )
 
@@ -319,9 +323,10 @@ class AsbStatementImporter(Importer):
             quantity=quantity,
             price=price,
             currency=currency,
-            fees=(
+            fees=checked_money(
                 parse_money(row["brokerage"], "Brokerage", currency=currency)
-                + parse_money(row["gst"] or "", "GST", currency=currency)
+                + parse_money(row["gst"] or "", "GST", currency=currency),
+                "Fees",
             ),
             external_ref=_ref(row["contract"]),
         )

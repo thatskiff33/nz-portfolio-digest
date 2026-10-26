@@ -138,7 +138,18 @@ def calculate_year_end(
         splits = {s.day: s for s in h.splits}
         held = ZERO
         previous_day = None
-        for index, trade in enumerate(_ordered_trades(h, end)):
+        ordered = _ordered_trades(h, end)
+        # A completed position before the opening close contributes no tax cost.
+        # Drop its history, including FX requirements, even if this holding is rebought.
+        replay_from = 0
+        historical_quantity = ZERO
+        for index, trade in enumerate(ordered):
+            if trade.day > start:
+                break
+            historical_quantity += trade.delta
+            if historical_quantity == ZERO:
+                replay_from = index + 1
+        for index, trade in enumerate(ordered[replay_from:]):
             split = splits.get(trade.day)
             is_split = (
                 trade.day != previous_day

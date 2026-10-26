@@ -309,13 +309,16 @@ def _update_instrument(
         not (h.still_held or backfill or start is not None or force)
         and last_good is not None
         and (now.date() - end).days > REFRESH_DAYS
-        # A takeover SELL can follow the last close, leaving a carried final value.
-        and session.scalar(
-            select(Price.price_date).where(
-                Price.instrument_id == h.instrument_id, Price.price_date == end
+        and (
+            last_good >= h.calendar.last_trading_day(end)
+            # A takeover SELL can follow the last close, leaving a carried final value.
+            or session.scalar(
+                select(Price.price_date).where(
+                    Price.instrument_id == h.instrument_id, Price.price_date == end
+                )
             )
+            is not None
         )
-        is not None
     ):
         return outcome
     begin = _range(h.first_trade, end, last_good, backfill, start)
@@ -418,8 +421,13 @@ def _update_currency(
         not (need.still_held or backfill or start is not None or force)
         and last_good is not None
         and (now.date() - need.last_day).days > REFRESH_DAYS
-        and session.scalar(select(FxRate.rate_date).where(*keys, FxRate.rate_date == need.last_day))
-        is not None
+        and (
+            last_good >= calendars.FX.last_trading_day(need.last_day)
+            or session.scalar(
+                select(FxRate.rate_date).where(*keys, FxRate.rate_date == need.last_day)
+            )
+            is not None
+        )
     ):
         return outcome
     begin = _range(need.first_day, need.last_day, last_good, backfill, start)

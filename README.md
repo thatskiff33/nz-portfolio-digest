@@ -8,7 +8,7 @@ Built to replace the Sharesight free plan, which only shows 10 holdings.
 
 ## Status
 
-Under construction. The plan and progress are tracked in the Epic issue (#10).
+Under construction. The plan and progress are tracked in the Epic issue (#14).
 
 | Wave | What it delivers |
 |---|---|

@@ -24,6 +24,19 @@ follows it. It is adapted from the owner's house standard for all their repos. T
 2. **Before each merge:** when a PR is marked ✅ *Ready to merge*, read the plain-English
    summary and, if happy, comment exactly **`Approved and ok to merge`** on that PR.
 
+## Who builds: Sekreton
+
+Issues are built by [Sekreton](https://sekreton.com) tasks in the project
+`nz-portfolio-digest` (task prefix `NZP`). One task per issue; its brief carries the
+issue's scope and recorded decisions, and `depends_on` keeps waves in order.
+
+- The task sandbox runs [`.sekreton/config.toml`](../.sekreton/config.toml): it installs the
+  app with dev tools and runs `ruff` and `pytest`. Database tests skip there (no Postgres);
+  GitHub CI runs them against a real Postgres, and must be green before merge.
+- Sekreton's sandboxes can't comment on GitHub. A Claude session (the orchestrator) does
+  the claim, review, *Ready to merge* comment and merge steps below.
+- Sekreton tasks never auto-merge. The owner's approval phrase still gates every merge.
+
 ## The build loop
 
 1. **Claim** the issue (comment on it); branch `feat/<n>-<slug>`; open a **draft** PR

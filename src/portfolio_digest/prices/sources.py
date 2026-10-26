@@ -154,7 +154,7 @@ def _parse_chart(data: Any, start: date, end: date, currency: str | None = None)
     for split in ((chart.get("events") or {}).get("splits") or {}).values():
         day = datetime.fromtimestamp(split["date"], tz).date()
         before, after = Decimal(str(split["denominator"])), Decimal(str(split["numerator"]))
-        if not before.is_finite() or not after.is_finite() or before <= 0 or after <= 0:
+        if not all(_fits_numeric(side, 8, positive=True, precision=24) for side in (before, after)):
             raise SourceError("Yahoo sent an impossible split ratio.")
         history.splits[day] = (before, after)
     closes = chart["indicators"]["quote"][0].get("close") or []
@@ -176,17 +176,21 @@ def _parse_chart(data: Any, start: date, end: date, currency: str | None = None)
     return history
 
 
-def _fits_numeric(value: Decimal, scale: int, *, positive: bool = False) -> bool:
-    """Check Numeric(20, scale) after PostgreSQL's rounding, without changing the value."""
+def _fits_numeric(
+    value: Decimal, scale: int, *, positive: bool = False, precision: int = 20
+) -> bool:
+    """Check Numeric(precision, scale) after PostgreSQL's rounding."""
     if not value.is_finite():
         return False
     try:
-        rounded = Context(prec=21, rounding=ROUND_HALF_UP).quantize(
+        rounded = Context(prec=precision + 1, rounding=ROUND_HALF_UP).quantize(
             value, Decimal(1).scaleb(-scale)
         )
     except ArithmeticError:
         return False
-    return (rounded > 0 if positive else rounded >= 0) and rounded < Decimal(10) ** (20 - scale)
+    return (rounded > 0 if positive else rounded >= 0) and rounded < Decimal(10) ** (
+        precision - scale
+    )
 
 
 def _zone(name: str | None) -> ZoneInfo:

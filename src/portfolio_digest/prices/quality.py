@@ -79,17 +79,12 @@ def _check_instrument(session: Session, holding: Holding, now: datetime) -> list
             )
         )
     )
-    fresh = {day: close for day, close, stale in rows if not stale}
-    trading_days = holding.calendar.trading_days(holding.first_trade, end)
-    for previous_day, day in pairwise(trading_days):
-        previous_close = fresh.get(previous_day)
-        close = fresh.get(day)
+    fresh = [(day, close) for day, close, stale in rows if not stale]
+    for (previous_day, previous_close), (day, close) in pairwise(fresh):
         if (
-            previous_close is not None
-            and close is not None
-            and previous_close > 0
+            previous_close > 0
             and close > 0
-            and day not in split_days
+            and not any(previous_day < split_day <= day for split_day in split_days)
         ):
             change = abs(close / previous_close - 1)
             if change > JUMP_LIMIT:

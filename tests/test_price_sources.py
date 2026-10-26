@@ -336,3 +336,25 @@ def test_fx_sources_accept_smallest_rate_that_rounds_positive(provider):
     else:
         source = FrankfurterSource(StubFetcher({"rates": {day.isoformat(): {"NZD": rate}}}))
     assert source.rates("USD", "NZD", day, day) == {day: rate}
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+@pytest.mark.parametrize(
+    "ratio", ["1e-9", "0.0000000049", "1e16", "1e17", "9999999999999999.999999995"]
+)
+def test_yahoo_rejects_split_ratios_outside_database_precision(side, ratio):
+    day = date(2026, 10, 1)
+    before, after = (
+        (Decimal(ratio), Decimal("1")) if side == "before" else (Decimal("1"), Decimal(ratio))
+    )
+    source = YahooSource(StubFetcher(_chart({}, splits=[(day, before, after)])))
+    with pytest.raises(SourceError, match="impossible split ratio"):
+        source.history("TEST", day, day)
+
+
+@pytest.mark.parametrize("ratio", ["0.000000005", "9999999999999999.999999994"])
+def test_yahoo_accepts_split_ratios_at_postgresql_rounding_boundaries(ratio):
+    day = date(2026, 10, 1)
+    value = Decimal(ratio)
+    source = YahooSource(StubFetcher(_chart({}, splits=[(day, value, value)])))
+    assert source.history("TEST", day, day).splits == {day: (value, value)}

@@ -1,11 +1,14 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from unittest.mock import MagicMock
 
+import pytest
 from sqlalchemy import func, select
 
 from portfolio_digest.db import session_scope
 from portfolio_digest.models import FxRate, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.fetch import (
+    Holding,
     Sources,
     carry_forward,
     fetch_start,
@@ -243,43 +246,31 @@ def test_quality_checks_find_missing_zero_and_jump_but_exempt_a_split(engine):
     assert not [item for item in findings if item.kind == "suspicious-jump"]
 
 
-def test_quality_check_does_not_call_a_multi_day_move_a_one_day_jump(engine):
-    instrument_id = _seed_trade(engine, currency="NZD", code="STALEGAP")
-    with session_scope(engine) as session:
-        session.add_all(
-            [
-                Price(
-                    instrument_id=instrument_id,
-                    price_date=date(2026, 10, 1),
-                    close=Decimal("10"),
-                    source="test",
-                ),
-                Price(
-                    instrument_id=instrument_id,
-                    price_date=date(2026, 10, 2),
-                    close=Decimal("10"),
-                    source="test",
-                    is_stale=True,
-                ),
-                Price(
-                    instrument_id=instrument_id,
-                    price_date=date(2026, 10, 5),
-                    close=Decimal("10"),
-                    source="test",
-                    is_stale=True,
-                ),
-                Price(
-                    instrument_id=instrument_id,
-                    price_date=date(2026, 10, 6),
-                    close=Decimal("16"),
-                    source="test",
-                ),
-            ]
-        )
-    now = datetime(2026, 10, 6, 22, tzinfo=UTC)
-    with session_scope(engine) as session:
-        findings = check_data(session, held_instruments(session), "NZD", now)
-    assert not [item for item in findings if item.kind == "suspicious-jump"]
+@pytest.mark.parametrize("gap", ["stale", "missing"])
+@pytest.mark.parametrize(
+    "split_day", [None, date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5)]
+)
+def test_quality_compares_fresh_closes_across_gaps_unless_a_split_intervenes(gap, split_day):
+    first, middle, last = date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5)
+    rows = [(first, Decimal("10"), False)]
+    if gap == "stale":
+        rows.append((middle, Decimal("10"), True))
+    rows.append((last, Decimal("100"), False))
+    session = MagicMock()
+    session.execute.return_value.all.return_value = rows
+    session.scalars.return_value = [] if split_day is None else [split_day]
+    holding = Holding(1, "NZX", "QUALITY", "NZD", None, first, last, False)
+    findings = check_data(session, [holding], "NZD", datetime(2026, 10, 6, 22, tzinfo=UTC))
+    assert ("stale-price" if gap == "stale" else "missing-price", middle) in {
+        (item.kind, item.day) for item in findings
+    }
+    jumps = [item for item in findings if item.kind == "suspicious-jump"]
+    if split_day is None or split_day == first:
+        assert len(jumps) == 1
+        assert jumps[0].day == last
+        assert jumps[0].detail == "close changed 900.0% since 2026-10-01 without a split"
+    else:
+        assert not jumps
 
 
 def test_new_split_refreshes_full_stored_history_once(monkeypatch):

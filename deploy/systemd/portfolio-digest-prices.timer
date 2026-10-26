@@ -1,0 +1,11 @@
+[Unit]
+Description=Fetch portfolio prices after Australasian and US markets close
+
+[Timer]
+OnCalendar=*-*-* 10:30:00 Pacific/Auckland
+OnCalendar=*-*-* 18:30:00 Pacific/Auckland
+Persistent=true
+Unit=portfolio-digest-prices.service
+
+[Install]
+WantedBy=timers.target

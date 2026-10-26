@@ -20,11 +20,63 @@ docker compose up -d db backup
 docker compose run --rm --build migrate          # creates the tables
 docker compose run --rm migrate health           # should print "OK: ..."
 docker compose run --rm migrate portfolio add "Family Trust"
+docker compose run --rm migrate prices fetch --backfill
 ```
 
 If you set `BACKUP_DIR` to somewhere else, create that folder instead. The `backup`
 service refuses to start until the folder exists, so a typo cannot quietly send backups
 nowhere.
+
+## Prices and exchange rates
+
+The first backfill starts at each instrument's first trade. To deliberately use a later
+date, add `--start YYYY-MM-DD`. Normal runs re-read recent history so corrections from the
+source replace carried-forward values. Commands are safe to repeat: an existing day is
+updated, not duplicated.
+
+```sh
+docker compose run --rm migrate prices fetch --backfill
+docker compose run --rm migrate prices fetch --backfill --start 2020-01-01
+docker compose run --rm migrate prices fetch --instrument NZX:AIR
+docker compose run --rm migrate prices check
+```
+
+Yahoo symbols are inferred for NZX (`AIR.NZ`), ASX (`BHP.AX`), NASDAQ and NYSE listings.
+For a right, renamed code, delisted security or other exception, store an override on the
+instrument:
+
+```sh
+docker compose run --rm migrate prices symbol NZX:AIRRG AIRRG.NZ
+docker compose run --rm migrate prices symbol NZX:AIRRG --clear
+```
+
+Yahoo is unofficial, so requests retry with exponential backoff. Missing closes and rates
+are carried forward and marked stale. `prices check` exits non-zero and lists missing or
+stale days, zero prices, and daily moves over 50 per cent that have no recorded split.
+Exchange rates use the database convention that one unit of the foreign currency equals
+the stored number of NZ dollars. Yahoo is tried first and the free ECB rates from
+Frankfurter are the default fallback. `PRICE_SOURCE` and `FX_SOURCES` in `.env` select the
+adapters.
+
+### Twice-daily schedule
+
+The checked-in systemd user timer runs at 10:30 and 18:30 in `Pacific/Auckland`, including
+daylight-saving changes. The first run follows the US close and the second follows the NZX
+and ASX closes. Install it as the server account that owns this checkout:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/portfolio-digest-prices.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now portfolio-digest-prices.timer
+systemctl --user list-timers portfolio-digest-prices.timer
+```
+
+The service expects the checkout at `~/portfolio-digest`; edit its `WorkingDirectory` if
+you installed elsewhere. Enable lingering once with
+`loginctl enable-linger "$USER"` if user services do not run while logged out. Inspect the
+last scheduled run with
+`journalctl --user -u portfolio-digest-prices.service --since today`.
 
 ## Updating
 

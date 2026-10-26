@@ -25,7 +25,15 @@ portfolio-digest migrate          # bring the database up to date
 portfolio-digest health           # check the database is reachable and migrated
 portfolio-digest portfolio add "Personal"            # --base-currency AUD for others
 portfolio-digest portfolio list
+portfolio-digest prices fetch --backfill              # initial price and FX history
+portfolio-digest prices fetch                         # normal scheduled/incremental run
+portfolio-digest prices check                         # missing, stale, zero or suspect data
 ```
+
+NZX and ASX codes map automatically to Yahoo's `.NZ` and `.AX` symbols. NASDAQ and NYSE
+codes are used as-is. Set an exception for a right, renamed or delisted security with
+`portfolio-digest prices symbol NZX:AIRRG AIRRG.NZ`. See the deployment guide for the
+twice-daily schedule and recovery commands.
 
 ## Development
 

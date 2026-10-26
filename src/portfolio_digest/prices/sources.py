@@ -86,7 +86,7 @@ class YahooSource:
         data = self.fetcher.get(YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")), params)
         try:
             return _parse_chart(data, start, end)
-        except (KeyError, IndexError, TypeError, ArithmeticError):
+        except (KeyError, IndexError, TypeError, ValueError, ArithmeticError, OSError):
             raise SourceError(
                 f"Yahoo sent price data for {symbol} in an unexpected shape."
             ) from None

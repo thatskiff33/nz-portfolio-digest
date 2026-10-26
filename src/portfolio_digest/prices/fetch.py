@@ -127,12 +127,17 @@ class Sources:
 def held_instruments(session: Session, only: Iterable[str] | None = None) -> list[Holding]:
     """Every instrument with trades, optionally only those named as `EXCHANGE:CODE`."""
     signed = case((Trade.trade_type == TradeType.SELL.value, -Trade.quantity), else_=Trade.quantity)
+    positions = session.execute(
+        select(Trade.instrument_id, Trade.portfolio_id, func.sum(signed)).group_by(
+            Trade.instrument_id, Trade.portfolio_id
+        )
+    ).all()
+    active = {instrument_id for instrument_id, _portfolio_id, units in positions if units}
     stmt = (
         select(
             Instrument,
             func.min(Trade.trade_date),
             func.max(Trade.trade_date),
-            func.sum(signed),
         )
         .join(Trade, Trade.instrument_id == Instrument.id)
         .group_by(Instrument.id)
@@ -147,9 +152,9 @@ def held_instruments(session: Session, only: Iterable[str] | None = None) -> lis
             yahoo_symbol=inst.yahoo_symbol,
             first_trade=first,
             last_trade=last,
-            still_held=units != 0,
+            still_held=inst.id in active,
         )
-        for inst, first, last, units in session.execute(stmt)
+        for inst, first, last in session.execute(stmt)
     ]
     if only is None:
         return holdings
@@ -201,7 +206,10 @@ def fetch_start(first_needed: date, last_good: date | None, last_needed: date) -
     never later than a month back, and never before the value was first needed."""
     if last_good is None:
         return first_needed
-    return max(first_needed, min(last_good + timedelta(days=1), last_needed - timedelta(REFRESH_DAYS)))
+    return max(
+        first_needed,
+        min(last_good + timedelta(days=1), last_needed - timedelta(REFRESH_DAYS)),
+    )
 
 
 def run_fetch(
@@ -241,7 +249,11 @@ def run_fetch(
 
 
 def _range(
-    first_needed: date, last_needed: date, last_good: date | None, backfill: bool, start: date | None
+    first_needed: date,
+    last_needed: date,
+    last_good: date | None,
+    backfill: bool,
+    start: date | None,
 ) -> date:
     if backfill:
         return start or first_needed
@@ -337,8 +349,7 @@ def _update_currency(
         outcome.fallbacks.append(f"{source.name} had no rates")
     else:
         outcome.error = "no source had rates"
-        outcome.fallbacks.clear()
-        outcome.source = sources[0].name
+        outcome.source = sources[0].name if sources else "none"
 
     _save_rates(session, need, rates, outcome.source, stale=False)
     existing = dict(

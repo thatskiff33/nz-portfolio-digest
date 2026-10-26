@@ -115,3 +115,22 @@ def test_yahoo_history_uses_market_dates_and_keeps_exact_decimals():
     assert history.closes == {date(2026, 10, 1): Decimal("2.940000")}
     assert history.splits == {date(2026, 10, 1): (Decimal("1"), Decimal("2"))}
     assert fetcher.calls[0][0].endswith("/AIR.NZ")
+
+
+def test_yahoo_refuses_zero_exchange_rates_so_a_fallback_can_run():
+    stamp = int(datetime(2026, 10, 1, 17, tzinfo=UTC).timestamp())
+    fetcher = StubFetcher(
+        {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {"exchangeTimezoneName": "UTC"},
+                        "timestamp": [stamp],
+                        "indicators": {"quote": [{"close": [0]}]},
+                    }
+                ]
+            }
+        }
+    )
+    with pytest.raises(SourceError, match="impossible USD/NZD rate"):
+        YahooSource(fetcher).rates("USD", "NZD", date(2026, 10, 1), date(2026, 10, 1))

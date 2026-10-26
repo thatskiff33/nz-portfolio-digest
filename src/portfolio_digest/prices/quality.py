@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from itertools import pairwise
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -78,10 +79,19 @@ def _check_instrument(session: Session, holding: Holding, now: datetime) -> list
             )
         )
     )
-    previous: tuple[date, Decimal] | None = None
-    for day, close, _stale in rows:
-        if previous is not None and previous[1] > 0 and close > 0 and day not in split_days:
-            change = abs(close / previous[1] - 1)
+    fresh = {day: close for day, close, stale in rows if not stale}
+    trading_days = holding.calendar.trading_days(holding.first_trade, end)
+    for previous_day, day in pairwise(trading_days):
+        previous_close = fresh.get(previous_day)
+        close = fresh.get(day)
+        if (
+            previous_close is not None
+            and close is not None
+            and previous_close > 0
+            and close > 0
+            and day not in split_days
+        ):
+            change = abs(close / previous_close - 1)
             if change > JUMP_LIMIT:
                 percent = (change * 100).quantize(Decimal("0.1"))
                 findings.append(
@@ -89,10 +99,10 @@ def _check_instrument(session: Session, holding: Holding, now: datetime) -> list
                         "suspicious-jump",
                         holding.label,
                         day,
-                        f"close changed {percent}% since {previous[0].isoformat()} without a split",
+                        f"close changed {percent}% since {previous_day.isoformat()} "
+                        "without a split",
                     )
                 )
-        previous = (day, close)
     return findings
 
 

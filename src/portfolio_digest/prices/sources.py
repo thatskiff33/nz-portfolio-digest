@@ -93,7 +93,10 @@ class YahooSource:
 
     def rates(self, currency: str, base: str, start: date, end: date) -> dict[date, Decimal]:
         # USDNZD=X is NZ$ per US$, which is exactly how rates are stored.
-        return self.history(f"{currency}{base}=X", start, end).closes
+        rates = self.history(f"{currency}{base}=X", start, end).closes
+        if any(rate <= 0 for rate in rates.values()):
+            raise SourceError(f"Yahoo sent an impossible {currency}/{base} rate.")
+        return rates
 
 
 def _unix(day: date) -> int:

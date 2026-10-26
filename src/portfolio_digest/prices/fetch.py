@@ -324,7 +324,7 @@ def _update_currency(
     backfill: bool,
     start: date | None,
 ) -> Outcome:
-    outcome = Outcome(need.label)
+    outcome = Outcome(need.label, source=sources[0].name if sources else "none")
     keys = (FxRate.currency == need.currency, FxRate.base_currency == need.base_currency)
     last_good = session.scalar(
         select(func.max(FxRate.rate_date)).where(*keys, FxRate.is_stale.is_(False))
@@ -334,24 +334,38 @@ def _update_currency(
     if begin > end:
         return outcome
 
+    expected = set(calendars.FX.trading_days(begin, end))
+    if not expected:
+        return outcome
+    rates_by_source: list[tuple[str, dict[date, Decimal]]] = []
     rates: dict[date, Decimal] = {}
     for source in sources:
         try:
-            rates = source.rates(need.currency, need.base_currency, begin, end)
+            supplied = source.rates(need.currency, need.base_currency, begin, end)
         except SourceError as exc:
             outcome.fallbacks.append(f"{source.name} failed: {exc}")
             log.warning("%s from %s: %s", need.label, source.name, exc)
             continue
-        rates = {d: r for d, r in rates.items() if begin <= d <= end}
-        if rates:
-            outcome.source = source.name
+        supplied = {
+            day: rate for day, rate in supplied.items() if begin <= day <= end and day not in rates
+        }
+        if supplied:
+            rates.update(supplied)
+            rates_by_source.append((source.name, supplied))
+        missing = expected - rates.keys()
+        if not missing:
             break
-        outcome.fallbacks.append(f"{source.name} had no rates")
+        if supplied:
+            outcome.fallbacks.append(f"{source.name} left {len(missing)} rate(s) missing")
+        else:
+            outcome.fallbacks.append(f"{source.name} had no rates")
+    if rates_by_source:
+        outcome.source = ", ".join(name for name, _rates in rates_by_source)
     else:
         outcome.error = "no source had rates"
-        outcome.source = sources[0].name if sources else "none"
 
-    _save_rates(session, need, rates, outcome.source, stale=False)
+    for source_name, source_rates in rates_by_source:
+        _save_rates(session, need, source_rates, source_name, stale=False)
     existing = dict(
         session.execute(
             select(FxRate.rate_date, FxRate.rate).where(

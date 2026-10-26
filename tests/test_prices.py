@@ -120,6 +120,33 @@ def test_backfill_uses_fallback_fx_carries_missing_days_and_is_idempotent(engine
         }
 
 
+def test_fx_fallback_fills_a_partial_primary_response(engine):
+    _seed_trade(engine)
+    prices = FakePriceSource({date(2026, 10, 1): Decimal("10")})
+    yahoo_fx = FakeFxSource("yahoo", {date(2026, 10, 1): Decimal("1.7")})
+    frankfurter = FakeFxSource("frankfurter", {date(2026, 10, 2): Decimal("1.8")})
+
+    report = run_fetch(
+        engine,
+        Sources(prices, [yahoo_fx, frankfurter]),
+        now=datetime(2026, 10, 3, 12, tzinfo=UTC),
+        base_currency="NZD",
+        backfill=True,
+    )
+
+    outcome = next(item for item in report.outcomes if item.label == "USD/NZD")
+    assert outcome.source == "yahoo, frankfurter"
+    assert outcome.fetched == 2
+    assert outcome.carried_forward == 0
+    assert len(frankfurter.calls) == 1
+    with session_scope(engine) as session:
+        saved = session.scalars(select(FxRate).order_by(FxRate.rate_date)).all()
+        assert [(row.rate, row.source, row.is_stale) for row in saved] == [
+            (Decimal("1.7000000000"), "yahoo", False),
+            (Decimal("1.8000000000"), "frankfurter", False),
+        ]
+
+
 def test_one_portfolios_short_position_does_not_cancel_anothers_holding(engine):
     instrument_id = _seed_trade(engine, currency="NZD", code="OFFSET")
     with session_scope(engine) as session:
@@ -211,6 +238,45 @@ def test_quality_checks_find_missing_zero_and_jump_but_exempt_a_split(engine):
                 source="test",
             )
         )
+    with session_scope(engine) as session:
+        findings = check_data(session, held_instruments(session), "NZD", now)
+    assert not [item for item in findings if item.kind == "suspicious-jump"]
+
+
+def test_quality_check_does_not_call_a_multi_day_move_a_one_day_jump(engine):
+    instrument_id = _seed_trade(engine, currency="NZD", code="STALEGAP")
+    with session_scope(engine) as session:
+        session.add_all(
+            [
+                Price(
+                    instrument_id=instrument_id,
+                    price_date=date(2026, 10, 1),
+                    close=Decimal("10"),
+                    source="test",
+                ),
+                Price(
+                    instrument_id=instrument_id,
+                    price_date=date(2026, 10, 2),
+                    close=Decimal("10"),
+                    source="test",
+                    is_stale=True,
+                ),
+                Price(
+                    instrument_id=instrument_id,
+                    price_date=date(2026, 10, 5),
+                    close=Decimal("10"),
+                    source="test",
+                    is_stale=True,
+                ),
+                Price(
+                    instrument_id=instrument_id,
+                    price_date=date(2026, 10, 6),
+                    close=Decimal("16"),
+                    source="test",
+                ),
+            ]
+        )
+    now = datetime(2026, 10, 6, 22, tzinfo=UTC)
     with session_scope(engine) as session:
         findings = check_data(session, held_instruments(session), "NZD", now)
     assert not [item for item in findings if item.kind == "suspicious-jump"]

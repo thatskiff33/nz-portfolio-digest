@@ -24,6 +24,7 @@ from portfolio_digest.importers.base import (
     ParseResult,
     RowError,
     RowProblem,
+    checked_text,
     invert_rate,
     listing,
     parse_date,
@@ -68,9 +69,13 @@ class SharesiesImporter(Importer):
         for line, row in read_csv(content, COLUMNS, REQUIRED):
             where = f"line {line}"
             kind = row["type"].upper()
-            method = row.get("method", "")
             if kind not in _TYPES:
                 result.skipped.append(RowError(where, f"{row['type'] or 'blank'} is not a trade"))
+                continue
+            try:
+                method = checked_text(row.get("method", ""), "Transaction method")
+            except RowProblem as exc:
+                result.errors.append(RowError(where, str(exc)))
                 continue
             if "TRANSFER" in method.upper():
                 result.skipped.append(

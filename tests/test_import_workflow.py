@@ -103,7 +103,11 @@ def test_manual_adjustment_changes_reconciliation_and_mismatch_is_visible(engine
             b"Security name: Example\x00Healthcare",
             "security name cannot contain control characters",
         ),
-        (b"charset=utf-8", b'charset="utf-8\x00"', "encoding we cannot read"),
+        (
+            b"charset=utf-8",
+            b'charset="utf-8\x00"',
+            "The email's text is in an encoding we cannot read.",
+        ),
         (None, None, "could not read this message"),
         (b"Quantity: 100\n", b"", "contract note is missing: quantity"),
         (

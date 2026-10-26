@@ -175,7 +175,7 @@ def _fields(body: str) -> dict[str, str]:
             continue
         ours = _LABEL_LOOKUP.get(" ".join(match.group(1).lower().split()))
         if ours:
-            value = checked_text(match.group(2), _LABELS[ours][0]).strip()
+            value = checked_text(" ".join(match.group(2).split()), _LABELS[ours][0])
             if value and ours not in fields:
                 fields[ours] = value
     return fields

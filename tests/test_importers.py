@@ -359,9 +359,13 @@ def test_asb_email_fields_refuse_controls(field, control):
         field.encode(), f"{label}: {value}{control}".encode()
     )
     result = AsbEmailImporter().parse(content, ParseContext())
-    assert not result.trades
-    assert result.errors[0].where == "email"
-    assert "control characters" in result.errors[0].message
+    if control.isspace():
+        assert result.errors == []
+        assert len(result.trades) == 1
+    else:
+        assert not result.trades
+        assert result.errors[0].where == "email"
+        assert "control characters" in result.errors[0].message
 
 
 def test_asb_email_invalid_charset_is_a_file_problem():
@@ -401,3 +405,41 @@ def test_instrument_codes_refuse_controls(control):
 
     with pytest.raises(InvalidInput, match="control characters"):
         instrument_code(f"FPH{control}")
+
+
+@pytest.mark.parametrize("method", [b"AUTO\x00INVEST", b"TRANSFER\x00IN"])
+def test_sharesies_nul_in_transaction_method_is_a_located_row_error(method):
+    result = SharesiesImporter().parse(
+        b"Order ID,Trade date,Instrument code,Market code,Quantity,Price,"
+        b"Transaction type,Currency,Transaction method\n"
+        b"made-up-order,03/06/2024,AIR,NZX,1,1,BUY,NZD," + method + b"\n",
+        ParseContext(),
+    )
+    assert not result.trades
+    assert not result.skipped
+    assert len(result.errors) == 1
+    assert result.errors[0].where == "line 2"
+    assert "Transaction method cannot contain control characters" in result.errors[0].message
+
+
+@pytest.mark.parametrize("separator", [b"\n", b"\r\n", b"\t"])
+def test_sharesight_comments_collapse_whitespace(separator):
+    result = SharesightCsvImporter().parse(
+        b"Trade Date,Instrument Code,Market Code,Quantity,Price in Dollars,"
+        b"Transaction Type,Comments\n"
+        b'03/06/2024,AIR,NZX,1,1,BUY,"  Bought for' + separator + b'KiwiSaver top-up  "\n',
+        ParseContext(),
+    )
+    assert result.errors == []
+    assert result.trades[0].notes == "Bought for KiwiSaver top-up"
+
+
+@pytest.mark.parametrize("source", ["html", "tabs"])
+def test_asb_contract_note_table_and_tabbed_fields(source):
+    original = AsbEmailImporter().parse(fixture("asb-contract-note.eml"), ParseContext())
+    content = fixture("asb-contract-note-table.eml")
+    if source == "tabs":
+        content = fixture("asb-contract-note.eml").replace(b": ", b":\t")
+    result = AsbEmailImporter().parse(content, ParseContext())
+    assert result.errors == []
+    assert result.trades == original.trades

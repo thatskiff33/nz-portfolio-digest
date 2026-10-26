@@ -1,6 +1,6 @@
 """Plain text Sharesight-style columns; round only for display."""
 
-from portfolio_digest.formatting import display_number
+from portfolio_digest.formatting import display_number as format_number
 from portfolio_digest.returns import Report, Result
 from portfolio_digest.terminal import terminal_text
 
@@ -23,13 +23,13 @@ def render_table(report: Report) -> str:
         percentages = result.percentages
         values = [
             terminal_text(result.label) + (" *" if result.flags else ""),
-            display_number(result.closing),
+            format_number(result.closing),
         ]
         for field in ("capital", "dividends", "currency", "total"):
-            percent = f"{display_number(getattr(percentages, field))}%" if percentages else "n/a"
-            values.append(f"{display_number(getattr(result.amounts, field))} ({percent})")
+            percent = f"{format_number(getattr(percentages, field))}%" if percentages else "n/a"
+            values.append(f"{format_number(getattr(result.amounts, field))} ({percent})")
         values.extend(
-            display_number(v)
+            format_number(v)
             for v in (result.gross_dividends, result.withholding_tax, result.imputation_gross_up)
         )
         return values

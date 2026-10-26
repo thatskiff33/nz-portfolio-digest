@@ -2,6 +2,8 @@
 
 import argparse
 import json
+import logging
+import os
 import sys
 import uuid
 from datetime import UTC, date, datetime
@@ -46,6 +48,7 @@ from portfolio_digest.importing import (
     undo_import,
 )
 from portfolio_digest.income import parse_income
+from portfolio_digest.mailers import MailError
 from portfolio_digest.models import (
     PORTFOLIO_NAME_UNIQUE,
     ImportRun,
@@ -60,12 +63,15 @@ from portfolio_digest.prices.quality import check_data
 from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES, Listing, YahooSource
 from portfolio_digest.prices.symbols import clean_symbol
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
+from portfolio_digest.report_service import run_report
+from portfolio_digest.reports import ReportError
 from portfolio_digest.returns import ReturnError, period_range
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.returns_table import render_table
+from portfolio_digest.scheduling import Scheduler, read_config
 from portfolio_digest.terminal import terminal_text
 from portfolio_digest.year_end import tax_year
-from portfolio_digest.year_end_delivery import deliver, latest_ended_year, load_year_end
+from portfolio_digest.year_end_service import latest_ended_year, run_year_end
 
 
 def _fail(message: str) -> None:
@@ -178,6 +184,7 @@ def cmd_year_end(args: argparse.Namespace) -> int:
             raise ReturnError("--dry-run requires --out DIR.")
         if args.portfolio:
             validation.portfolio_name(args.portfolio)
+        config = read_config(args.config)
         with session_scope(make_engine()) as session:
             names = (
                 [args.portfolio]
@@ -187,13 +194,18 @@ def cmd_year_end(args: argparse.Namespace) -> int:
             failed = False
             for index, name in enumerate(names):
                 try:
-                    report = load_year_end(session, name, year)
                     out = args.out
                     if args.all and out:
                         out = out / f"portfolio-{index + 1}"
-                    deliver(report, name, dry_run=args.dry_run, out=out)
+                    if out:
+                        try:
+                            out.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        except OSError:
+                            raise ReportError("Cannot create report preview directory.") from None
+                        out = out / f"year-end-{year}.html"
+                    run_year_end(session, config, name, year, dry_run=args.dry_run, out=out)
                     print(f"Year-end {year}: {'wrote preview' if args.dry_run else 'sent email'}.")
-                except (ReturnError, ConfigError) as exc:
+                except (ReturnError, ConfigError, MailError, ReportError) as exc:
                     failed = True
                     _fail(terminal_text(str(exc)))
             return 1 if failed else 0
@@ -290,6 +302,32 @@ def cmd_prices_check(args: argparse.Namespace) -> int:
         print(finding.describe())
     print(f"Found {len(findings)} data-quality problem(s).")
     return 1
+
+
+def cmd_report_send(args: argparse.Namespace) -> int:
+    config = read_config(Path(args.config))
+    with session_scope(make_engine()) as session:
+        run_report(
+            session,
+            config,
+            args.schedule,
+            dry_run=args.dry_run,
+            out=Path(args.out) if args.out else None,
+        )
+    return 0
+
+
+def cmd_scheduler(args: argparse.Namespace) -> int:
+    config = read_config(Path(args.config))
+
+    def execute(schedule, scheduled):
+        if schedule.kind == "prices":
+            return cmd_prices_fetch(argparse.Namespace(backfill=False, start=None, instrument=None))
+        with session_scope(make_engine()) as session:
+            run_report(session, config, schedule.name, now=scheduled)
+        return 0
+
+    return Scheduler(config, Path(args.state)).run(execute)
 
 
 def _show_outcome(outcome) -> None:
@@ -531,10 +569,15 @@ def build_parser() -> argparse.ArgumentParser:
     year_end = sub.add_parser("year-end", help="NZ tax-year HTML email and CSV summary")
     scope = year_end.add_mutually_exclusive_group(required=True)
     scope.add_argument("--portfolio")
-    scope.add_argument("--all", action="store_true", help="All portfolios, for the annual timer")
+    scope.add_argument(
+        "--all", action="store_true", help="All portfolios, latest completed tax year by default"
+    )
     year_end.add_argument("--year", type=int, help="Year ending 31 March; --all defaults to latest")
     year_end.add_argument("--dry-run", action="store_true")
     year_end.add_argument("--out", type=Path)
+    year_end.add_argument(
+        "--config", type=Path, default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml")
+    )
     year_end.set_defaults(func=cmd_year_end)
 
     returns = sub.add_parser("returns", help="Report capital, dividend and currency returns")
@@ -667,10 +710,27 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("tax", "rwt", "foreign-tax", "imputation", "franking", "drp"):
         confirm.add_argument("--" + name, default="")
     confirm.set_defaults(func=cmd_dividends)
+    report = sub.add_parser("report", help="Email or preview a portfolio report")
+    rsub = report.add_subparsers(dest="report_command", required=True)
+    send_now = rsub.add_parser("send-now", help="Run a configured report now")
+    send_now.add_argument("--schedule", required=True)
+    send_now.add_argument("--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"))
+    send_now.add_argument("--dry-run", action="store_true")
+    send_now.add_argument("--out")
+    send_now.set_defaults(func=cmd_report_send)
+
+    scheduler = sub.add_parser("scheduler", help="Run the shared price and report scheduler")
+    scheduler.add_argument("--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"))
+    scheduler.add_argument(
+        "--state", default=os.environ.get("SCHEDULER_STATE", "state/scheduler.json")
+    )
+    scheduler.set_defaults(func=cmd_scheduler)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
@@ -682,6 +742,8 @@ def main(argv: list[str] | None = None) -> int:
     except validation.InvalidInput as exc:
         _fail(str(exc))
         return 2
+    except (MailError, ReportError, ReturnError) as exc:
+        _fail(str(exc))
     except GmailError as exc:
         _fail(str(exc))
     except CommandError as exc:

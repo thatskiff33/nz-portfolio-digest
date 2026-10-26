@@ -16,6 +16,12 @@ imports/
 *.csv
 *.pdf
 !tests/fixtures/**
+# Private report previews generated on the server.
+previews/
+report.html
+report.txt
+!tests/fixtures/report.html
+!tests/fixtures/report.txt
 
-# Locally rendered year-end reports contain private financial data.
+# Private year-end previews.
 private-preview/

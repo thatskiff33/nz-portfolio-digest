@@ -20,13 +20,14 @@ from decimal import Decimal
 
 from sqlalchemy import Engine, case, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from portfolio_digest.db import session_scope
 from portfolio_digest.models import FxRate, Instrument, Price, Split, Trade, TradeType
 from portfolio_digest.prices import calendars
 from portfolio_digest.prices.http import SourceError
-from portfolio_digest.prices.sources import FxSource, Listing, PriceSource
+from portfolio_digest.prices.sources import FxSource, Listing, PriceSource, _fits_numeric
 from portfolio_digest.prices.symbols import UnknownSymbol
 
 log = logging.getLogger(__name__)
@@ -248,13 +249,23 @@ def run_fetch(
                 report.outcomes.append(Outcome(label, error="not found, or it has no trades"))
 
     for holding in holdings:
-        with session_scope(engine) as session:
-            report.outcomes.append(
-                _update_instrument(session, sources.prices, holding, now, backfill, start)
-            )
+        try:
+            with session_scope(engine) as session:
+                outcome = _update_instrument(session, sources.prices, holding, now, backfill, start)
+        except SQLAlchemyError:
+            # session_scope rolls back, including failures during commit. Do not expose
+            # SQL or bound parameters from the exception in logs or the report.
+            outcome = Outcome(holding.label, error="database error; changes rolled back")
+            log.warning("%s: %s", outcome.label, outcome.error)
+        report.outcomes.append(outcome)
     for need in currencies_needed(holdings, base_currency, now):
-        with session_scope(engine) as session:
-            report.outcomes.append(_update_currency(session, sources.fx, need, backfill, start))
+        try:
+            with session_scope(engine) as session:
+                outcome = _update_currency(session, sources.fx, need, backfill, start)
+        except SQLAlchemyError:
+            outcome = Outcome(need.label, error="database error; changes rolled back")
+            log.warning("%s: %s", outcome.label, outcome.error)
+        report.outcomes.append(outcome)
     return report
 
 
@@ -350,10 +361,18 @@ def _update_instrument(
             day: ratio for day, ratio in (recorded_splits | splits).items() if begin <= day <= end
         },
     )
-    _save_prices(session, h.instrument_id, stale, source.name, stale=True)
+    valid_stale = {}
+    for day, value in stale.items():
+        if _fits_numeric(value, 6):
+            valid_stale[day] = value
+        else:
+            error = f"out-of-range carried price for {day}"
+            outcome.error = f"{outcome.error}; {error}" if outcome.error else error
+            log.warning("%s: %s", h.label, error)
+    _save_prices(session, h.instrument_id, valid_stale, source.name, stale=True)
 
     outcome.fetched = len(closes)
-    outcome.carried_forward = len(stale)
+    outcome.carried_forward = len(valid_stale)
     return outcome
 
 

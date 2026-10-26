@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from portfolio_digest.db import session_scope
 from portfolio_digest.models import FxRate, Instrument, Portfolio, Price, Split, Trade
@@ -88,6 +89,106 @@ def _seed_trade(engine, *, currency="USD", code="TEST"):
             )
         )
         return instrument.id
+
+
+def test_carried_price_overflow_does_not_stop_next_instrument_or_fx(monkeypatch):
+    from portfolio_digest import db
+    from portfolio_digest.prices import fetch
+
+    first, second = date(2026, 10, 1), date(2026, 10, 2)
+    holdings = [
+        Holding(i, "NASDAQ", code, "USD", None, first, first, True)
+        for i, code in enumerate(["AAA", "BBB"], 1)
+    ]
+    sessions = [MagicMock() for _ in range(4)]
+    for session, value in zip(sessions[1:], ["50", "10", "1.7"], strict=True):
+        session.scalar.side_effect = [first, first, None] if value != "1.7" else [None, None]
+        rows = MagicMock()
+        rows.all.return_value = [(first, Decimal(value))]
+        session.execute.side_effect = [[], rows] if value != "1.7" else [rows]
+    factory = MagicMock(side_effect=sessions)
+    monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
+    monkeypatch.setattr(fetch, "held_instruments", lambda *args: holdings)
+    monkeypatch.setattr(fetch, "_save_splits", MagicMock())
+    save_prices, save_rates = MagicMock(), MagicMock()
+    monkeypatch.setattr(fetch, "_save_prices", save_prices)
+    monkeypatch.setattr(fetch, "_save_rates", save_rates)
+    prices = FakePriceSource()
+    prices.history = MagicMock(
+        side_effect=[
+            PriceHistory({}, {second: (Decimal("1e13"), Decimal("1"))}),
+            PriceHistory({first: Decimal("10")}, {}),
+        ]
+    )
+    fx = FakeFxSource("mock-fx", {first: Decimal("1.7"), second: Decimal("1.8")})
+
+    report = run_fetch(
+        MagicMock(),
+        Sources(prices, [fx]),
+        now=datetime(2026, 10, 3, 12, tzinfo=UTC),
+        base_currency="NZD",
+        backfill=True,
+    )
+
+    assert not report.ok
+    assert "out-of-range carried price for 2026-10-02" in report.outcomes[0].error
+    assert report.outcomes[0].carried_forward == 0
+    assert all(outcome.error is None for outcome in report.outcomes[1:])
+    assert report.outcomes[1].fetched == 1
+    assert report.outcomes[2].fetched == 2
+    assert save_prices.call_args_list[1].args[2] == {}
+    assert save_prices.call_args_list[3].args[2] == {second: Decimal("10")}
+    assert save_rates.call_args_list[0].args[2] == fx.result
+    for session in sessions:
+        session.commit.assert_called_once()
+        session.rollback.assert_not_called()
+
+
+@pytest.mark.parametrize("failure_stage", ["execute", "commit"])
+@pytest.mark.parametrize("failed_item", ["instrument", "currency"])
+def test_database_failure_rolls_back_and_continues(monkeypatch, failure_stage, failed_item):
+    from portfolio_digest import db
+    from portfolio_digest.prices import fetch
+
+    first = date(2026, 10, 1)
+    holdings = [
+        Holding(i, "NASDAQ", code, currency, None, first, first, True)
+        for i, (code, currency) in enumerate([("AAA", "AUD"), ("BBB", "USD")], 1)
+    ]
+    sessions = [MagicMock() for _ in range(5)]
+    failed_index = 1 if failed_item == "instrument" else 3
+    factory = MagicMock(side_effect=sessions)
+    monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
+    monkeypatch.setattr(fetch, "held_instruments", lambda *args: holdings)
+
+    def update(session, source, item, *args):
+        if failure_stage == "execute" and session is sessions[failed_index]:
+            raise SQLAlchemyError("private SQL and parameters")
+        return fetch.Outcome(item.label, fetched=1)
+
+    monkeypatch.setattr(fetch, "_update_instrument", update)
+    monkeypatch.setattr(fetch, "_update_currency", update)
+    if failure_stage == "commit":
+        sessions[failed_index].commit.side_effect = SQLAlchemyError("private SQL and parameters")
+
+    report = run_fetch(
+        MagicMock(),
+        Sources(FakePriceSource(), []),
+        now=datetime(2026, 10, 3, 12, tzinfo=UTC),
+        base_currency="NZD",
+    )
+
+    assert not report.ok
+    assert len(report.outcomes) == 4
+    failed = report.outcomes[failed_index - 1]
+    assert failed.error == "database error; changes rolled back"
+    assert failed.fetched == failed.carried_forward == 0
+    assert all(outcome.error is None for outcome in report.outcomes if outcome is not failed)
+    sessions[failed_index].rollback.assert_called_once()
+    for index, session in enumerate(sessions):
+        if index != failed_index:
+            session.commit.assert_called_once()
+            session.rollback.assert_not_called()
 
 
 def test_backfill_uses_fallback_fx_carries_missing_days_and_is_idempotent(engine):

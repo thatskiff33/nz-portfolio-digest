@@ -389,6 +389,34 @@ def test_all_portfolios_continue_after_one_fails(year_engine, monkeypatch, tmp_p
     assert (tmp_path / "portfolio-2" / "year-end-2026.html").exists()
 
 
+def test_scheduled_year_end_skips_non_nzd_portfolios(year_engine, monkeypatch):
+    from portfolio_digest.report_service import run_report
+
+    with Session(year_engine) as session:
+        session.add_all(
+            [
+                Portfolio(name="Foreign base", base_currency="USD"),
+                Portfolio(name="Later NZD", base_currency="NZD"),
+            ]
+        )
+        session.commit()
+    delivered = []
+    monitored = []
+    monkeypatch.setattr(
+        "portfolio_digest.report_service.deliver_report",
+        lambda config, subject, *args, **kwargs: delivered.append(subject),
+    )
+    monkeypatch.setattr("portfolio_digest.report_service.ping_kuma", monitored.append)
+    config = read_config(Path("schedules.toml"))
+    with Session(year_engine) as session:
+        run_report(session, config, "year-end", now=datetime(2026, 4, 1, tzinfo=UTC))
+    assert delivered == [
+        "Portfolio Digest: Invented, year ended 31 March 2026",
+        "Portfolio Digest: Later NZD, year ended 31 March 2026",
+    ]
+    assert monitored == [config]
+
+
 def test_fifo_multiple_parcels_and_reverse_split_same_day_buy():
     h = Holding(
         "NZX",

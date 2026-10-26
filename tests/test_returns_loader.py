@@ -204,3 +204,29 @@ def test_configured_timezone_controls_today(returns_engine, monkeypatch):
     with Session(returns_engine) as session:
         r = load_returns(session, "Invented", "week")
         assert (r.start, r.end) == (date(2026, 10, 12), date(2026, 10, 19))
+
+
+def test_cli_escapes_control_characters_in_labels_flags_and_errors(
+    returns_engine, monkeypatch, capsys
+):
+    monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: returns_engine)
+    with Session(returns_engine) as session:
+        session.get(Instrument, 1).code = "FERN\x1b[2J"
+        session.commit()
+    args = ["returns", "--portfolio", "Separate", "--period", "2026-10-12:2026-10-19"]
+    assert main(args) == 0
+    output = capsys.readouterr().out
+    assert "\x1b" not in output
+    assert "FERN\\x1b[2J" in output
+    assert "Carried forward FERN\\x1b[2J price" in output
+
+    with Session(returns_engine) as session:
+        # Force an oversell error which includes the untrusted instrument code.
+        sale = session.get(Trade, 2)
+        sale.quantity = D(11)
+        session.commit()
+    args[2] = "Invented"
+    assert main(args) == 2
+    error = capsys.readouterr().err
+    assert "\x1b" not in error
+    assert "FERN\\x1b[2J" in error and "exceeds" in error

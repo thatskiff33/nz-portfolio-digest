@@ -15,6 +15,7 @@ from portfolio_digest.models import PORTFOLIO_NAME_UNIQUE, Portfolio
 from portfolio_digest.returns import ReturnError, period_range
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.returns_table import render_table
+from portfolio_digest.terminal import terminal_text
 
 
 def _fail(message: str) -> None:
@@ -98,7 +99,7 @@ def cmd_returns(args: argparse.Namespace) -> int:
         print(render_table(report))
         return 0
     except (ReturnError, validation.InvalidInput) as exc:
-        _fail(str(exc))
+        _fail(terminal_text(str(exc)))
         return 2
 
 

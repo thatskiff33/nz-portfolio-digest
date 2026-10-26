@@ -3,6 +3,7 @@
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 
 from portfolio_digest.returns import Report, Result
+from portfolio_digest.terminal import terminal_text
 
 
 def _number(value: Decimal) -> str:
@@ -25,7 +26,10 @@ def render_table(report: Report) -> str:
 
     def row(result: Result) -> list[str]:
         percentages = result.percentages
-        values = [result.label + (" *" if result.flags else ""), _number(result.closing)]
+        values = [
+            terminal_text(result.label) + (" *" if result.flags else ""),
+            _number(result.closing),
+        ]
         for field in ("capital", "dividends", "currency", "total"):
             percent = f"{_number(getattr(percentages, field))}%" if percentages else "n/a"
             values.append(f"{_number(getattr(result.amounts, field))} ({percent})")
@@ -41,5 +45,5 @@ def render_table(report: Report) -> str:
     lines.extend(" | ".join(v.ljust(w) for v, w in zip(r, widths, strict=True)) for r in rows)
     if report.total.flags:
         lines.append("* Stale or carried-forward observations:")
-        lines.extend(f"  {flag}" for flag in report.total.flags)
+        lines.extend(f"  {terminal_text(flag)}" for flag in report.total.flags)
     return "\n".join(lines)

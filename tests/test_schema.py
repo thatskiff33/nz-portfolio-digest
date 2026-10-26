@@ -31,6 +31,8 @@ EXPECTED_TABLES = {
     "prices",
     "fx_rates",
     "splits",
+    "akahu_mappings",
+    "akahu_snapshots",
 }
 
 

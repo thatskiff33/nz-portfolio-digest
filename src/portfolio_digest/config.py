@@ -3,6 +3,7 @@
 Secrets never live in the repo. See `.env.example` for the full list.
 """
 
+import json
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -23,6 +24,13 @@ class Settings(BaseSettings):
     # Full SQLAlchemy URL, e.g. postgresql+psycopg://user:pass@db:5432/portfolio.
     # Kept as a secret so it is never printed in logs or error messages.
     database_url: SecretStr
+
+    akahu_app_token: SecretStr | None = None
+    akahu_user_token: SecretStr | None = None
+    # Optional JSON array of account IDs. Empty selects all investment accounts. Kept as
+    # raw text and parsed only by `akahu sync`, so a typo cannot break other commands.
+    akahu_account_ids: str = ""
+    uptime_kuma_push_url: SecretStr | None = None
 
     # Every value is reported in this currency, and new portfolios use it by default.
     base_currency: str = "NZD"
@@ -69,6 +77,25 @@ class Settings(BaseSettings):
     @property
     def fx_source_names(self) -> list[str]:
         return self.fx_sources.split(",")
+
+
+def akahu_account_ids(raw: str) -> list[str]:
+    """Parse AKAHU_ACCOUNT_IDS. The error never echoes the value."""
+    if not raw.strip():
+        return []
+    try:
+        ids = json.loads(raw)
+    except ValueError:
+        ids = None
+    if (
+        not isinstance(ids, list)
+        or any(not isinstance(item, str) or not item.strip() for item in ids)
+        or len({item.strip() for item in ids}) != len(ids)
+    ):
+        raise ConfigError(
+            'AKAHU_ACCOUNT_IDS must be a JSON array of distinct account IDs, e.g. ["acc_example"].'
+        )
+    return [item.strip() for item in ids]
 
 
 @lru_cache

@@ -81,3 +81,37 @@ def get_settings() -> Settings:
         raise ConfigError(
             f"Missing or invalid setting: {', '.join(names)}. See .env.example."
         ) from None
+
+
+class GmailSettings(BaseSettings):
+    """OAuth details for reading ASB contract-note emails from one Gmail label.
+
+    Kept apart from `Settings` so `gmail authorise` can run on a laptop with no database.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GMAIL_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+    # Written by `portfolio-digest gmail authorise`. Read-only access to the mailbox.
+    refresh_token: SecretStr | None = None
+    # Only emails with this label are read, e.g. "ASB contract notes".
+    label: str | None = None
+
+    def require(self, *names: str) -> None:
+        missing = [f"GMAIL_{n.upper()}" for n in names if not getattr(self, n)]
+        if missing:
+            raise ConfigError(f"Missing setting: {', '.join(missing)}. See .env.example.")
+
+
+@lru_cache
+def get_gmail_settings() -> GmailSettings:
+    try:
+        return GmailSettings()
+    except ValidationError as exc:
+        names = sorted(
+            {f"GMAIL_{error['loc'][0]}".upper() for error in exc.errors() if error["loc"]}
+        )
+        raise ConfigError(f"Invalid setting: {', '.join(names)}. See .env.example.") from None

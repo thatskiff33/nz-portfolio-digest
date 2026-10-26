@@ -197,10 +197,11 @@ def _places(number: Decimal) -> int:
     return max(0, -exponent) if isinstance(exponent, int) else 0
 
 
-def parse_quantity(value: str, what: str = "quantity") -> Decimal:
+def parse_quantity(value: str, what: str = "quantity", *, allow_negative: bool = False) -> Decimal:
     number = parse_decimal(value, what)
-    if number <= 0:
-        raise RowProblem(f"{what} must be more than zero, not {value!r}.")
+    if number == 0 or (number < 0 and not allow_negative):
+        requirement = "non-zero" if allow_negative else "more than zero"
+        raise RowProblem(f"{what} must be {requirement}, not {value!r}.")
     if _places(number) > QUANTITY_PLACES:
         raise RowProblem(f"{what} {value!r} has more than {QUANTITY_PLACES} decimal places.")
     return number

@@ -19,13 +19,14 @@ from portfolio_digest.importers.base import (
     RowProblem,
     listing,
     parse_date,
-    parse_decimal,
     parse_money,
     parse_price,
+    parse_quantity,
 )
 from portfolio_digest.importing import (
     FILE_IMPORTERS,
     ImportFailure,
+    find_or_create_instrument,
     import_file,
     import_gmail,
     portfolio_named,
@@ -35,7 +36,6 @@ from portfolio_digest.importing import (
 from portfolio_digest.models import (
     PORTFOLIO_NAME_UNIQUE,
     ImportRun,
-    Instrument,
     Portfolio,
     Trade,
     TradeType,
@@ -176,13 +176,11 @@ def cmd_import_undo(args: argparse.Namespace) -> int:
 
 
 def _manual_quantity(value: str, kind: TradeType) -> Decimal:
-    quantity = parse_decimal(value, "Quantity")
-    if not quantity or (kind != TradeType.ADJUSTMENT and quantity < 0):
-        raise RowProblem("Quantity must be positive (or signed for an adjustment).")
-    exponent = quantity.normalize().as_tuple().exponent
-    if isinstance(exponent, int) and exponent < -8:
-        raise RowProblem("Quantity has more than 8 decimal places.")
-    return quantity
+    return parse_quantity(
+        value,
+        "Quantity",
+        allow_negative=kind == TradeType.ADJUSTMENT,
+    )
 
 
 def cmd_trade_add(args: argparse.Namespace) -> int:
@@ -200,23 +198,7 @@ def cmd_trade_add(args: argparse.Namespace) -> int:
     try:
         with session_scope(make_engine()) as session:
             portfolio = portfolio_named(session, args.portfolio, lock=True)
-            instrument = session.scalar(
-                select(Instrument).where(Instrument.exchange == exchange, Instrument.code == code)
-            )
-            if instrument is None:
-                instrument = Instrument(
-                    exchange=exchange,
-                    code=code,
-                    currency=currency,
-                    name=args.name or code,
-                )
-                session.add(instrument)
-                session.flush()
-            elif instrument.currency != currency:
-                raise ImportFailure(
-                    f"{code} on {exchange} is already stored in {instrument.currency}, "
-                    f"not {currency}."
-                )
+            instrument = find_or_create_instrument(session, exchange, code, currency, args.name)
             trade = Trade(
                 portfolio_id=portfolio.id,
                 instrument_id=instrument.id,

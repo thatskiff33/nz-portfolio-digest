@@ -86,10 +86,10 @@ def _new_run(
     return run
 
 
-def _finish_failed(session: Session, run: ImportRun, result: ParseResult) -> None:
+def _fail_run(session: Session, run: ImportRun, notes: str) -> None:
     run.status = ImportStatus.FAILED.value
     run.finished_at = datetime.now(UTC)
-    run.notes = f"{len(result.errors)} row error(s); no trades imported."
+    run.notes = notes
     session.commit()
 
 
@@ -97,10 +97,30 @@ def _mark_storage_failed(session: Session, run_id: int) -> None:
     session.rollback()
     run = session.get(ImportRun, run_id)
     if run is not None and run.status == ImportStatus.RUNNING.value:
-        run.status = ImportStatus.FAILED.value
-        run.finished_at = datetime.now(UTC)
-        run.notes = "Parsed trades could not be stored; no trades imported."
-        session.commit()
+        _fail_run(session, run, "Parsed trades could not be stored; no trades imported.")
+
+
+def find_or_create_instrument(
+    session: Session, exchange: str, code: str, currency: str, name: str | None = None
+) -> Instrument:
+    """Return one canonical listing, creating it when this is its first trade."""
+    instrument = session.scalar(
+        select(Instrument).where(Instrument.exchange == exchange, Instrument.code == code)
+    )
+    if instrument is None:
+        instrument = Instrument(
+            exchange=exchange,
+            code=code,
+            name=name or code,
+            currency=currency,
+        )
+        session.add(instrument)
+        session.flush()
+    elif instrument.currency != currency:
+        raise ImportFailure(
+            f"{code} on {exchange} is already stored in {instrument.currency}, not {currency}."
+        )
+    return instrument
 
 
 def _store_result(
@@ -111,7 +131,11 @@ def _store_result(
     result: ParseResult,
 ) -> ImportOutcome:
     if result.errors:
-        _finish_failed(session, run, result)
+        _fail_run(
+            session,
+            run,
+            f"{len(result.errors)} row error(s); no trades imported.",
+        )
         details = "\n".join(str(error) for error in result.errors)
         raise ImportFailure(
             f"Import run {run.id} failed with {len(result.errors)} row error(s). "
@@ -143,25 +167,13 @@ def _store_result(
         key = (parsed.exchange, parsed.code)
         instrument = instruments.get(key)
         if instrument is None:
-            instrument = session.scalar(
-                select(Instrument).where(
-                    Instrument.exchange == parsed.exchange, Instrument.code == parsed.code
-                )
+            instrument = find_or_create_instrument(
+                session,
+                parsed.exchange,
+                parsed.code,
+                parsed.currency,
+                parsed.name,
             )
-            if instrument is None:
-                instrument = Instrument(
-                    exchange=parsed.exchange,
-                    code=parsed.code,
-                    name=parsed.name or parsed.code,
-                    currency=parsed.currency,
-                )
-                session.add(instrument)
-                session.flush()
-            elif instrument.currency != parsed.currency:
-                raise ImportFailure(
-                    f"{parsed.code} on {parsed.exchange} is already stored in "
-                    f"{instrument.currency}, not {parsed.currency}."
-                )
             instruments[key] = instrument
         session.add(
             Trade(
@@ -201,10 +213,7 @@ def import_file(session: Session, source: str, path: Path, portfolio_name: str) 
         content = read_input(path)
     except ImportFailure:
         run = _new_run(session, portfolio, importer.name, path.name[:255], None)
-        run.status = ImportStatus.FAILED.value
-        run.finished_at = datetime.now(UTC)
-        run.notes = "File could not be read; no trades imported."
-        session.commit()
+        _fail_run(session, run, "File could not be read; no trades imported.")
         raise
     run = _new_run(
         session,
@@ -216,10 +225,7 @@ def import_file(session: Session, source: str, path: Path, portfolio_name: str) 
     try:
         result = importer.parse(content, ParseContext(portfolio.base_currency))
     except FileProblem as exc:
-        run.status = ImportStatus.FAILED.value
-        run.finished_at = datetime.now(UTC)
-        run.notes = "File could not be parsed; no trades imported."
-        session.commit()
+        _fail_run(session, run, "File could not be parsed; no trades imported.")
         raise ImportFailure(f"Import run {run.id} failed. {exc}") from None
     portfolio = session.get(Portfolio, portfolio.id, with_for_update=True)
     assert portfolio is not None  # protected from deletion by the import run foreign key
@@ -239,10 +245,7 @@ def import_gmail(
     try:
         result = importer.fetch()
     except GmailError:
-        run.status = ImportStatus.FAILED.value
-        run.finished_at = datetime.now(UTC)
-        run.notes = "Gmail could not be read; no trades imported."
-        session.commit()
+        _fail_run(session, run, "Gmail could not be read; no trades imported.")
         raise
     portfolio = session.get(Portfolio, portfolio.id, with_for_update=True)
     assert portfolio is not None

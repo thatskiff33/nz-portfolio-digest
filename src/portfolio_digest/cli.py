@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from datetime import date
 
 from alembic.util import CommandError
 from sqlalchemy import select, text
@@ -11,6 +12,9 @@ from portfolio_digest import __version__, migrate, validation
 from portfolio_digest.config import ConfigError, get_settings
 from portfolio_digest.db import make_engine, session_scope
 from portfolio_digest.models import PORTFOLIO_NAME_UNIQUE, Portfolio
+from portfolio_digest.returns import ReturnError, period_range
+from portfolio_digest.returns_loader import load_returns
+from portfolio_digest.returns_table import render_table
 
 
 def _fail(message: str) -> None:
@@ -85,6 +89,19 @@ def cmd_portfolio_list(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_returns(args: argparse.Namespace) -> int:
+    try:
+        validation.portfolio_name(args.portfolio)
+        period_range(args.period, date.today())
+        with session_scope(make_engine()) as session:
+            report = load_returns(session, args.portfolio, args.period)
+        print(render_table(report))
+        return 0
+    except (ReturnError, validation.InvalidInput) as exc:
+        _fail(str(exc))
+        return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="portfolio-digest")
     parser.add_argument("--version", action="version", version=__version__)
@@ -94,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("health", help="Check the database is reachable and migrated").set_defaults(
         func=cmd_health
     )
+
+    returns = sub.add_parser("returns", help="Report capital, dividend and currency returns")
+    returns.add_argument("--portfolio", required=True)
+    returns.add_argument("--period", required=True, help="week|month|ytd|all|YYYY-MM-DD:YYYY-MM-DD")
+    returns.set_defaults(func=cmd_returns)
 
     portfolio = sub.add_parser("portfolio", help="Manage portfolios")
     psub = portfolio.add_subparsers(dest="portfolio_command", required=True)

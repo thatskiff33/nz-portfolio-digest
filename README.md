@@ -25,7 +25,17 @@ portfolio-digest migrate          # bring the database up to date
 portfolio-digest health           # check the database is reachable and migrated
 portfolio-digest portfolio add "Personal"            # --base-currency AUD for others
 portfolio-digest portfolio list
+portfolio-digest returns --portfolio "Personal" --period week
+portfolio-digest returns --portfolio "Personal" --period 2026-10-01:2026-10-26
 ```
+
+Returns include capital gain, dividends, currency gain and total return as base-currency
+amounts and simple period percentages, per holding, market and portfolio. Use `week`,
+`month`, `ytd`, `all` (since first purchase), or an explicit date range. Sold holdings
+remain in the report; carried-forward prices and FX are flagged. Missing history stops
+the report rather than producing a misleading zero. The command reads stored data;
+it does not fetch prices. See [the calculation conventions and invented weekly example](docs/RETURNS.md)
+for boundaries, FIFO attribution, dividend treatment and percentage denominators.
 
 ## Development
 

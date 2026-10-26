@@ -363,3 +363,47 @@ def test_sold_holding_clears_both_holding_rules(sample):
     states = alerts.evaluate(session, portfolio, config(), NOW)
     assert states["daily:NZX:MADEUP"] is None
     assert states["stale:NZX:MADEUP"] is None
+
+
+@pytest.mark.parametrize(
+    ("exchange", "currency", "now"),
+    [
+        ("NZX", "NZD", datetime(2026, 10, 15, 21, 30, tzinfo=UTC)),
+        ("NYSE", "NZD", NOW),
+        ("NZX", "USD", NOW),
+    ],
+)
+def test_portfolio_uses_completed_market_and_fx_date(sample, exchange, currency, now):
+    from portfolio_digest.models import FxRate
+
+    session, portfolio, instrument = sample
+    instrument.exchange = exchange
+    instrument.currency = currency
+    trade = session.scalar(select(Trade))
+    trade.currency = currency
+    for price in session.scalars(select(Price)):
+        session.delete(price)
+    for day, close in [(1, "10"), (8, "10"), (15, "8")]:
+        session.add(
+            Price(
+                instrument_id=instrument.id,
+                price_date=date(2026, 10, day),
+                close=D(close),
+                source="made_up",
+                is_stale=False,
+            )
+        )
+        if currency != "NZD":
+            session.add(
+                FxRate(
+                    currency=currency,
+                    base_currency="NZD",
+                    rate_date=date(2026, 10, day),
+                    rate=D(1),
+                    source="made_up",
+                    is_stale=False,
+                )
+            )
+    states = alerts.evaluate(session, portfolio, config(), now)
+    assert "-20.00%" in states["portfolio"].text
+    assert "2026-10-08 to 2026-10-15" in states["portfolio"].text

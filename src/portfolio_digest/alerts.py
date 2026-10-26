@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import mail_settings, message, send
 from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
-from portfolio_digest.prices.calendars import for_exchange
+from portfolio_digest.prices.calendars import FX, for_exchange
 from portfolio_digest.returns import ReturnError, units_at
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.returns_table import format_number as money
@@ -174,16 +174,22 @@ def evaluate(session, portfolio, config, now):
                 if age > limits.stale_trading_days
                 else None
             )
-    start = today - timedelta(days=rules.period_days)
+    # Use a common completed valuation date. A quote is not missing just because
+    # Auckland is already on the next date while an overseas market is still open.
+    end = min([today] + [for_exchange(i.exchange).latest_closed_day(now) for i in instruments])
+    if any(i.currency != portfolio.base_currency for i in instruments):
+        end = min(end, FX.latest_closed_day(now))
+    start = end - timedelta(days=rules.period_days)
     try:
-        report = load_returns(session, portfolio.name, f"{start}:{today}", today=today)
+        report = load_returns(session, portfolio.name, f"{start}:{end}", today=today)
         total = report.total
         if not total.flags and total.opening > 0:
             change = total.change / total.opening * Decimal(100)
             states["portfolio"] = (
                 Trigger(
                     "portfolio",
-                    f"Portfolio value changed {change:+.2f}% over {rules.period_days} days: "
+                    f"Portfolio value changed {change:+.2f}% over {rules.period_days} days "
+                    f"({start} to {end}): "
                     f"{money(total.opening)} to {money(total.closing)} {report.base_currency}.",
                 )
                 if change < -rules.portfolio_drop_percent

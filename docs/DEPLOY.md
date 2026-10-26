@@ -325,7 +325,9 @@ holidays. If no fresh price exists, it counts from the first trade. Sold holding
 not trigger holding alerts.
 
 Portfolio value uses the shared returns engine's opening and closing valuations in
-the portfolio's base currency across the configured calendar-day period. This is a
+the portfolio's base currency across the configured calendar-day period. The period
+ends on the most recent date completed by all portfolio markets and, when needed,
+the FX market, so a close that is not yet due does not suppress the check. This is a
 value-drop rule: sales and withdrawals can reduce it, purchases can offset falls,
 and it is not a cash-flow-adjusted performance percentage. Incomplete or stale
 valuations suppress that evaluation rather than inventing figures.

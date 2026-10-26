@@ -235,12 +235,22 @@ class _Server(HTTPServer):
         self.timed_out = True
 
 
-def save_refresh_token(path: Path, token: str) -> None:
-    """Writes `GMAIL_REFRESH_TOKEN=...` to `path`, readable only by its owner."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        handle.write(f"GMAIL_REFRESH_TOKEN={token}\n")
+def save_refresh_token(path: Path, token: str, *, force: bool = False) -> None:
+    """Create a private token file, refusing symlinks even when replacement is requested."""
+    try:
+        if force:
+            if path.is_symlink():
+                raise GmailError("Refusing to replace a symlinked token file.")
+            path.unlink(missing_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(f"GMAIL_REFRESH_TOKEN={token}\n")
+    except FileExistsError:
+        raise GmailError(
+            "The token output file already exists. Choose another path or use --force."
+        ) from None
+    except OSError:
+        raise GmailError("Cannot save the token file. Check its path and permissions.") from None
 
 
 def authorise(
@@ -250,6 +260,8 @@ def authorise(
     http: Http = urllib_http,
     port: int = 0,
     timeout: float = 300,
+    *,
+    force: bool = False,
 ) -> None:
     """Signs in to Google once and saves a read-only refresh token to `output`."""
     settings.require("client_id", "client_secret")
@@ -281,4 +293,4 @@ def authorise(
     _check_scope(token)
     if not token.get("refresh_token"):
         raise GmailError("Google did not return a refresh token. Try again.")
-    save_refresh_token(output, token["refresh_token"])
+    save_refresh_token(output, token["refresh_token"], force=force)

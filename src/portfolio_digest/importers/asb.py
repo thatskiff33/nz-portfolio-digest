@@ -203,13 +203,15 @@ def parse_contract_note(raw: bytes, where: str) -> ParsedTrade:
 
     quantity = parse_quantity(fields["quantity"], "Quantity")
     price_text = _CURRENCY_PREFIX.sub("", fields["price"].upper()).replace("$", "").strip()
-    price = parse_price(price_text, "Price")
+    price = parse_price(fields["price"], "Price", currency=currency)
     if "consideration" in fields:
         _check_consideration(
-            quantity, price_text, parse_money(fields["consideration"], "Consideration")
+            quantity,
+            price_text,
+            parse_money(fields["consideration"], "Consideration", currency=currency),
         )
-    fees = parse_money(fields.get("brokerage", ""), "Brokerage") + parse_money(
-        fields.get("gst", ""), "GST"
+    fees = parse_money(fields.get("brokerage", ""), "Brokerage", currency=currency) + parse_money(
+        fields.get("gst", ""), "GST", currency=currency
     )
     return ParsedTrade(
         where=where,
@@ -293,9 +295,11 @@ class AsbStatementImporter(Importer):
     def _trade(where: str, row: re.Match[str]) -> ParsedTrade:
         exchange, code, currency = listing(row["market"], row["code"])
         quantity = parse_quantity(row["quantity"], "Quantity")
-        price = parse_price(row["price"], "Price")
+        price = parse_price(row["price"], "Price", currency=currency)
         _check_consideration(
-            quantity, row["price"], parse_money(row["consideration"], "Consideration")
+            quantity,
+            row["price"],
+            parse_money(row["consideration"], "Consideration", currency=currency),
         )
         kind = TradeType.BUY if row["type"].upper() in ("BUY", "BOUGHT") else TradeType.SELL
         return ParsedTrade(
@@ -307,6 +311,6 @@ class AsbStatementImporter(Importer):
             quantity=quantity,
             price=price,
             currency=currency,
-            fees=parse_money(row["brokerage"], "Brokerage"),
+            fees=parse_money(row["brokerage"], "Brokerage", currency=currency),
             external_ref=_ref(row["contract"]),
         )

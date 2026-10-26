@@ -133,7 +133,9 @@ def cmd_import(args: argparse.Namespace) -> int:
                 settings = get_gmail_settings()
                 settings.require("label")
                 outcome = import_gmail(
-                    session, GmailClient(settings), settings.label or "", args.portfolio
+                    session,
+                    AsbGmailImporter(GmailClient(settings), settings.label or ""),
+                    args.portfolio,
                 )
             else:
                 if args.file is None:
@@ -189,8 +191,8 @@ def cmd_trade_add(args: argparse.Namespace) -> int:
         exchange, code, currency = listing(args.exchange, args.code, args.currency)
         trade_date = parse_date(args.date, "Trade date")
         quantity = _manual_quantity(args.quantity, kind)
-        price = parse_price(args.price, "Price")
-        fees = parse_money(args.fees, "Fees")
+        price = parse_price(args.price, "Price", currency=currency)
+        fees = parse_money(args.fees, "Fees", currency=currency)
     except (RowProblem, ValueError) as exc:
         _fail(str(exc))
         return 2
@@ -247,8 +249,9 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
 
 
 def cmd_gmail_authorise(args: argparse.Namespace) -> int:
-    authorise(get_gmail_settings(), Path(args.output))
+    authorise(get_gmail_settings(), Path(args.output), force=args.force)
     print(f"Saved the read-only refresh token to {args.output}. Keep this file private.")
+    print("Copy the GMAIL_REFRESH_TOKEN variable from this file into your .env file.")
     return 0
 
 
@@ -313,6 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     gsub = gmail.add_subparsers(dest="gmail_command", required=True)
     auth = gsub.add_parser("authorise", help="Create a read-only Gmail refresh token")
     auth.add_argument("--output", default=".env.gmail")
+    auth.add_argument("--force", action="store_true", help="Replace an existing token file")
     auth.set_defaults(func=cmd_gmail_authorise)
 
     return parser

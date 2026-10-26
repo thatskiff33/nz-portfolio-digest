@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
     "portfolios",
     "instruments",
     "import_runs",
+    "import_trade_matches",
     "trades",
     "income",
     "prices",

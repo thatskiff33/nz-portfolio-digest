@@ -90,8 +90,8 @@ class SharesiesImporter(Importer):
         exchange, code, currency = listing(row["market"], row["code"], row["currency"])
         trade_date = parse_date(row["date"], "Trade date")
         quantity = parse_quantity(row["quantity"], "Quantity")
-        price = parse_price(row["price"], "Price")
-        fees = parse_money(row.get("fee", ""), "Transaction fee")
+        price = parse_price(row["price"], "Price", currency=currency)
+        fees = parse_money(row.get("fee", ""), "Transaction fee", currency=currency)
         fx_rate = None
         if currency != "NZD" and row.get("rate"):
             fx_rate = invert_rate(row["rate"], "Exchange rate")

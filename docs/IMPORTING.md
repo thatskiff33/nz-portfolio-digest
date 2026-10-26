@@ -9,7 +9,11 @@ Every attempt is recorded as an import run. A malformed file imports nothing. Im
 an overlapping or identical export is safe because each broker row has a stable reference.
 Use `portfolio-digest import list` to see the audit trail and `portfolio-digest import undo
 ID` to remove the rows written by one successful run. Undo does not remove instruments or
-touch trades from another run.
+touch trades from another run. If another successful run supplied the same trade, undo
+retains it and reassigns it to that run. Undo those runs too to remove their shared trades.
+A repeated reference within one input is a row error. A stored reference is only a
+duplicate when its trade fields match; a conflicting reference fails the whole run.
+Currency prefixes on prices and fees must agree with their declared currency.
 
 Broker exports contain private financial information. Keep them outside the repository,
 prefer the ignored `imports/` directory on the server, and remove them when they are no
@@ -57,6 +61,8 @@ For the ongoing feed:
 3. Put `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` and `GMAIL_LABEL` in the private `.env`.
 4. On a machine with a browser, run `portfolio-digest gmail authorise`. It requests only
    `gmail.readonly` and writes the refresh token to `.env.gmail` with owner-only permissions.
+   Existing files are refused unless `--force` is supplied. Symlinks are always refused.
+   The command names the variable to copy; it never prints the token.
 5. Copy `GMAIL_REFRESH_TOKEN` from that file into the server's private `.env`, then securely
    remove the temporary file.
 6. Run the feed whenever required:

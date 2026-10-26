@@ -85,3 +85,65 @@ def test_gmail_feed_can_return_duplicate_contract_notes_for_storage_to_deduplica
         "contract:40012345",
         "contract:40012345",
     ]
+
+
+def test_save_refresh_token_refuses_existing_file_and_force_replaces_privately(tmp_path):
+    from portfolio_digest.gmail import save_refresh_token
+
+    path = tmp_path / ".env"
+    path.write_text("MADE_UP_SETTING=preserve-me\n")
+    with pytest.raises(GmailError, match="already exists"):
+        save_refresh_token(path, "made-up-token")
+    assert path.read_text() == "MADE_UP_SETTING=preserve-me\n"
+    save_refresh_token(path, "made-up-token", force=True)
+    assert path.read_text() == "GMAIL_REFRESH_TOKEN=made-up-token\n"
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("dangling", [False, True])
+def test_save_refresh_token_refuses_symlinks(tmp_path, force, dangling):
+    from portfolio_digest.gmail import save_refresh_token
+
+    target = tmp_path / "made-up-target"
+    if not dangling:
+        target.write_text("preserve-me")
+    link = tmp_path / "token-link"
+    link.symlink_to(target)
+    with pytest.raises(GmailError):
+        save_refresh_token(link, "made-up-token", force=force)
+    assert link.is_symlink()
+    assert not target.exists() if dangling else target.read_text() == "preserve-me"
+
+
+def test_save_refresh_token_creates_private_file(tmp_path):
+    from portfolio_digest.gmail import save_refresh_token
+
+    path = tmp_path / "made-up-token-file"
+    save_refresh_token(path, "made-up-token")
+    assert path.read_text() == "GMAIL_REFRESH_TOKEN=made-up-token\n"
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_authorise_cli_passes_force_and_names_env_variable_without_exposing_token(
+    tmp_path, monkeypatch, capsys
+):
+    from portfolio_digest import cli
+    from portfolio_digest.gmail import save_refresh_token
+
+    path = tmp_path / "made-up-token-file"
+    path.write_text("preserve-me")
+
+    def fake_authorise(settings, output, *, force):
+        save_refresh_token(output, "made-up-refresh-token", force=force)
+
+    monkeypatch.setattr(cli, "get_gmail_settings", settings)
+    monkeypatch.setattr(cli, "authorise", fake_authorise)
+    args = ["gmail", "authorise", "--output", str(path)]
+    assert cli.main(args) == 1
+    assert path.read_text() == "preserve-me"
+    assert "--force" in capsys.readouterr().err
+    assert cli.main([*args, "--force"]) == 0
+    output = capsys.readouterr()
+    assert "GMAIL_REFRESH_TOKEN" in output.out and ".env" in output.out
+    assert "made-up-refresh-token" not in output.out + output.err

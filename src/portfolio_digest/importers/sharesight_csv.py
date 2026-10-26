@@ -88,8 +88,9 @@ class SharesightCsvImporter(Importer):
         exchange, code, currency = listing(row["market"], row["code"])
         trade_date = parse_date(row["date"], "Trade Date")
         quantity = parse_quantity(row["quantity"], "Quantity")
-        price = parse_price(row["price"], "Price")
-        fees = parse_money(row.get("fee", ""), "Brokerage")
+        price = parse_price(row["price"], "Price", currency=currency)
+        fee_currency = (row.get("fee_currency") or currency).strip().upper()
+        fees = parse_money(row.get("fee", ""), "Brokerage", currency=fee_currency)
 
         base = context.base_currency
         foreign_per_base = None
@@ -98,7 +99,6 @@ class SharesightCsvImporter(Importer):
             fx_rate = invert_rate(row["rate"], "Exchange Rate")
             foreign_per_base = parse_decimal(row["rate"], "Exchange Rate")
 
-        fee_currency = (row.get("fee_currency") or currency).strip().upper()
         if fees and fee_currency != currency:
             if fee_currency != base or foreign_per_base is None:
                 raise RowProblem(

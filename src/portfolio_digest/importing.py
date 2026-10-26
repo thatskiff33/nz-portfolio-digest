@@ -11,12 +11,19 @@ from sqlalchemy.orm import Session
 
 from portfolio_digest.gmail import AsbGmailImporter, GmailError
 from portfolio_digest.importers.asb import AsbEmailImporter, AsbStatementImporter
-from portfolio_digest.importers.base import FileProblem, Importer, ParseContext, ParseResult
+from portfolio_digest.importers.base import (
+    FileProblem,
+    Importer,
+    ParseContext,
+    ParseResult,
+    RowError,
+)
 from portfolio_digest.importers.sharesies import SharesiesImporter
 from portfolio_digest.importers.sharesight_csv import SharesightCsvImporter
 from portfolio_digest.models import (
     ImportRun,
     ImportStatus,
+    ImportTradeMatch,
     Income,
     Instrument,
     Portfolio,
@@ -130,6 +137,68 @@ def _store_result(
     trade_source: str,
     result: ParseResult,
 ) -> ImportOutcome:
+    references = [trade.external_ref for trade in result.trades]
+    existing = (
+        {
+            trade.external_ref: (trade, instrument)
+            for trade, instrument in session.execute(
+                select(Trade, Instrument)
+                .join(Instrument, Trade.instrument_id == Instrument.id)
+                .where(
+                    Trade.portfolio_id == portfolio.id,
+                    Trade.source == trade_source,
+                    Trade.external_ref.in_(references),
+                )
+            )
+        }
+        if references
+        else {}
+    )
+    seen: dict[str, str] = {}
+    for parsed in result.trades:
+        if parsed.external_ref in seen:
+            result.errors.append(
+                RowError(
+                    parsed.where,
+                    f"Reference {parsed.external_ref!r} is repeated (first at "
+                    f"{seen[parsed.external_ref]}). Each row must have a unique reference.",
+                )
+            )
+        seen.setdefault(parsed.external_ref, parsed.where)
+        match = existing.get(parsed.external_ref)
+        if match is not None:
+            trade, instrument = match
+            stored = (
+                trade.trade_date,
+                trade.trade_type,
+                instrument.exchange,
+                instrument.code,
+                trade.quantity,
+                trade.price,
+                trade.currency,
+                trade.fees,
+                trade.fx_rate,
+            )
+            incoming = (
+                parsed.trade_date,
+                parsed.trade_type.value,
+                parsed.exchange,
+                parsed.code,
+                parsed.quantity,
+                parsed.price,
+                parsed.currency,
+                parsed.fees,
+                parsed.fx_rate,
+            )
+            if stored != incoming:
+                result.errors.append(
+                    RowError(
+                        parsed.where,
+                        f"Reference {parsed.external_ref!r} already exists "
+                        "with different trade fields.",
+                    )
+                )
+
     if result.errors:
         _fail_run(
             session,
@@ -142,28 +211,13 @@ def _store_result(
             f"No trades were imported.\n{details}"
         )
 
-    references = [trade.external_ref for trade in result.trades]
-    existing = (
-        set(
-            session.scalars(
-                select(Trade.external_ref).where(
-                    Trade.portfolio_id == portfolio.id,
-                    Trade.source == trade_source,
-                    Trade.external_ref.in_(references),
-                )
-            )
-        )
-        if references
-        else set()
-    )
-
     instruments: dict[tuple[str, str], Instrument] = {}
     imported = 0
-    seen = set(existing)
     for parsed in result.trades:
-        if parsed.external_ref in seen:
+        if parsed.external_ref in existing:
+            trade, _ = existing[parsed.external_ref]
+            session.add(ImportTradeMatch(import_run_id=run.id, trade_id=trade.id))
             continue
-        seen.add(parsed.external_ref)
         key = (parsed.exchange, parsed.code)
         instrument = instruments.get(key)
         if instrument is None:
@@ -258,11 +312,29 @@ def import_gmail(
 
 
 def undo_import(session: Session, run_id: int) -> int:
-    run = session.get(ImportRun, run_id, with_for_update=True)
+    run = session.get(ImportRun, run_id)
     if run is None:
         raise ImportFailure(f"There is no import run {run_id}.")
+    # Serialise undo with imports and other undos in this portfolio.
+    session.get(Portfolio, run.portfolio_id, with_for_update=True)
+    session.refresh(run, with_for_update=True)
     if run.status != ImportStatus.SUCCEEDED.value:
         raise ImportFailure(f"Import run {run_id} is {run.status}, so it cannot be undone.")
+    for trade in session.scalars(select(Trade).where(Trade.import_run_id == run.id)):
+        replacement = session.scalar(
+            select(ImportTradeMatch.import_run_id)
+            .join(ImportRun, ImportTradeMatch.import_run_id == ImportRun.id)
+            .where(
+                ImportTradeMatch.trade_id == trade.id,
+                ImportRun.id != run.id,
+                ImportRun.status == ImportStatus.SUCCEEDED.value,
+            )
+            .order_by(ImportRun.id)
+            .limit(1)
+        )
+        if replacement is not None:
+            trade.import_run_id = replacement
+    session.flush()
     trade_count = session.execute(delete(Trade).where(Trade.import_run_id == run.id)).rowcount
     income_count = session.execute(delete(Income).where(Income.import_run_id == run.id)).rowcount
     run.status = ImportStatus.UNDONE.value

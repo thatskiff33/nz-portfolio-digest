@@ -175,12 +175,19 @@ def parse_date(value: str, what: str = "date") -> date:
     raise RowProblem(f"{what} {value!r} is not a date such as 14/03/2024 or 2024-03-14.")
 
 
-_NUMBER_NOISE = re.compile(r"^(?:[A-Z]{3}\s*)?\$?")
+_NUMBER_NOISE = re.compile(r"^(?:([A-Z]{3})\s*)?\$?")
 
 
-def parse_decimal(value: str, what: str) -> Decimal:
-    """An exact number. Accepts "1,234.50", "$12.00" and "NZD 12.00"."""
-    text = _NUMBER_NOISE.sub("", value.strip().upper()).replace(",", "").strip()
+def parse_decimal(value: str, what: str, *, currency: str | None = None) -> Decimal:
+    """An exact number. Currency prefixes require a matching expected currency."""
+    text = value.strip().upper()
+    match = _NUMBER_NOISE.match(text)
+    if match and match.group(1):
+        prefix = match.group(1)
+        if currency is None or prefix != currency:
+            expected = currency or "an unprefixed number"
+            raise RowProblem(f"{what} is in {prefix}, but expected {expected}.")
+    text = _NUMBER_NOISE.sub("", text).replace(",", "").strip()
     if text.startswith("-$"):
         text = "-" + text[2:]
     try:
@@ -207,23 +214,23 @@ def parse_quantity(value: str, what: str = "quantity", *, allow_negative: bool =
     return number
 
 
-def parse_price(value: str, what: str = "price") -> Decimal:
+def parse_price(value: str, what: str = "price", *, currency: str | None = None) -> Decimal:
     """A unit price, rounded to 6 decimal places (half to even) to fit the database exactly.
 
     Brokers sometimes report an average price with more places than that. Rounding here
     rather than in the database keeps it visible and the same for every source.
     """
-    number = parse_decimal(value, what)
+    number = parse_decimal(value, what, currency=currency)
     if number < 0:
         raise RowProblem(f"{what} cannot be negative ({value!r}).")
     return number.quantize(Decimal(1).scaleb(-MONEY_PLACES), rounding=ROUND_HALF_EVEN)
 
 
-def parse_money(value: str, what: str) -> Decimal:
+def parse_money(value: str, what: str, *, currency: str | None = None) -> Decimal:
     """A cash amount such as a fee. Blank means zero."""
     if not value.strip():
         return Decimal(0)
-    number = parse_decimal(value, what)
+    number = parse_decimal(value, what, currency=currency)
     if number < 0:
         # Some brokers show fees as negative cash. The sign carries no meaning for a fee.
         number = -number

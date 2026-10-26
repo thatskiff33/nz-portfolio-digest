@@ -147,3 +147,47 @@ def test_reconcile_rejects_duplicate_and_malformed_snapshot_rows():
         parse_snapshot(bad)
     assert "line 3" in str(exc.value)
     assert "line 4" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (b",7.25,BUY", b",USD 7.25,BUY"),
+        (b",1.25,NZD", b",AUD 1.25,NZD"),
+    ],
+)
+def test_sharesies_rejects_price_and_fee_currency_prefix_mismatch(old, new):
+    content = fixture("sharesies-transactions.csv").replace(old, new)
+    result = SharesiesImporter().parse(content, ParseContext())
+    assert len(result.errors) == 1
+    assert "expected NZD" in str(result.errors[0])
+    assert "line 2" in str(result.errors[0])
+
+
+@pytest.mark.parametrize("field", [b"Price", b"Brokerage", b"GST", b"Consideration"])
+def test_asb_rejects_currency_prefix_mismatch(field):
+    content = fixture("asb-contract-note.eml").replace(field + b": NZD", field + b": AUD")
+    result = AsbEmailImporter().parse(content, ParseContext())
+    assert result.trades == []
+    assert len(result.errors) == 1
+    assert "NZD" in str(result.errors[0]) and "AUD" in str(result.errors[0])
+
+
+def test_sharesight_checks_prefix_against_declared_brokerage_currency():
+    content = fixture("sharesight-trades.csv").replace(b",5.00,NZD", b",USD 5.00,NZD")
+    result = SharesightCsvImporter().parse(content, ParseContext())
+    assert len(result.errors) == 1
+    assert "Brokerage is in USD, but expected NZD" in str(result.errors[0])
+    valid = fixture("sharesight-trades.csv").replace(b",5.00,NZD", b",NZD 5.00,NZD")
+    result = SharesightCsvImporter().parse(valid, ParseContext())
+    assert result.errors == []
+    assert result.trades[0].fees == Decimal("3.062500")
+
+
+def test_sharesies_accepts_matching_price_and_fee_prefixes():
+    content = fixture("sharesies-transactions.csv").replace(b",7.25,BUY", b",NZD 7.25,BUY")
+    content = content.replace(b",1.25,NZD", b",NZD 1.25,NZD")
+    result = SharesiesImporter().parse(content, ParseContext())
+    assert result.errors == []
+    assert result.trades[0].price == Decimal("7.250000")
+    assert result.trades[0].fees == Decimal("1.25")

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
 from html import escape
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr, ValidationError
@@ -30,6 +30,15 @@ class PushSettings(BaseSettings):
     alert_ntfy_token: SecretStr | None = None
     alert_pushover_token: SecretStr | None = None
     alert_pushover_user: SecretStr | None = None
+
+
+class _NoPushRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A redirected POST could leak the bearer token or portfolio figures.
+        return None
+
+
+_push_opener = build_opener(_NoPushRedirects())
 
 
 def push(text: str) -> None:
@@ -63,7 +72,7 @@ def push(text: str) -> None:
         else:
             return
         # urllib avoids httpx request logging, which could expose the secret topic URL.
-        with urlopen(request, timeout=10) as response:  # noqa: S310
+        with _push_opener.open(request, timeout=10) as response:
             if response.status != 200:
                 raise ValueError
     except Exception:

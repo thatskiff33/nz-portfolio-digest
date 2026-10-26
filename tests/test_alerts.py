@@ -161,7 +161,7 @@ def test_push_failure_never_logs_secret(monkeypatch, caplog):
         calls.append(request)
         raise OSError("invented-private-token invented-bearer-token")
 
-    monkeypatch.setattr(alerts, "urlopen", fail)
+    monkeypatch.setattr(alerts._push_opener, "open", fail)
     alerts.push("Made-up figures")
     assert len(calls) == 1
     assert calls[0].get_header("Authorization") == "Bearer invented-bearer-token"
@@ -178,7 +178,7 @@ def test_push_off_by_default(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     request = Mock()
-    monkeypatch.setattr(alerts, "urlopen", request)
+    monkeypatch.setattr(alerts._push_opener, "open", request)
     alerts.push("Made up")
     request.assert_not_called()
 
@@ -256,7 +256,7 @@ def test_pushover_request_contains_env_credentials_only_in_body(monkeypatch):
     response.__enter__ = Mock(return_value=Mock(status=200))
     response.__exit__ = Mock(return_value=False)
     request = Mock(return_value=response)
-    monkeypatch.setattr(alerts, "urlopen", request)
+    monkeypatch.setattr(alerts._push_opener, "open", request)
     alerts.push("Made-up alert")
     sent = request.call_args.args[0]
     assert sent.full_url == "https://api.pushover.net/1/messages.json"
@@ -407,3 +407,17 @@ def test_portfolio_uses_completed_market_and_fx_date(sample, exchange, currency,
     states = alerts.evaluate(session, portfolio, config(), now)
     assert "-20.00%" in states["portfolio"].text
     assert "2026-10-08 to 2026-10-15" in states["portfolio"].text
+
+
+@pytest.mark.parametrize("target", ["http://other.example/topic", "https://other.example/topic"])
+def test_push_refuses_redirects_with_credentials(target):
+    from urllib.error import HTTPError
+    from urllib.request import Request
+
+    request = Request(
+        "https://ntfy.example/private-topic",
+        data=b"Made-up figures",
+        headers={"Authorization": "Bearer invented-token"},
+    )
+    with pytest.raises(HTTPError):
+        alerts._push_opener.error("http", request, Mock(), 302, "Found", {"location": target})

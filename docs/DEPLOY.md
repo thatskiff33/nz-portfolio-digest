@@ -346,5 +346,6 @@ topic URL and optionally `ALERT_NTFY_TOKEN`, or set both `ALERT_PUSHOVER_TOKEN` 
 `ALERT_PUSHOVER_USER`. ntfy takes precedence if both providers are configured. Recreate
 the scheduler container after changing environment values. Push providers receive the
 same portfolio figures as the email; use only a private topic or account. Never put
-URLs or tokens in TOML, commands or git. Push failures emit a generic warning without
+URLs or tokens in TOML, commands or git. Push requests refuse redirects to protect tokens and portfolio figures.
+Push failures emit a generic warning without
 secrets and do not retry an already successful email.

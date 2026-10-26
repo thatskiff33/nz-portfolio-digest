@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from http.client import HTTPException
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import SecretStr
@@ -81,6 +81,11 @@ class AkahuClient:
                 status = exc.code
                 retry_after = exc.headers.get("Retry-After", "") if exc.headers else ""
                 exc.close()
+                if status in (401, 403):
+                    raise AkahuError(
+                        f"Akahu rejected the credentials (HTTP {status}). Check AKAHU_APP_TOKEN "
+                        "and AKAHU_USER_TOKEN, and that the Personal App still has access."
+                    ) from None
                 if status != 429 or attempt == 4:
                     raise AkahuError(f"Akahu request failed (HTTP {status}).") from None
                 delay = (
@@ -114,10 +119,8 @@ class AkahuClient:
             seen.add(cursor)
 
     def accounts(self) -> list[dict]:
+        """Investment holdings arrive inside each account as `meta.portfolio`."""
         return self._list("/accounts")
-
-    def holdings(self, account_id: str) -> list[dict]:
-        return self._list("/accounts/" + quote(account_id, safe="") + "/holdings")
 
 
 def push_success(url: SecretStr) -> None:

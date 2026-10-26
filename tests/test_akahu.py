@@ -48,24 +48,26 @@ def test_pagination_and_decimal_json_without_float_conversion():
     client, opener, _ = client_with(
         response([{"_id": "acc_fictional"}], "next & page"),
         response([{"_id": "acc_other"}]),
-        BytesIO(b'{"success":true,"items":[{"units":0.123456789123456789}]}'),
+        BytesIO(b'{"success":true,"items":[{"meta":{"portfolio":[{"quantity":0.1234567891}]}}]}'),
     )
     assert len(client.accounts()) == 2
     assert opener.call_args_list[1].args[0].full_url.endswith("cursor=next+%26+page")
-    assert client.holdings("acc_fictional")[0]["units"] == Decimal("0.123456789123456789")
+    units = client.accounts()[0]["meta"]["portfolio"][0]["quantity"]
+    assert units == Decimal("0.1234567891")
+    assert opener.call_args.args[0].full_url == "https://api.akahu.io/v1/accounts"
     request = opener.call_args.args[0]
     assert request.get_method() == "GET"
     assert request.get_header("X-akahu-id") == APP
     assert request.get_header("Authorization") == "Bearer " + USER
 
 
-def test_holdings_pagination_and_429_retry():
+def test_account_pagination_and_429_retry():
     client, opener, sleep = client_with(
         HTTPError("https://api.akahu.io", 429, USER, {"Retry-After": "3"}, BytesIO(APP.encode())),
-        response([{"_id": "h1"}], "page2"),
-        response([{"_id": "h2"}]),
+        response([{"_id": "acc_one"}], "page2"),
+        response([{"_id": "acc_two"}]),
     )
-    assert len(client.holdings("acc_fictional")) == 2
+    assert len(client.accounts()) == 2
     sleep.assert_called_once_with(3)
     assert opener.call_count == 3
 
@@ -95,6 +97,17 @@ def test_upstream_secrets_never_appear_in_errors_or_logs(error, caplog, capsys):
         client.accounts()
     output = str(exc.value) + repr(client) + caplog.text + str(capsys.readouterr())
     assert APP not in output and USER not in output
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_rejected_credentials_explain_what_to_check(status):
+    client, opener, _ = client_with(
+        HTTPError("https://api.akahu.io", status, USER, {}, BytesIO(APP.encode()))
+    )
+    with pytest.raises(AkahuError, match="AKAHU_APP_TOKEN") as exc:
+        client.accounts()
+    assert f"HTTP {status}" in str(exc.value) and APP not in str(exc.value)
+    assert opener.call_count == 1
 
 
 def test_repeated_cursor_fails_instead_of_looping():
@@ -147,25 +160,23 @@ def local_engine():
     engine.dispose()
 
 
+def investment_account(holdings, account_id="acc_fictional"):
+    return {
+        "_id": account_id,
+        "type": "INVESTMENT",
+        "status": "ACTIVE",
+        "balance": {"current": "10.25", "currency": "NZD"},
+        "refreshed": {"balance": "2026-10-25T12:00:00Z"},
+        "meta": {"portfolio": holdings},
+    }
+
+
 def sync_client(holdings):
-    return client_with(
-        response(
-            [
-                {
-                    "_id": "acc_fictional",
-                    "type": "INVESTMENT",
-                    "status": "ACTIVE",
-                    "balance": {"current": "10.25", "currency": "NZD"},
-                    "refreshed": {"balance": "2026-10-25T12:00:00Z"},
-                }
-            ]
-        ),
-        response(holdings),
-    )[0]
+    return client_with(response([investment_account(holdings)]))[0]
 
 
 def holding(units="10.25", **kwargs):
-    return {"_id": "hold_fictional", "code": "DEMO", "exchange": "NZX", "units": units, **kwargs}
+    return {"_id": "hold_fictional", "code": "DEMO", "exchange": "NZX", "quantity": units, **kwargs}
 
 
 @pytest.mark.parametrize(
@@ -181,6 +192,16 @@ def holding(units="10.25", **kwargs):
             0,
         ),
         ([holding(code="UNKNOWN")], [Decimal("-10.25")], 1),
+        # Zero-unit leftovers Akahu cannot place are not drift.
+        ([holding(), holding("0", _id="hold_sold", code="GONE")], [], 0),
+        # Exchange spellings normalise like the importers do.
+        ([holding(exchange="nzse")], [], 0),
+        ([holding(exchange="Moon Exchange")], [Decimal("-10.25")], 1),
+        # The ledger keeps 8 decimal places; finer upstream precision is rounded once.
+        ([holding("10.250000004")], [], 0),
+        ([holding("10.250000005")], [], 0),
+        ([holding("10.250000006")], [Decimal("1E-8")], 0),
+        ([holding("10.250000015")], [Decimal("2E-8")], 0),
     ],
 )
 def test_sync_persists_match_drift_both_ways_and_unmapped(
@@ -230,10 +251,10 @@ def test_failed_fetch_leaves_failed_snapshot(local_engine):
         assert USER not in snapshot.report
 
 
-def test_ledger_sells_adjustments_opening_balance_and_drp(local_engine):
+def test_ledger_sells_adjustments_opening_balance_and_drp_counted_once(local_engine):
     with Session(local_engine) as session:
         for index, (kind, quantity) in enumerate(
-            [("sell", "3"), ("adjustment", "-1"), ("opening_balance", "2")]
+            [("sell", "3"), ("adjustment", "-1"), ("opening_balance", "2"), ("adjustment", "0.5")]
         ):
             session.add(
                 Trade(
@@ -259,6 +280,7 @@ def test_ledger_sells_adjustments_opening_balance_and_drp(local_engine):
                 net_amount=Decimal("1"),
                 source="manual",
                 external_ref="fake-income",
+                # The same DRP units booked by the adjustment above.
                 drp_quantity=Decimal("0.5"),
             )
         )
@@ -277,7 +299,7 @@ def test_cli_exit_and_kuma_only_on_match(local_engine, monkeypatch, capsys, rows
     settings = Mock(
         akahu_app_token=SecretStr(APP),
         akahu_user_token=SecretStr(USER),
-        akahu_account_ids=[],
+        akahu_account_ids="",
         uptime_kuma_push_url=SecretStr("https://kuma.invalid/secret"),
     )
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
@@ -364,23 +386,49 @@ def test_multiple_accounts_aggregate_units(local_engine):
     client, _, _ = client_with(
         response(
             [
-                {"_id": "acc_one", "type": "INVESTMENT", "status": "ACTIVE"},
-                {"_id": "acc_two", "type": "INVESTMENT", "status": "ACTIVE"},
+                investment_account([holding("5")], "acc_one"),
+                investment_account([holding("5.25")], "acc_two"),
             ]
-        ),
-        response([holding("5")]),
-        response([holding("5.25")]),
+        )
     )
     assert sync(local_engine, "Fictional", client, [])[1:] == ([], 0)
 
 
-def test_bad_account_json_is_a_safe_configuration_error(no_settings_file, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "raw", [APP, '{"a": 1}', '["acc_x", "acc_x"]', '["acc_x", " acc_x "]', '[""]', "[{}]"]
+)
+def test_bad_account_ids_fail_only_akahu_sync(no_settings_file, monkeypatch, capsys, raw):
+    from portfolio_digest.config import akahu_account_ids, get_settings
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://fake:fake@localhost/fake")
+    monkeypatch.setenv("AKAHU_APP_TOKEN", APP)
+    monkeypatch.setenv("AKAHU_USER_TOKEN", USER)
+    monkeypatch.setenv("AKAHU_ACCOUNT_IDS", raw)
+    get_settings.cache_clear()
+    try:
+        # Other commands still load settings.
+        assert get_settings().akahu_account_ids == raw
+        assert cli.main(["akahu", "sync", "--portfolio", "Fictional"]) == 1
+    finally:
+        get_settings.cache_clear()
+    err = capsys.readouterr().err
+    assert "AKAHU_ACCOUNT_IDS" in err and APP not in err and USER not in err
+    assert akahu_account_ids("") == []
+    assert akahu_account_ids(' ["acc_one", "acc_two"] ') == ["acc_one", "acc_two"]
+
+
+def test_bad_account_ids_do_not_break_another_command(local_engine, monkeypatch):
     from portfolio_digest.config import get_settings
 
-    monkeypatch.setenv("AKAHU_ACCOUNT_IDS", APP)
+    monkeypatch.setenv("DATABASE_URL", "sqlite://")
+    monkeypatch.setenv("AKAHU_ACCOUNT_IDS", "invalid-json")
+    monkeypatch.setattr(cli, "make_engine", lambda: local_engine)
     get_settings.cache_clear()
-    assert cli.main(["akahu", "sync", "--portfolio", "Fictional"]) == 1
-    assert APP not in capsys.readouterr().err
+    try:
+        assert get_settings().akahu_account_ids == "invalid-json"
+        assert cli.main(["portfolio", "add", "Another fictional portfolio"]) == 0
+    finally:
+        get_settings.cache_clear()
 
 
 def test_redirects_are_not_followed():
@@ -406,3 +454,44 @@ def test_kuma_success_push_is_read_only_and_preserves_query(monkeypatch, status_
     opener.open.assert_called_once_with(
         "https://kuma.invalid/push/fake?msg=OK&ping=&status=up", timeout=15
     )
+
+
+@pytest.mark.parametrize("meta", [None, {}, {"portfolio": None}, {"portfolio": {"a": 1}}])
+def test_missing_portfolio_fails_instead_of_confirming_zero(local_engine, meta):
+    account = investment_account([])
+    account["meta"] = meta
+    client, _, _ = client_with(response([account]))
+    with pytest.raises(AkahuError, match="no holdings"):
+        sync(local_engine, "Fictional", client, [])
+
+
+def test_holdings_without_id_use_alternative_fields_and_a_stable_key(local_engine):
+    rows = [{"symbol": "demo", "market": "NZX", "units": "10.25", "name": "Example"}]
+    snapshot_id, mismatches, unmapped = sync(local_engine, "Fictional", sync_client(rows), [])
+    assert (mismatches, unmapped) == ([], 0)
+    with Session(local_engine) as session:
+        stored = json.loads(session.get(AkahuSnapshot, snapshot_id).observations)
+    assert stored[0]["holdings"][0]["holding_id"] == "code:NZX:DEMO"
+    assert stored[0]["holdings"][0]["instrument_id"] == 1
+
+
+def test_name_only_holding_can_be_mapped_manually(local_engine):
+    rows = [{"name": "Example Fund", "shares": "10.25"}]
+    assert sync(local_engine, "Fictional", sync_client(rows), [])[2] == 1
+    with Session(local_engine) as session:
+        session.add(
+            AkahuMapping(
+                portfolio_id=1,
+                account_id="acc_fictional",
+                holding_id="name:Example Fund",
+                instrument_id=1,
+            )
+        )
+        session.commit()
+    assert sync(local_engine, "Fictional", sync_client(rows), [])[1:] == ([], 0)
+
+
+@pytest.mark.parametrize("row", [{"quantity": "1"}, {"code": "DEMO"}, "not a holding"])
+def test_unusable_holdings_fail_safely(local_engine, row):
+    with pytest.raises(AkahuError):
+        sync(local_engine, "Fictional", sync_client([row]), [])

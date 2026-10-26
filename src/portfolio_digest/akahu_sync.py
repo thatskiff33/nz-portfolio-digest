@@ -2,14 +2,94 @@
 
 import json
 from datetime import UTC, datetime
-from decimal import Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
+from typing import Any
 
 from sqlalchemy import Engine, func, select
 
+from portfolio_digest import markets
 from portfolio_digest.akahu import AkahuClient, AkahuError, exact_units
 from portfolio_digest.db import session_scope
 from portfolio_digest.models import AkahuMapping, AkahuSnapshot, Instrument, Portfolio
 from portfolio_digest.reconcile import Mismatch, ledger_units, reconcile
+from portfolio_digest.validation import InvalidInput
+
+LEDGER_PLACES = Decimal("1e-8")
+
+
+def _text(item: dict, *keys: str) -> str | None:
+    """The first non-blank string among keys. Passed-through fields vary by provider."""
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _portfolio_holdings(account: dict) -> list[dict[str, Any]]:
+    """Holdings from the documented `meta.portfolio`. Akahu passes these fields through
+    from each integration unchanged, so every field except units is optional here."""
+    meta = account.get("meta")
+    portfolio = meta.get("portfolio") if isinstance(meta, dict) else None
+    if not isinstance(portfolio, list):
+        # Missing is not the same as empty: never confirm zero units by accident.
+        raise AkahuError(
+            "Akahu returned no holdings for an investment account. Check the Personal App "
+            "can read investment holdings, then rerun after the next refresh."
+        )
+    holdings = []
+    for item in portfolio:
+        if not isinstance(item, dict):
+            raise AkahuError("Akahu returned an invalid holding.")
+        units = next(
+            (item[key] for key in ("quantity", "units", "shares") if item.get(key) is not None),
+            None,
+        )
+        code = _text(item, "code", "symbol", "ticker")
+        exchange = _text(item, "exchange", "market")
+        name = _text(item, "name")
+        try:
+            exchange_code = markets.exchange_code(exchange) if exchange else None
+        except InvalidInput:
+            exchange_code = None
+        try:
+            instrument_code = markets.instrument_code(code) if code else None
+        except InvalidInput:
+            instrument_code = None
+        holding_id = _text(item, "_id", "id")
+        if holding_id is None and instrument_code:
+            holding_id = f"code:{exchange_code or exchange or '-'}:{instrument_code}"
+        elif holding_id is None and name:
+            holding_id = f"name:{name}"
+        if holding_id is None:
+            raise AkahuError("Akahu returned a holding with no identifier, code or name.")
+        holdings.append(
+            {
+                # Fits akahu_mappings.holding_id so any holding can be mapped manually.
+                "holding_id": holding_id[:128],
+                "name": name,
+                "code": code,
+                "exchange": exchange,
+                "instrument_code": instrument_code,
+                "exchange_code": exchange_code,
+                "units": exact_units(units),
+            }
+        )
+    return holdings
+
+
+def _match(instruments: list[Instrument], holding: dict) -> int | None:
+    """One instrument by code, and by exchange when Akahu names one. Otherwise unmapped."""
+    code = holding["instrument_code"]
+    if not code or (holding["exchange"] and not holding["exchange_code"]):
+        return None
+    matches = [
+        i
+        for i in instruments
+        if i.code == code
+        and (holding["exchange_code"] is None or i.exchange == holding["exchange_code"])
+    ]
+    return matches[0].id if len(matches) == 1 else None
 
 
 def _account_metadata(account: dict) -> dict:
@@ -70,7 +150,7 @@ def sync(
             seen_accounts.add(account_id)
             if account.get("status") != "ACTIVE":
                 raise AkahuError("An investment account is inactive. Reconnect it in Akahu.")
-            holdings = client.holdings(account_id)
+            holdings = _portfolio_holdings(account)
             observations.append(
                 {
                     "account_id": account_id,
@@ -94,39 +174,27 @@ def sync(
                 seen = set()
                 rows = []
                 for holding in account["holdings"]:
-                    holding_id = holding.get("_id")
-                    if not isinstance(holding_id, str) or not holding_id or holding_id in seen:
+                    holding_id = holding["holding_id"]
+                    if holding_id in seen:
                         raise AkahuError("Akahu returned an invalid or duplicate holding.")
                     seen.add(holding_id)
-                    units = exact_units(holding.get("units"))
-                    code = holding.get("code", holding.get("symbol"))
-                    exchange = holding.get("exchange")
-                    if code is not None and not isinstance(code, str):
-                        raise AkahuError("Akahu returned an invalid holding code.")
-                    if exchange is not None and not isinstance(exchange, str):
-                        raise AkahuError("Akahu returned an invalid holding exchange.")
+                    # The ledger stores 8 decimal places, so compare at that precision.
+                    compared = holding["units"].quantize(LEDGER_PLACES, rounding=ROUND_HALF_EVEN)
                     instrument_id = mappings.get((account["account_id"], holding_id))
                     if instrument_id is None:
-                        matches = [
-                            i
-                            for i in instruments
-                            if code
-                            and i.code == code.upper()
-                            and (not exchange or i.exchange == exchange.upper())
-                        ]
-                        instrument_id = matches[0].id if len(matches) == 1 else None
+                        instrument_id = _match(instruments, holding)
                     row = {
-                        "holding_id": holding_id,
-                        "code": code,
-                        "exchange": exchange,
-                        "units": str(units),
+                        **holding,
+                        "units": str(holding["units"]),
+                        "compared_units": str(compared),
                         "instrument_id": instrument_id,
                     }
                     rows.append(row)
-                    if instrument_id is None:
+                    if instrument_id is not None:
+                        observed[instrument_id] = observed.get(instrument_id, Decimal(0)) + compared
+                    elif compared != 0:
+                        # A zero-unit leftover (e.g. a fully sold fund) is not drift.
                         unmapped.append({"account_id": account["account_id"], **row})
-                    else:
-                        observed[instrument_id] = observed.get(instrument_id, Decimal(0)) + units
                 cleaned.append({**account, "holdings": rows})
             mismatches = reconcile(ledger_units(session, portfolio_id), observed)
             snapshot = session.get(AkahuSnapshot, snapshot_id)

@@ -17,7 +17,7 @@ from portfolio_digest.importers.base import (
     parse_decimal,
     read_csv,
 )
-from portfolio_digest.models import Income, Instrument, Trade, TradeType
+from portfolio_digest.models import Instrument, Trade, TradeType
 
 
 @dataclass(frozen=True)
@@ -34,16 +34,17 @@ class Mismatch:
 
 
 def ledger_units(session: Session, portfolio_id: int) -> dict[int, Decimal]:
-    """Include opening balances, signed adjustments and explicit DRP units."""
+    """Units from trades only: buys, opening balances and signed adjustments, less sells.
+
+    DRP units are booked as an adjustment or buy trade. `Income.drp_quantity` describes
+    those same units, so adding it here would count a reinvestment twice.
+    """
     totals: dict[int, Decimal] = defaultdict(Decimal)
     with localcontext() as context:
         context.prec = 50
         for trade in session.scalars(select(Trade).where(Trade.portfolio_id == portfolio_id)):
             sign = -1 if trade.trade_type == TradeType.SELL else 1
             totals[trade.instrument_id] += sign * trade.quantity
-        for income in session.scalars(select(Income).where(Income.portfolio_id == portfolio_id)):
-            if income.drp_quantity is not None:
-                totals[income.instrument_id] += income.drp_quantity
     return dict(totals)
 
 

@@ -10,7 +10,8 @@ saved for reference, not reconciled as cash because there is no cash ledger yet.
    [Akahu's Personal App guide](https://developers.akahu.nz/docs/personal-apps).
 2. Connect the investment provider you want to confirm, such as Sharesies. Grant account
    and investment holdings read access. This client only makes GET requests to
-   `/v1/accounts` and `/v1/accounts/{id}/holdings`. It never requests a refresh or a payment.
+   `/v1/accounts`, and reads each investment account's holdings from its documented
+   `meta.portfolio` field. It never requests a refresh or a payment.
 3. Copy the app token and personal user token into `AKAHU_APP_TOKEN` and
    `AKAHU_USER_TOKEN` in your server's `.env`, with file permissions `600`.
    Do not paste tokens into shell commands, logs or issue reports.
@@ -27,7 +28,10 @@ By default all `INVESTMENT` accounts are combined. If a token covers several por
 set `AKAHU_ACCOUNT_IDS` to a JSON array of just this portfolio's account IDs in its own
 runtime environment, for example `["acc_example"]`. Never confirm a partial account set
 against a portfolio that includes other accounts. Account IDs can be found in My Akahu.
-An inactive or missing configured account fails the run rather than confirming zero units.
+An inactive or missing configured account fails the run rather than confirming zero units,
+as does an investment account with no `meta.portfolio` list. An invalid `AKAHU_ACCOUNT_IDS`
+only fails `akahu sync`; other commands ignore it. A 401 or 403 response means Akahu
+rejected the tokens: check both values and that the Personal App still has access.
 
 Personal Apps generally refresh about once a day. Running sync more frequently reads the
 same cached data. Snapshots retain Akahu's refresh metadata as well as the time of the run;
@@ -40,7 +44,9 @@ Exit `0` means all mapped units match with no unknown holdings. Exit `1` means d
 operational failure. Each attempt for an existing portfolio creates an `akahu_snapshots`
 row: `matched`, `drift` or `failed` (`running` if interrupted). Holdings and balances use
 exact decimal strings in the snapshot JSON, not binary floats. The decoder rejects invalid
-numbers and quantities with more than 24 decimal places instead of silently rounding them.
+numbers and quantities with more than 24 decimal places. The ledger stores units to 8
+decimal places, so each holding is rounded half-even to 8 places (`compared_units`) before
+comparing; the exact upstream `units` are kept alongside.
 
 The report prints instrument IDs, ledger units, observed units and the difference
 (observed minus ledger). It detects both missing and extra units, including instruments
@@ -48,8 +54,13 @@ present on just one side. `report` also records unmapped holdings; `observations
 selected account balances, refresh timestamps and holding identifiers. These are private
 financial data in your database. Keep backups private and never commit snapshots to git.
 
-Codes match case-insensitively with exchange when provided. Without an exchange, a code
-must identify exactly one instrument. Unknown or ambiguous holdings cause drift. To resolve
+Akahu passes holding fields through from each provider, so they vary. Units come from
+`quantity`, `units` or `shares`; the code from `code`, `symbol` or `ticker`; the exchange
+from `exchange` or `market`. Codes match case-insensitively. Exchanges are normalised the
+same way as imports (`NZSE` is `NZX`); an exchange we don't recognise never matches.
+Without an exchange, a code must identify exactly one instrument. Unknown or ambiguous
+holdings with units cause drift; an unknown holding with zero units is recorded but is
+not drift. To resolve
 one, inspect the snapshot report locally, create the instrument if necessary, then insert
 an explicit override in the database using your own values:
 
@@ -59,14 +70,16 @@ VALUES (1, 'acc_example', 'holding_example', 42);
 ```
 
 Overrides are scoped to portfolio and account and take precedence over code matching.
-Use the holding's `_id` from Akahu. Never guess an exchange or map an unknown holding to
+Use the `holding_id` shown in the snapshot: Akahu's `_id` (or `id`) when supplied,
+otherwise `code:EXCHANGE:CODE` or `name:Holding name`. Never guess an exchange or map an unknown holding to
 something similar just to clear an alert.
 
 For unit drift, compare the provider's statement with imports, sales, corporate actions,
 transfers, opening balances and dividend reinvestments. Correct or import the missing
-ledger records with supporting evidence. The shared reconciliation function counts buys,
-opening balances, signed adjustments and explicit DRP units, and subtracts sells. Record
-a DRP once, either as explicit income units or a trade, to avoid double counting. Wait for
+ledger records with supporting evidence. The shared reconciliation function counts trades
+only: buys, opening balances and signed adjustments, less sells. Book DRP units as an
+adjustment (or buy) trade; the income row's `drp_quantity` is informational and not added
+again. Wait for
 Akahu's next refresh after recent trades, then rerun. Never overwrite trades from Akahu.
 
 ## Nightly run and monitoring

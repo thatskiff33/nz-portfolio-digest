@@ -23,7 +23,9 @@ providers are currently parked; do not add a Sharesight integration.
    Define how corrections and undo preserve financial history before exposing commands.
 5. For a holdings-only source, persist confirmation snapshots and call the shared
    `portfolio_digest.reconcile.ledger_units` and `reconcile` functions, as `akahu_sync` does.
-   Compare the union of instruments. Unknown holdings are unresolved drift, not zero units.
+   Compare the union of instruments. Unknown holdings with units are unresolved drift, not
+   zero units. Round upstream units to the ledger's 8 decimal places before comparing.
+   Units come from trades only; never add `Income.drp_quantity` on top of DRP trades.
    Confirm the source covers the same accounts as the target portfolio. Never manufacture
    transactions to make a snapshot match.
 6. Add a CLI subcommand with clear output, non-zero exits for drift/failure and optional

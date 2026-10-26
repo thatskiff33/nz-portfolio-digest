@@ -3,11 +3,12 @@
 Secrets never live in the repo. See `.env.example` for the full list.
 """
 
+import json
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import SecretStr, ValidationError, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict, SettingsError
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES
 from portfolio_digest.validation import currency_code
@@ -26,8 +27,9 @@ class Settings(BaseSettings):
 
     akahu_app_token: SecretStr | None = None
     akahu_user_token: SecretStr | None = None
-    # Optional JSON array of account IDs. Empty selects all investment accounts.
-    akahu_account_ids: list[str] = []
+    # Optional JSON array of account IDs. Empty selects all investment accounts. Kept as
+    # raw text and parsed only by `akahu sync`, so a typo cannot break other commands.
+    akahu_account_ids: str = ""
     uptime_kuma_push_url: SecretStr | None = None
 
     # Every value is reported in this currency, and new portfolios use it by default.
@@ -77,14 +79,29 @@ class Settings(BaseSettings):
         return self.fx_sources.split(",")
 
 
+def akahu_account_ids(raw: str) -> list[str]:
+    """Parse AKAHU_ACCOUNT_IDS. The error never echoes the value."""
+    if not raw.strip():
+        return []
+    try:
+        ids = json.loads(raw)
+    except ValueError:
+        ids = None
+    if (
+        not isinstance(ids, list)
+        or any(not isinstance(item, str) or not item.strip() for item in ids)
+        or len({item.strip() for item in ids}) != len(ids)
+    ):
+        raise ConfigError(
+            'AKAHU_ACCOUNT_IDS must be a JSON array of distinct account IDs, e.g. ["acc_example"].'
+        )
+    return [item.strip() for item in ids]
+
+
 @lru_cache
 def get_settings() -> Settings:
     try:
         return Settings()  # type: ignore[call-arg]
-    except SettingsError:
-        raise ConfigError(
-            "Invalid settings encoding. Check AKAHU_ACCOUNT_IDS JSON in env/.env."
-        ) from None
     except ValidationError as exc:
         # pydantic's own message echoes the values it was given, which can include secrets.
         names = sorted({str(error["loc"][0]).upper() for error in exc.errors() if error["loc"]})

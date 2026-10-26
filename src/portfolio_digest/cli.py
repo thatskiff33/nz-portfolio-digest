@@ -14,7 +14,12 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from portfolio_digest import __version__, migrate, validation
 from portfolio_digest.akahu import AkahuClient, AkahuError, push_success
 from portfolio_digest.akahu_sync import sync
-from portfolio_digest.config import ConfigError, get_gmail_settings, get_settings
+from portfolio_digest.config import (
+    ConfigError,
+    akahu_account_ids,
+    get_gmail_settings,
+    get_settings,
+)
 from portfolio_digest.db import make_engine, session_scope
 from portfolio_digest.gmail import AsbGmailImporter, GmailClient, GmailError, authorise
 from portfolio_digest.importers.base import (
@@ -132,10 +137,9 @@ def cmd_akahu_sync(args: argparse.Namespace) -> int:
         for token in (settings.akahu_app_token, settings.akahu_user_token)
     ):
         raise ConfigError("Set AKAHU_APP_TOKEN and AKAHU_USER_TOKEN in env/.env.")
+    account_ids = akahu_account_ids(settings.akahu_account_ids)
     client = AkahuClient(settings.akahu_app_token, settings.akahu_user_token)
-    snapshot_id, mismatches, unmapped = sync(
-        make_engine(), args.portfolio, client, settings.akahu_account_ids
-    )
+    snapshot_id, mismatches, unmapped = sync(make_engine(), args.portfolio, client, account_ids)
     print(f"Akahu snapshot {snapshot_id}. Cached data may be about a day old.")
     for mismatch in mismatches:
         print(

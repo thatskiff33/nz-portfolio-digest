@@ -36,11 +36,11 @@ def test_health_does_not_leak_credentials(monkeypatch, capsys):
 
 
 def test_portfolio_add_and_list(engine, capsys):
-    assert main(["portfolio", "add", "Jubbles Enterprises"]) == 0
+    assert main(["portfolio", "add", "Family Trust"]) == 0
     assert main(["portfolio", "add", "Personal"]) == 0
     assert main(["portfolio", "list"]) == 0
     out = capsys.readouterr().out
-    assert out.index("Jubbles Enterprises") < out.index("Personal")
+    assert out.index("Family Trust") < out.index("Personal")
 
 
 def test_portfolio_add_rejects_duplicates_and_blank_names(engine, capsys):

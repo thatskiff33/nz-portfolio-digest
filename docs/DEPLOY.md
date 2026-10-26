@@ -1,7 +1,7 @@
-# Deploying on hartleysmithubuntu
+# Deploying on your server
 
 The app runs as its own Docker Compose project, `portfolio-digest`, with its own Postgres
-container. It is fully separate from the Tokoroa booking site and the server's main
+container. It is fully separate from anything else on the server, including any existing
 Postgres 18. No ports are published: nothing here is reachable from outside the server.
 
 ## First install
@@ -18,7 +18,7 @@ mkdir -p backups                                 # must exist before first start
 docker compose up -d db backup
 docker compose run --rm --build migrate          # creates the tables
 docker compose run --rm migrate health           # should print "OK: ..."
-docker compose run --rm migrate portfolio add "Jubbles Enterprises"
+docker compose run --rm migrate portfolio add "Family Trust"
 ```
 
 ## Updating

@@ -1,8 +1,8 @@
 # Working agreement: how we build here
 
 This is the standing way of working for this repo. Every agent and every Claude session
-follows it. It is adapted from the house standard (StoryCreative-Website). The owner is
-Jordan.
+follows it. It is adapted from the owner's house standard for all their repos. The owner is
+`thatskiff33`.
 
 ## The shape of the work
 
@@ -16,7 +16,7 @@ Jordan.
   section (options, each with a **Recommended** default) wherever a real choice exists,
   and a "Done when" check. Issues waiting on a choice carry the `needs-decision` label.
 
-## Jordan's role (two touch-points per issue)
+## The owner's role (two touch-points per issue)
 
 1. **Before work starts:** decisions are asked **in the Claude session as pop-up
    questions**, not by ticking boxes on GitHub. The session then ticks the chosen options
@@ -37,12 +37,12 @@ Jordan.
    **adversarial** "try to break this" pass.
 4. **Fix** every real finding; re-review until clean.
 5. **Resolve residual risks in the same PR.** Open a new `needs-decision` issue only for
-   something that genuinely needs Jordan's choice or a fresh plan, never a silent to-do.
+   something that genuinely needs the owner's choice or a fresh plan, never a silent to-do.
 6. **Ready:** run the checks locally (`ruff check .`, `ruff format --check .`, `pytest`
    against a throwaway Postgres) and in CI, then post a ✅ **Ready to merge** comment in
    plain English: what was built, which reviews ran, what they found, how each was fixed,
    test results, and any carry-forwards.
-7. **Merge** only on Jordan's exact comment `Approved and ok to merge`: squash-merge,
+7. **Merge** only on the owner's exact comment `Approved and ok to merge`: squash-merge,
    tick the Epic checklist, delete the branch. Keep building the next issue while waiting.
 
 ## Firm rules

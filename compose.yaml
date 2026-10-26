@@ -1,4 +1,4 @@
-# Runs on hartleysmithubuntu. Nothing here publishes a port: the database is only reachable
+# Runs on your home server. Nothing here publishes a port: the database is only reachable
 # from the other services on this compose network. Secrets come from `.env` (see .env.example).
 
 name: portfolio-digest

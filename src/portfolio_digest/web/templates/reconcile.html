@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+    <p class="eyebrow">{{ portfolio.name }}</p>
+    <h1>Reconciliation</h1>
+    <p class="muted">Compare all stored units with a complete broker or registry snapshot. A holding missing from the snapshot is treated as zero units.</p>
+    {% if differences is defined %}
+        <section class="panel" aria-live="polite">
+            <h2>Reconciliation results</h2>
+            {% if not differences %}
+                <p>All holdings match the snapshot.</p>
+            {% else %}
+                <div class="table-scroll"
+                     role="region"
+                     aria-label="Reconciliation differences"
+                     tabindex="0">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Market</th>
+                                <th>Code</th>
+                                <th>Stored units</th>
+                                <th>Snapshot units</th>
+                                <th>Variance</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in differences %}
+                                <tr>
+                                    <td>{{ row.exchange }}</td>
+                                    <td>{{ row.code }}</td>
+                                    <td>{{ row.app_units }}</td>
+                                    <td>{{ row.snapshot_units }}</td>
+                                    <td>{{ row.variance }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% endif %}
+            <p class="footnote">Calculated now. These results are not stored.</p>
+        </section>
+    {% endif %}
+    {% if request.state.browser.authenticated %}
+        <form class="panel entry-form"
+              method="post"
+              action="/p/{{ portfolio.id }}/reconcile">
+            <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
+            <label>
+                Snapshot CSV<textarea name="snapshot" rows="7" required placeholder="Exchange,Code,Units">
+</textarea>
+                <small>Use Exchange, Code and Units columns. Made-up example: NZX,KOW,100.</small>
+            </label>
+            <button>Compare holdings</button>
+        </form>
+    {% else %}
+        <p>
+            <a href="/login">Sign in to compare a snapshot</a>
+        </p>
+    {% endif %}
+{% endblock %}

@@ -11,8 +11,7 @@ from sqlalchemy.orm import Session
 
 from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
-from portfolio_digest.report_returns import PeriodEngine, ReportError
-from portfolio_digest.reports import build_report, render
+from portfolio_digest.reports import ReportError, build_report, render
 from portfolio_digest.scheduling import ScheduleConfig
 
 logger = logging.getLogger(__name__)
@@ -46,7 +45,7 @@ def run_report(
     schedule = config.named_report(schedule_name)
     today = (now or datetime.now(UTC)).astimezone(ZoneInfo(config.timezone)).date()
     start, end = schedule.window(today)
-    report = build_report(PeriodEngine(session), start, end)
+    report = build_report(session, start, end)
     html, text = render(report)
     if dry_run:
         if out is None or out.suffix.lower() not in {".html", ".htm"}:

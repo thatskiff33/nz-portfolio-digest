@@ -188,20 +188,15 @@ and subtotals, followed by the portfolio total. Missing price/FX data fails the 
 report with a non-zero exit instead of quietly omitting a holding. Stored stale data can
 be used but is flagged. A failed send also exits non-zero and never pings monitoring.
 
-The email model uses `report_returns.PeriodEngine`, combines all portfolios by listing
-and reports NZD dollar gains. The `returns` CLI keeps the separate FIFO engine in
-`returns.py`, documented in [RETURNS.md](RETURNS.md). Its opening-close boundary,
-entry-FX capital attribution and gross dividend convention differ from the email
-model below, so component amounts can differ for the same holdings and dates.
-Opening value is the close before the first date; closing value is the last available
-close on or before the last date. Capital gain is local value movement less trade flows
-and fees, translated at closing FX. Currency gain is the residual after actual NZD flows.
-Net dividends exclude withholding tax and imputation credits. These are period dollar
-returns, not percentage or annualised returns. Split adjustments must match stored split
-events and their exact unit ratio. Other adjustments are transfers valued at their
-recorded price, or market price when zero. DRP adjustments matching a dividend's units,
-portfolio and payment date use its net amount as the reinvestment flow. Use one matching
-adjustment per DRP payment; do not also record a buy for the same reinvestment.
+The email model uses the shared period engine in `returns.py` through `returns_loader`,
+documented in [RETURNS.md](RETURNS.md). It combines all portfolios by listing in NZD.
+The first email date is inclusive: its opening close is the preceding day. To compare
+with the CLI, use that opening date in `--period OPENING:END`. Capital, net dividends,
+currency gains and total returns use exactly the same FIFO results as the CLI.
+Gross dividends, withholding tax and imputation credits are shown separately;
+imputation is excluded from the default total return. Foreign portfolio broker FX
+is translated to NZD using stored FX for the transaction date. Split and DRP handling
+also comes from the shared engine. Record DRP reinvestments at their actual price.
 
 
 ## Updating

@@ -1,6 +1,7 @@
 """Offline return attribution, report rendering, previews and delivery orchestration."""
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal as D
 from pathlib import Path
@@ -10,9 +11,9 @@ from pydantic import SecretStr
 
 from portfolio_digest import cli, report_service
 from portfolio_digest.mailers import MailError, MailSettings
-from portfolio_digest.models import FxRate, Income, Instrument, Price, Split, Trade
-from portfolio_digest.report_returns import HoldingReturn, PeriodEngine, ReportError
-from portfolio_digest.reports import Report, ValuePoint, build_report, render
+from portfolio_digest.reports import Report, ValuePoint, render
+from portfolio_digest.returns import Components, Result, subtotal
+from portfolio_digest.returns import Report as ReturnsReport
 from portfolio_digest.scheduling import ScheduleConfig
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -26,162 +27,54 @@ class FakeSession:
         return self.rows.get(statement.column_descriptions[0]["name"], [])
 
 
-def instrument(**kwargs):
-    return Instrument(id=1, exchange="ASX", code="DEMO", name="Demo & Co", currency="AUD", **kwargs)
-
-
-def trade(day, kind, quantity, price, **kwargs):
-    return Trade(
-        id=1,
-        instrument_id=1,
-        trade_date=day,
-        trade_type=kind,
-        quantity=D(quantity),
-        price=D(price),
-        fees=D("0"),
-        currency="AUD",
-        fx_rate=None,
-        portfolio_id=1,
-        **kwargs,
-    )
-
-
-def price(day, close, stale=False):
-    return Price(instrument_id=1, price_date=day, close=D(close), is_stale=stale)
-
-
-def fx(day, rate):
-    return FxRate(currency="AUD", base_currency="NZD", rate_date=day, rate=D(rate), is_stale=False)
-
-
-def sample_session():
-    return FakeSession(
-        Instrument=[instrument()],
-        Trade=[
-            trade(date(2026, 10, 1), "buy", "10", "10"),
-            trade(date(2026, 10, 6), "buy", "2", "11"),
-            trade(date(2026, 10, 8), "sell", "3", "12"),
-        ],
-        Price=[price(date(2026, 10, 2), "10"), price(date(2026, 10, 9), "12")],
-        FxRate=[
-            fx(date(2026, 10, 2), "1.1"),
-            fx(date(2026, 10, 6), "1.15"),
-            fx(date(2026, 10, 8), "1.2"),
-            fx(date(2026, 10, 9), "1.2"),
-        ],
-        Income=[
-            Income(
-                instrument_id=1,
-                paid_date=date(2026, 10, 8),
-                net_amount=D("5"),
-                gross_amount=D("6"),
-                currency="AUD",
-                fx_rate=None,
-                portfolio_id=1,
-            )
-        ],
-    )
-
-
-def test_returns_attribute_trades_fx_and_net_income_without_rounding():
-    (row,) = PeriodEngine(sample_session()).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.units == D("9")
-    assert row.opening_value == D("110")
-    assert row.value == D("129.6")
-    assert row.capital_gain == D("26.4")
-    # Net NZD contributions = 22*1.15 - 36*1.2 = -17.9.
-    assert row.currency_gain == D("11.1")
-    assert row.dividends == D("6")
-    assert row.total_return == D("43.5")
-    assert row.total_return == row.value - row.opening_value + D("17.9") + D("6")
-
-
-def test_sold_holdings_stay_visible_and_old_closed_holdings_drop_out():
-    session = sample_session()
-    session.rows["Trade"].append(trade(date(2026, 10, 9), "sell", "9", "12"))
-    engine = PeriodEngine(session)
-    (row,) = engine.calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.value == 0
-    assert row.total_return == D("43.5")
-    assert engine.calculate(date(2026, 11, 1), date(2026, 11, 7)) == ()
-
-
-def test_missing_data_stops_report_instead_of_omitting_holding():
-    session = sample_session()
-    session.rows["Price"] = []
-    with pytest.raises(ReportError, match="missing prices"):
-        PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    session = sample_session()
-    session.rows["FxRate"] = []
-    with pytest.raises(ReportError, match="missing exchange rates"):
-        PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-
-
-def test_raw_split_prices_and_adjustment_units_do_not_create_capital_gain():
-    session = FakeSession(
-        Instrument=[instrument()],
-        Trade=[
-            trade(date(2026, 10, 1), "buy", "1", "40"),
-            trade(date(2026, 10, 6), "adjustment", "3", "0"),
-        ],
-        Price=[price(date(2026, 10, 2), "40"), price(date(2026, 10, 9), "10")],
-        FxRate=[fx(date(2026, 10, 2), "1.1"), fx(date(2026, 10, 9), "1.1")],
-        Split=[
-            Split(
-                instrument_id=1, split_date=date(2026, 10, 6), shares_before=D(1), shares_after=D(4)
-            )
-        ],
-    )
-    (row,) = PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.units == 4
-    assert row.total_return == 0
-
-
-def test_fees_reduce_return_and_opening_balance_is_a_flow():
-    session = FakeSession(
-        Instrument=[instrument()],
-        Trade=[trade(date(2026, 10, 6), "opening_balance", "10", "10")],
-        Price=[price(date(2026, 10, 9), "12")],
-        FxRate=[fx(date(2026, 10, 6), "1.2"), fx(date(2026, 10, 9), "1.2")],
-    )
-    session.rows["Trade"][0].fees = D("2")
-    (row,) = PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.capital_gain == D("21.6")
-
-
 def example_report():
+    rows = (
+        Result(
+            "ASX:DEMO",
+            D("191"),
+            D("187"),
+            D(0),
+            D(0),
+            Components(D("-5"), D("2"), D("1")),
+            ("Stale example",),
+            "ASX",
+            gross_dividends=D(3),
+            withholding_tax=D(1),
+            imputation_gross_up=D(".5"),
+            units=D(20),
+            price=D("8.5"),
+            currency="AUD",
+            name="Demo & Co",
+        ),
+        Result(
+            "NZX:ALP",
+            D("1200"),
+            D("1234"),
+            D(0),
+            D(0),
+            Components(D(34), D(7), D(0)),
+            exchange="NZX",
+            gross_dividends=D(10),
+            withholding_tax=D(3),
+            imputation_gross_up=D(2),
+            units=D(100),
+            price=D("12.34"),
+            currency="NZD",
+            name="Alpine Example",
+        ),
+    )
+    returns = ReturnsReport(
+        date(2026, 10, 4),
+        date(2026, 10, 11),
+        "NZD",
+        rows,
+        tuple(subtotal(r.exchange, (r,)) for r in rows),
+        subtotal("Portfolio", rows),
+    )
     return Report(
         date(2026, 10, 5),
         date(2026, 10, 11),
-        (
-            HoldingReturn(
-                "ASX",
-                "DEMO",
-                "Demo & Co",
-                "AUD",
-                D("20"),
-                D("8.5"),
-                D("187"),
-                D("-5"),
-                D("2"),
-                D("1"),
-                D("191"),
-                True,
-            ),
-            HoldingReturn(
-                "NZX",
-                "ALP",
-                "Alpine Example",
-                "NZD",
-                D("100"),
-                D("12.34"),
-                D("1234"),
-                D("34"),
-                D("7"),
-                D("0"),
-                D("1200"),
-            ),
-        ),
+        returns,
         (ValuePoint(date(2026, 10, 4), D("1391")), ValuePoint(date(2026, 10, 11), D("1421"))),
     )
 
@@ -191,17 +84,16 @@ def test_html_and_text_match_reviewable_synthetic_snapshots():
     assert html == (FIXTURES / "report.html").read_text()
     assert text == (FIXTURES / "report.txt").read_text()
     assert "NZ$ 1,421.00" in html
-    assert html.count("Subtotal") == 2
+    assert html.count("Subtotal") == 4
     assert "(stale)" in html
     assert "Currency gain" in text
 
 
 def test_html_escapes_untrusted_instrument_labels():
     report = example_report()
-    bad = HoldingReturn(
-        "<script>", "<img src=x>", "x", "NZD", D(1), D(1), D(1), D(0), D(0), D(0), D(1)
-    )
-    html, _ = render(Report(report.start, report.end, (bad,)))
+    bad = replace(report.returns.holdings[0], label="<script>:<img src=x>", exchange="<script>")
+    returns = replace(report.returns, holdings=(bad,), markets=(subtotal("<script>", (bad,)),))
+    html, _ = render(Report(report.start, report.end, returns))
     assert "<script>" not in html and "<img src=x>" not in html
     assert "&lt;script&gt;" in html
 
@@ -310,84 +202,22 @@ def test_failed_monitoring_is_nonfatal_and_never_logs_secret_url(monkeypatch, ca
     assert "private-token" not in caplog.text
 
 
-def test_chart_uses_real_opening_and_closing_values():
-    session = sample_session()
-    report = build_report(PeriodEngine(session), date(2026, 10, 5), date(2026, 10, 9))
-    assert report.history[0].value == D("110")
-    assert report.history[-1].value == report.value
-    assert report.history[0].day == date(2026, 10, 4)
+def test_email_rounds_half_cents_like_cli():
+    from portfolio_digest.reports import money
+    from portfolio_digest.returns_table import format_number
+
+    assert money(D("1.005")) == format_number(D("1.005")) == "1.01"
+    assert money(D("-1.005")) == format_number(D("-1.005")) == "-1.01"
 
 
-def test_gift_adjustment_is_external_flow_not_return():
-    session = sample_session()
-    session.rows["Trade"] = [trade(date(2026, 10, 6), "adjustment", "10", "0")]
-    session.rows["Price"].insert(1, price(date(2026, 10, 6), "11"))
-    session.rows["Income"] = []
-    (row,) = PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.value == D("144")
-    assert row.capital_gain == D("12")
-    assert row.currency_gain == D("5.5")
-    assert row.total_return == D("17.5")
+def test_shared_change_retains_decimal_precision():
+    from decimal import localcontext
 
-
-def test_broker_fx_difference_is_currency_gain_not_capital():
-    session = sample_session()
-    session.rows["Trade"] = [trade(date(2026, 10, 6), "buy", "10", "11")]
-    session.rows["Trade"][0].fx_rate = D("1.1")
-    session.rows["Income"] = []
-    (row,) = PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.capital_gain == D("12")
-    assert row.currency_gain == D("11")
-    assert row.total_return == D("23")
-
-
-def test_drp_adjustment_does_not_double_count_dividend_return():
-    session = sample_session()
-    session.rows["Trade"] = [
-        trade(date(2026, 10, 1), "buy", "10", "10"),
-        trade(date(2026, 10, 8), "adjustment", "1", "0"),
-    ]
-    session.rows["Income"] = [
-        Income(
-            id=1,
-            portfolio_id=1,
-            instrument_id=1,
-            paid_date=date(2026, 10, 8),
-            currency="AUD",
-            net_amount=D("12"),
-            drp_quantity=D("1"),
-            fx_rate=None,
-        )
-    ]
-    (row,) = PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.value == D("158.4")
-    assert row.dividends == D("14.4")
-    assert row.total_return == D("48.4")  # closing value less opening, no external cash flows
-
-
-def test_stale_fx_and_stale_price_are_flagged_without_omitting_value():
-    session = sample_session()
-    session.rows["Price"][-1].is_stale = True
-    (row,) = PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.stale
-    assert row.value == D("129.6")
-    session.rows["Price"][-1].is_stale = False
-    session.rows["FxRate"][-1].is_stale = True
-    (row,) = PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.stale
-
-
-def test_broker_rates_in_foreign_portfolio_base_are_converted_to_nzd():
-    from portfolio_digest.models import Portfolio
-
-    session = sample_session()
-    session.rows["Portfolio"] = [
-        Portfolio(id=1, name="Synthetic AUD portfolio", base_currency="AUD")
-    ]
-    session.rows["Trade"] = [trade(date(2026, 10, 6), "buy", "10", "11")]
-    session.rows["Trade"][0].fx_rate = D("1")  # AUD to portfolio AUD, not AUD to NZD
-    session.rows["Income"] = []
-    (row,) = PeriodEngine(session).calculate(date(2026, 10, 5), date(2026, 10, 9))
-    assert row.capital_gain == D("12")
-    assert row.currency_gain == D("5.5")
-    assert row.total_return == D("17.5")
+    row = replace(
+        example_report().returns.total,
+        closing=D("10000000000000000000000000000.01"),
+        opening=D("10000000000000000000000000000"),
+    )
+    with localcontext() as context:
+        context.prec = 10
+        assert row.change == D(".01")

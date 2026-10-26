@@ -64,7 +64,7 @@ from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES, Listing, 
 from portfolio_digest.prices.symbols import clean_symbol
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
 from portfolio_digest.report_service import run_report
-from portfolio_digest.report_returns import ReportError
+from portfolio_digest.reports import ReportError
 from portfolio_digest.returns import ReturnError, period_range
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.returns_table import render_table

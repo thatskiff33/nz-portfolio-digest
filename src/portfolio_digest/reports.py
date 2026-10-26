@@ -6,7 +6,16 @@ from decimal import Decimal
 from html import escape
 from itertools import groupby
 
-from portfolio_digest.report_returns import ZERO, HoldingReturn, PeriodEngine
+from sqlalchemy.orm import Session
+
+from portfolio_digest.returns import ZERO, Result, ReturnError
+from portfolio_digest.returns import Report as ReturnsReport
+from portfolio_digest.returns_loader import load_combined_returns
+from portfolio_digest.returns_table import format_number as money
+
+
+class ReportError(Exception):
+    """A safe report failure without credentials or portfolio data."""
 
 
 @dataclass(frozen=True)
@@ -19,36 +28,43 @@ class ValuePoint:
 class Report:
     start: date
     end: date
-    holdings: tuple[HoldingReturn, ...]
+    returns: ReturnsReport
     history: tuple[ValuePoint, ...] = ()
 
     @property
+    def holdings(self) -> tuple[Result, ...]:
+        return self.returns.holdings
+
+    @property
     def value(self) -> Decimal:
-        return sum((h.value for h in self.holdings), ZERO)
+        return self.returns.total.closing
 
     @property
     def total_return(self) -> Decimal:
-        return sum((h.total_return for h in self.holdings), ZERO)
+        return self.returns.total.amounts.total
 
     @property
     def change(self) -> Decimal:
-        return self.value - sum((h.opening_value for h in self.holdings), ZERO)
+        return self.returns.total.change
 
 
-def build_report(engine: PeriodEngine, start: date, end: date) -> Report:
-    holdings = engine.calculate(start, end)
-    # At most eight real valuations, including opening and closing values.
+def build_report(session: Session, start: date, end: date) -> Report:
+    """Inclusive email dates map to the engine's opening-close boundary."""
+    if start > end:
+        raise ReportError("Report start must be on or before its end.")
     first = start - timedelta(days=1)
     span = (end - first).days
     days = sorted({first + timedelta(days=span * n // 7) for n in range(8)})
-    history = tuple(
-        ValuePoint(day, sum((h.value for h in engine.calculate(day, day)), ZERO)) for day in days
-    )
-    return Report(start, end, holdings, history)
-
-
-def money(value: Decimal) -> str:
-    return f"{value:,.2f}"
+    try:
+        result = load_combined_returns(session, first, end)
+        history = tuple(
+            ValuePoint(day, load_combined_returns(session, day, day).total.closing) for day in days
+        )
+    except ReturnError:
+        raise ReportError(
+            "Report cannot be valued. Check trade history and run prices fetch --backfill."
+        ) from None
+    return Report(start, end, result, history)
 
 
 NOTE = (
@@ -87,7 +103,7 @@ def render(report: Report) -> tuple[str, str]:
     if not report.holdings:
         parts.append("<p>No holdings or activity in this period.</p>")
         text.append("No holdings or activity in this period.")
-    if any(h.stale for h in report.holdings):
+    if any(h.flags for h in report.holdings):
         parts.append(
             '<p style="padding:10px;background:#fff0cb">'
             "Stale prices or FX: flagged values may be out of date.</p>"
@@ -111,19 +127,19 @@ def render(report: Report) -> tuple[str, str]:
             )
             text.append(f"{point.day.isoformat()}: NZ$ {money(point.value)}")
         parts.append("</table>")
-    ranked = sorted(report.holdings, key=lambda h: (h.total_return, h.market, h.code))
+    ranked = sorted(report.holdings, key=lambda h: (h.amounts.total, h.exchange, h.label))
     if ranked:
         top, bottom = ranked[-1], ranked[0]
         parts.append(
             '<h2 style="font-size:18px">Movers by dollar return</h2>'
-            f"<p>Top: {escape(top.market)}:{escape(top.code)} "
-            f"<b>NZ$ {money(top.total_return)}</b><br>"
-            f"Bottom: {escape(bottom.market)}:{escape(bottom.code)} "
-            f"<b>NZ$ {money(bottom.total_return)}</b></p>"
+            f"<p>Top: {escape(top.label)} "
+            f"<b>NZ$ {money(top.amounts.total)}</b><br>"
+            f"Bottom: {escape(bottom.label)} "
+            f"<b>NZ$ {money(bottom.amounts.total)}</b></p>"
         )
         text += [
-            f"Top mover: {top.market}:{top.code} NZ$ {money(top.total_return)}",
-            f"Bottom mover: {bottom.market}:{bottom.code} NZ$ {money(bottom.total_return)}",
+            f"Top mover: {top.label} NZ$ {money(top.amounts.total)}",
+            f"Bottom mover: {bottom.label} NZ$ {money(bottom.amounts.total)}",
         ]
     headers = [
         "Holding",
@@ -133,63 +149,109 @@ def render(report: Report) -> tuple[str, str]:
         "Dividends",
         "Currency gain",
         "Total return",
+        "Gross dividends",
+        "Withholding tax",
+        "Imputation gross-up",
     ]
+    core_headers = headers[:7]
+    income_headers = [headers[0], *headers[7:]]
     style = 'style="padding:8px 1px;border-bottom:1px solid #dce5df;overflow-wrap:anywhere"'
 
-    def total_row(label: str, rows: tuple[HoldingReturn, ...]) -> list[str]:
+    def total_row(label: str, result: Result) -> list[str]:
         return [
             label,
             "",
             *(
-                money(sum((getattr(r, key) for r in rows), ZERO))
-                for key in ("value", "capital_gain", "dividends", "currency_gain", "total_return")
+                money(value)
+                for value in (
+                    result.closing,
+                    result.amounts.capital,
+                    result.amounts.dividends,
+                    result.amounts.currency,
+                    result.amounts.total,
+                    result.gross_dividends,
+                    result.withholding_tax,
+                    result.imputation_gross_up,
+                )
             ),
         ]
 
     def html_row(cells: list[str], bold: bool = False) -> str:
         tag = "th" if bold else "td"
         cell_style = (
-            style.replace("padding:", "font-size:9px;padding:") if cells == headers else style
+            style.replace("padding:", "font-size:9px;padding:")
+            if cells in (core_headers, income_headers)
+            else style
         )
         return "<tr>" + "".join(f"<{tag} {cell_style}>{escape(c)}</{tag}>" for c in cells) + "</tr>"
 
-    for market, group in groupby(report.holdings, key=lambda h: h.market):
+    def income_table(rows: tuple[Result, ...], total: Result, label: str) -> str:
+        def cells(result: Result, name: str) -> list[str]:
+            return [
+                name,
+                *(
+                    money(v)
+                    for v in (
+                        result.gross_dividends,
+                        result.withholding_tax,
+                        result.imputation_gross_up,
+                    )
+                ),
+            ]
+
+        return (
+            '<p style="font-size:12px;color:#526c62">Income detail (NZ$)</p>'
+            '<table style="width:100%;table-layout:fixed;border-collapse:collapse;'
+            'font-size:10px;text-align:right">'
+            + html_row(income_headers, True)
+            + "".join(html_row(cells(r, r.label.split(":", 1)[1])) for r in rows)
+            + html_row(cells(total, label), True)
+            + "</table>"
+        )
+
+    for market, group in groupby(report.holdings, key=lambda h: h.exchange):
         rows = tuple(group)
         parts.append(
             f'<h2 style="font-size:18px;margin-top:28px">{escape(market)}</h2>'
             '<table style="width:100%;table-layout:fixed;border-collapse:collapse;'
-            'font-size:10px;text-align:right">' + html_row(headers, True)
+            'font-size:10px;text-align:right">' + html_row(core_headers, True)
         )
         text += ["", market, " | ".join(headers)]
         for row in rows:
-            label = row.code + (" (stale)" if row.stale else "")
+            label = row.label.split(":", 1)[1] + (" (stale)" if row.flags else "")
             cells = [
                 label,
-                f"{money(row.price)} {row.currency}",
-                money(row.value),
-                money(row.capital_gain),
-                money(row.dividends),
-                money(row.currency_gain),
-                money(row.total_return),
+                f"{money(row.price)} {row.currency}" if row.price is not None else "",
+                money(row.closing),
+                money(row.amounts.capital),
+                money(row.amounts.dividends),
+                money(row.amounts.currency),
+                money(row.amounts.total),
+                money(row.gross_dividends),
+                money(row.withholding_tax),
+                money(row.imputation_gross_up),
             ]
             parts.append(
                 '<tr><td colspan="7" style="padding:10px 1px 0;text-align:left;color:#526c62">'
-                f"{escape(row.name)} ({row.units} units)</td></tr>" + html_row(cells)
+                f"{escape(row.name)} ({row.units} units)</td></tr>" + html_row(cells[:7])
             )
             text.append(f"{row.name} ({row.units} units)")
             text.append(" | ".join(cells))
-        subtotal = total_row("Subtotal", rows)
-        parts.append(html_row(subtotal, True) + "</table>")
+        market_result = next(r for r in report.returns.markets if r.label == market)
+        subtotal = total_row("Subtotal", market_result)
+        parts.append(html_row(subtotal[:7], True) + "</table>")
+        parts.append(income_table(rows, market_result, "Subtotal"))
         text.append(" | ".join(subtotal))
-    total = total_row("Portfolio total", report.holdings)
+    total = total_row("Portfolio total", report.returns.total)
     parts.append(
         '<h2 style="font-size:18px">Portfolio total</h2>'
         '<table style="width:100%;table-layout:fixed;border-collapse:collapse;'
         'font-size:10px;text-align:right">'
-        + html_row(headers, True)
-        + html_row(total, True)
+        + html_row(core_headers, True)
+        + html_row(total[:7], True)
         + "</table>"
     )
+    parts.append(income_table((), report.returns.total, "Portfolio total"))
     text += ["", " | ".join(total)]
     parts.append(
         f'<p style="font-size:12px;line-height:1.6;color:#526c62">{NOTE}</p>'

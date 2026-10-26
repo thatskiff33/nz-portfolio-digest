@@ -1,8 +1,8 @@
 """Provider-independent unit reconciliation. Confirmation never edits the ledger."""
 
-from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, localcontext
 from typing import TypeVar
 
@@ -17,7 +17,8 @@ from portfolio_digest.importers.base import (
     parse_decimal,
     read_csv,
 )
-from portfolio_digest.models import Instrument, Trade, TradeType
+from portfolio_digest.models import Instrument, Split, Trade
+from portfolio_digest.returns import units_at
 
 
 @dataclass(frozen=True)
@@ -34,18 +35,17 @@ class Mismatch:
 
 
 def ledger_units(session: Session, portfolio_id: int) -> dict[int, Decimal]:
-    """Units from trades only: buys, opening balances and signed adjustments, less sells.
-
-    DRP units are booked as an adjustment or buy trade. `Income.drp_quantity` describes
-    those same units, so adding it here would count a reinvestment twice.
-    """
-    totals: dict[int, Decimal] = defaultdict(Decimal)
-    with localcontext() as context:
-        context.prec = 50
-        for trade in session.scalars(select(Trade).where(Trade.portfolio_id == portfolio_id)):
-            sign = -1 if trade.trade_type == TradeType.SELL else 1
-            totals[trade.instrument_id] += sign * trade.quantity
-    return dict(totals)
+    """Replay units, including registry actions and linked DRP trades exactly once."""
+    trades = list(session.scalars(select(Trade).where(Trade.portfolio_id == portfolio_id)))
+    splits = list(session.scalars(select(Split)))
+    return {
+        key: units_at(
+            [t for t in trades if t.instrument_id == key],
+            [s for s in splits if s.instrument_id == key],
+            date.max,
+        )
+        for key in {t.instrument_id for t in trades}
+    }
 
 
 def reconcile(ledger: dict[int, Decimal], observed: dict[int, Decimal]) -> list[Mismatch]:

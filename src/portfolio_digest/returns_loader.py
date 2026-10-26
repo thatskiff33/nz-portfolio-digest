@@ -27,6 +27,8 @@ def load_returns(
     name: str,
     period: str,
     today: date | None = None,
+    *,
+    gross_up: bool = False,
 ) -> Report:
     today = today or datetime.now(ZoneInfo(get_settings().timezone)).date()
     # Validate syntax before querying; 'all' is resolved after loading trades.
@@ -42,7 +44,17 @@ def load_returns(
         .order_by(Trade.trade_date, Trade.id)
     ).all()
     if period == "all":
-        start, end = period_range(period, today, min((t.trade_date for t in trades), default=None))
+        first_income = session.scalar(
+            select(func.min(Income.paid_date)).where(
+                Income.portfolio_id == portfolio.id,
+                Income.paid_date <= end,
+                Income.kind.in_(("dividend", "distribution")),
+            )
+        )
+        dates = [t.trade_date for t in trades]
+        if first_income is not None:
+            dates.append(first_income)
+        start, end = period_range(period, today, min(dates, default=None))
     income = session.scalars(
         select(Income).where(
             Income.portfolio_id == portfolio.id,
@@ -86,7 +98,14 @@ def load_returns(
                 instrument.code,
                 instrument.currency,
                 tuple(
-                    Transaction(t.trade_date, t.trade_type, t.quantity, t.price, t.fees, t.fx_rate)
+                    Transaction(
+                        t.trade_date,
+                        t.trade_type,
+                        t.quantity,
+                        t.consideration / t.quantity if t.consideration is not None else t.price,
+                        t.fees,
+                        t.fx_rate,
+                    )
                     for t in instrument_trades
                 ),
                 tuple(
@@ -95,15 +114,27 @@ def load_returns(
                     if p.instrument_id == instrument.id
                 ),
                 tuple(
-                    Payment(p.paid_date, p.gross_amount, p.currency, p.fx_rate)
+                    Payment(
+                        p.paid_date,
+                        p.net_amount,
+                        p.currency,
+                        p.fx_rate,
+                        p.gross_amount,
+                        p.withholding_tax,
+                        p.imputation_credits,
+                    )
                     for p in income
                     if p.instrument_id == instrument.id
                 ),
                 tuple(
-                    SplitEvent(s.split_date, s.shares_before, s.shares_after)
+                    SplitEvent(
+                        s.split_date, s.shares_before, s.shares_after, s.source == "registry"
+                    )
                     for s in split_rows
                     if s.instrument_id == instrument.id
                 ),
             )
         )
-    return calculate_returns(tuple(holdings), start, end, rates, portfolio.base_currency)
+    return calculate_returns(
+        tuple(holdings), start, end, rates, portfolio.base_currency, gross_up=gross_up
+    )

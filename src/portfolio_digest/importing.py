@@ -1,16 +1,18 @@
 """Persist parsed broker trades as auditable, repeatable import runs."""
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from portfolio_digest.gmail import AsbGmailImporter, GmailError
 from portfolio_digest.importers.asb import AsbEmailImporter, AsbStatementImporter
+from portfolio_digest.importers.asb_dividends import AsbDividendImporter
 from portfolio_digest.importers.base import (
     FileProblem,
     Importer,
@@ -18,10 +20,15 @@ from portfolio_digest.importers.base import (
     ParsedTrade,
     ParseResult,
     RowError,
+    RowProblem,
 )
 from portfolio_digest.importers.sharesies import SharesiesImporter
 from portfolio_digest.importers.sharesight_csv import SharesightCsvImporter
+from portfolio_digest.income import store_income
 from portfolio_digest.models import (
+    CorporateAction,
+    DividendSuggestion,
+    ImportIncomeMatch,
     ImportRun,
     ImportStatus,
     ImportTradeMatch,
@@ -35,6 +42,7 @@ FILE_IMPORTERS: dict[str, Importer] = {
     importer.name: importer
     for importer in (
         SharesiesImporter(),
+        AsbDividendImporter(),
         AsbEmailImporter(),
         AsbStatementImporter(),
         SharesightCsvImporter(),
@@ -116,6 +124,24 @@ def find_or_create_instrument(
     instrument = session.scalar(
         select(Instrument).where(Instrument.exchange == exchange, Instrument.code == code)
     )
+    if instrument is None:
+        # Older broker statements keep the former code after a registry rename.
+        aliases = list(
+            session.scalars(
+                select(CorporateAction)
+                .join(Instrument)
+                .where(Instrument.exchange == exchange, CorporateAction.kind == "rename")
+            )
+        )
+        matches = {
+            action.instrument_id
+            for action in aliases
+            if json.loads(action.details).get("old_code") == code
+        }
+        if len(matches) > 1:
+            raise ImportFailure("Former instrument code is ambiguous; check instrument history.")
+        if matches:
+            instrument = session.get(Instrument, matches.pop())
     if instrument is None:
         instrument = Instrument(
             exchange=exchange,
@@ -201,7 +227,14 @@ def _store_result(
                 trade.fees,
                 trade.fx_rate,
             )
-            if stored != fields(parsed):
+            parsed_fields = fields(parsed)
+            if instrument.code != parsed.code:
+                canonical = find_or_create_instrument(
+                    session, parsed.exchange, parsed.code, parsed.currency
+                )
+                if canonical.id == instrument.id:
+                    parsed_fields = (*parsed_fields[:3], instrument.code, *parsed_fields[4:])
+            if stored != parsed_fields:
                 conflict = RowError(
                     parsed.where,
                     f"Reference {parsed.external_ref!r} already exists "
@@ -265,10 +298,28 @@ def _store_result(
         )
         imported += 1
 
+    trade_imported = imported
+    income_duplicates = 0
+    for parsed in result.incomes:
+        instrument = find_or_create_instrument(
+            session, parsed.exchange, parsed.code, parsed.currency
+        )
+        try:
+            income, created = store_income(
+                session, portfolio.id, instrument.id, parsed, trade_source, run.id
+            )
+        except RowProblem as exc:
+            raise ImportFailure(str(exc)) from None
+        if created:
+            imported += 1
+        else:
+            income_duplicates += 1
+            session.merge(ImportIncomeMatch(import_run_id=run.id, income_id=income.id))
+
     run.status = ImportStatus.SUCCEEDED.value
     run.rows_imported = imported
     run.finished_at = datetime.now(UTC)
-    duplicates += len(accepted) - imported
+    duplicates += len(accepted) - trade_imported + income_duplicates
     run.notes = f"{duplicates} duplicate(s), {len(result.skipped)} row(s) skipped."
     session.commit()
     return ImportOutcome(run.id, imported, duplicates, len(result.skipped), tuple(result.skipped))
@@ -348,6 +399,23 @@ def undo_import(session: Session, run_id: int) -> int:
     session.refresh(run, with_for_update=True)
     if run.status != ImportStatus.SUCCEEDED.value:
         raise ImportFailure(f"Import run {run_id} is {run.status}, so it cannot be undone.")
+    for income in session.scalars(select(Income).where(Income.import_run_id == run.id)):
+        replacement = session.scalar(
+            select(ImportIncomeMatch.import_run_id)
+            .join(ImportRun)
+            .where(
+                ImportIncomeMatch.income_id == income.id,
+                ImportRun.id != run.id,
+                ImportRun.status == ImportStatus.SUCCEEDED.value,
+            )
+            .order_by(ImportRun.id)
+            .limit(1)
+        )
+        if replacement is not None:
+            income.import_run_id = replacement
+            for drp in session.scalars(select(Trade).where(Trade.income_id == income.id)):
+                drp.import_run_id = replacement
+    session.flush()
     for trade in session.scalars(select(Trade).where(Trade.import_run_id == run.id)):
         replacement = session.scalar(
             select(ImportTradeMatch.import_run_id)
@@ -364,6 +432,15 @@ def undo_import(session: Session, run_id: int) -> int:
             trade.import_run_id = replacement
     session.flush()
     trade_count = session.execute(delete(Trade).where(Trade.import_run_id == run.id)).rowcount
+    session.execute(
+        update(DividendSuggestion)
+        .where(
+            DividendSuggestion.income_id.in_(
+                select(Income.id).where(Income.import_run_id == run.id)
+            )
+        )
+        .values(income_id=None, status="pending")
+    )
     income_count = session.execute(delete(Income).where(Income.import_run_id == run.id)).rowcount
     run.status = ImportStatus.UNDONE.value
     run.finished_at = datetime.now(UTC)

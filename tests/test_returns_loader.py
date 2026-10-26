@@ -164,7 +164,7 @@ def returns_engine(request, monkeypatch):
         get_settings.cache_clear()
 
 
-def test_loader_keeps_sold_holding_scopes_portfolio_and_uses_gross_income(returns_engine):
+def test_loader_keeps_sold_holding_scopes_portfolio_and_uses_net_income(returns_engine):
     with Session(returns_engine) as session:
         r = load_returns(session, " invented ", "2026-10-12:2026-10-19")
     assert len(r.holdings) == 1
@@ -172,8 +172,8 @@ def test_loader_keeps_sold_holding_scopes_portfolio_and_uses_gross_income(return
     assert r.total.opening == 150
     assert r.total.amounts.capital == 30
     assert r.total.amounts.currency == 12
-    assert r.total.amounts.dividends == 5
-    assert r.total.amounts.total == 47
+    assert r.total.amounts.dividends == 4
+    assert r.total.amounts.total == 46
 
 
 def test_loader_errors_and_empty_portfolio(returns_engine):
@@ -193,7 +193,7 @@ def test_cli_prints_made_up_portfolio(returns_engine, monkeypatch, capsys):
     assert "Capital gain" in output and "Dividends" in output and "Currency gain" in output
     assert "Total return" in output and "NZ$" in output
     assert "NASDAQ:IMAGINARY" in output and "Portfolio" in output
-    assert "47.00 (31.33%)" in output
+    assert "46.00 (30.67%)" in output
     assert main(["returns", "--portfolio", "Invented", "--period", "bad"]) == 2
     assert "Period must be" in capsys.readouterr().err
 
@@ -310,3 +310,174 @@ def test_loader_applies_splits_and_non_cash_adjustments_and_drops_old_sales(retu
     # Split units: 16 x (7 - 6) = 16. DRP unit: 7 - 6 = 1.
     assert r.total.amounts.capital == 17 and r.total.flags == ()
     assert r.total.percentages.total.quantize(D(".01")) == D("17.71")
+
+
+@pytest.mark.parametrize(
+    "before,after,units,close", [("1", "2", "20", "5"), ("10", "1", "1", "100")]
+)
+@pytest.mark.parametrize("with_adjustment", [False, True])
+def test_registry_action_reports_and_reconciles_once(
+    monkeypatch, before, after, units, close, with_adjustment
+):
+    from portfolio_digest.actions import record_action
+    from portfolio_digest.reconcile import ledger_units, stored_units
+    from portfolio_digest.returns import report
+
+    engine = _sqlite_engine(monkeypatch)
+    with Session(engine) as session:
+        portfolio = Portfolio(name="Registry", base_currency="NZD")
+        instrument = Instrument(exchange="NZX", code="EXAMPLE", name="Example", currency="NZD")
+        session.add_all([portfolio, instrument])
+        session.flush()
+        session.add(
+            Trade(
+                portfolio_id=portfolio.id,
+                instrument_id=instrument.id,
+                trade_date=date(2024, 1, 1),
+                trade_type="buy",
+                quantity=D(10),
+                price=D(10),
+                currency="NZD",
+                source="fixture",
+                external_ref="initial",
+            )
+        )
+        session.add(
+            Price(
+                instrument_id=instrument.id,
+                price_date=date(2024, 1, 1),
+                close=D(10),
+                source="fixture",
+            )
+        )
+        kind = "split" if D(after) > D(before) else "consolidation"
+        record_action(
+            session,
+            instrument,
+            date(2024, 6, 1),
+            kind,
+            "registry-action",
+            {"before": before, "after": after},
+        )
+        if with_adjustment:
+            session.add(
+                Trade(
+                    portfolio_id=portfolio.id,
+                    instrument_id=instrument.id,
+                    trade_date=date(2024, 6, 1),
+                    trade_type="adjustment",
+                    quantity=D(units) - D(10),
+                    price=D(0),
+                    currency="NZD",
+                    source="fixture",
+                    external_ref="adjustment",
+                )
+            )
+        session.flush()
+        # Carry the old raw price across the action, then use a fresh post-action close.
+        for fresh_price in (False, True):
+            if fresh_price:
+                session.add(
+                    Price(
+                        instrument_id=instrument.id,
+                        price_date=date(2024, 6, 20),
+                        close=D(close),
+                        source="fixture",
+                    )
+                )
+                session.flush()
+            for period in ("all", "2024-06-10:2024-06-20"):
+                result = load_returns(session, portfolio.name, period, date(2024, 6, 20))
+                assert result.total.closing == 100
+                assert result.total.amounts.total == 0
+            lifetime = report(session, portfolio, date(2024, 6, 20))[0]
+            assert (lifetime.units, lifetime.cost_base, lifetime.total_return) == (D(units), 100, 0)
+            assert ledger_units(session, portfolio.id) == {instrument.id: D(units)}
+            assert stored_units(session, portfolio.id) == {("NZX", "EXAMPLE"): D(units)}
+    engine.dispose()
+
+
+def test_shared_report_net_tax_drp_and_gross_up(monkeypatch, capsys):
+    from dataclasses import replace
+
+    from portfolio_digest.income import parse_income, store_income
+    from portfolio_digest.returns import report
+
+    engine = _sqlite_engine(monkeypatch)
+    with Session(engine) as session:
+        portfolio = Portfolio(name="DRP", base_currency="NZD")
+        instrument = Instrument(exchange="NZX", code="ETFEXAMPLE", name="Example", currency="NZD")
+        session.add_all([portfolio, instrument])
+        session.flush()
+        income = parse_income(
+            "fixture",
+            {
+                "date": "2024-06-20",
+                "gross": "100",
+                "net": "90",
+                "rwt": "10",
+                "imputation": "28",
+            },
+            "NZX",
+            instrument.code,
+            "NZD",
+            "dividend",
+        )
+        store_income(
+            session, portfolio.id, instrument.id, replace(income, drp_quantity=D(3)), "registry"
+        )
+        session.add(
+            Price(
+                instrument_id=instrument.id,
+                price_date=date(2024, 6, 20),
+                close=D(30),
+                source="fixture",
+            )
+        )
+        session.commit()
+        for gross_up, total in ((False, 90), (True, 118)):
+            result = load_returns(
+                session, portfolio.name, "all", date(2024, 6, 20), gross_up=gross_up
+            )
+            assert (result.total.closing, result.total.purchases) == (90, 90)
+            assert result.total.amounts.dividends == 90
+            assert result.total.amounts.total == total
+            assert result.total.gross_dividends == 100
+            assert result.total.withholding_tax == 10
+            assert result.total.imputation_gross_up == 28
+            assert (
+                report(session, portfolio, date(2024, 6, 20), gross_up=gross_up)[0].total_return
+                == total
+            )
+    monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: engine)
+    assert main(["returns", "--portfolio", "DRP", "--date", "2024-06-20", "--gross-up"]) == 0
+    output = capsys.readouterr().out
+    assert "Imputation gross-up" in output and "118.00" in output
+    engine.dispose()
+
+
+def test_all_period_includes_income_without_trades(monkeypatch):
+    engine = _sqlite_engine(monkeypatch)
+    with Session(engine) as session:
+        portfolio = Portfolio(name="Income only", base_currency="NZD")
+        instrument = Instrument(exchange="NZX", code="EXAMPLE", name="Example", currency="NZD")
+        session.add_all([portfolio, instrument])
+        session.flush()
+        session.add(
+            Income(
+                portfolio_id=portfolio.id,
+                instrument_id=instrument.id,
+                paid_date=date(2024, 6, 20),
+                kind="dividend",
+                currency="NZD",
+                gross_amount=D(100),
+                net_amount=D(90),
+                source="fixture",
+                external_ref="dividend",
+            )
+        )
+        session.flush()
+        result = load_returns(session, portfolio.name, "all", date(2024, 12, 31))
+        assert result.total.amounts.dividends == 90
+        assert result.total.percentages is None
+    engine.dispose()

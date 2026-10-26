@@ -22,6 +22,9 @@ def render_table(report: Report) -> str:
         "Dividends",
         "Currency gain",
         "Total return",
+        "Gross dividends",
+        "Withholding tax",
+        "Imputation gross-up",
     ]
 
     def row(result: Result) -> list[str]:
@@ -33,6 +36,10 @@ def render_table(report: Report) -> str:
         for field in ("capital", "dividends", "currency", "total"):
             percent = f"{_number(getattr(percentages, field))}%" if percentages else "n/a"
             values.append(f"{_number(getattr(result.amounts, field))} ({percent})")
+        values.extend(
+            _number(v)
+            for v in (result.gross_dividends, result.withholding_tax, result.imputation_gross_up)
+        )
         return values
 
     rows = [headers]

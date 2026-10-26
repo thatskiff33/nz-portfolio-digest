@@ -10,10 +10,12 @@ fractional shares. The columns we read:
 - `Exchange rate` is blank for NZ$ trades. For others it is how much of the foreign
   currency NZ$1 bought, e.g. 0.6 for US dollars; we store the inverse (NZ$ per US$1).
 - `Amount` (the cash total) is not needed: quantity, price and fee say it all.
-- Rows that are not buys or sells (dividends, for example) are skipped with a notice.
+- Dividends and distributions require explicit gross, net and withholding amounts.
 - Share transfers in or out are skipped with a notice. Their units come from the other
   broker's history, so importing them here would count them twice.
 """
+
+from dataclasses import replace
 
 from portfolio_digest.importers.base import (
     FileProblem,
@@ -33,9 +35,19 @@ from portfolio_digest.importers.base import (
     parse_quantity,
     read_csv,
 )
+from portfolio_digest.income import parse_income
 from portfolio_digest.models import TradeType
 
 COLUMNS = {
+    "gross": ("Gross amount", "Gross dividend"),
+    "net": ("Net amount", "Amount"),
+    "tax": ("Withholding tax",),
+    "rwt": ("Resident withholding tax", "RWT"),
+    "foreign_tax": ("Foreign withholding tax",),
+    "imputation": ("Imputation credits",),
+    "franking": ("Franking credits",),
+    "drp": ("DRP quantity",),
+    "ex_date": ("Ex date",),
     "order_id": ("Order ID",),
     "date": ("Trade date",),
     "code": ("Instrument code",),
@@ -69,6 +81,32 @@ class SharesiesImporter(Importer):
         for line, row in read_csv(content, COLUMNS, REQUIRED):
             where = f"line {line}"
             kind = row["type"].upper()
+            if kind in ("DIVIDEND", "DISTRIBUTION"):
+                try:
+                    exchange, code, currency = listing(row["market"], row["code"], row["currency"])
+                    row["kind"] = kind.lower()
+                    reference = row.get("order_id") or "pending-fingerprint"
+                    parsed = parse_income(where, row, exchange, code, currency, reference)
+                    if not row.get("order_id"):
+                        parsed = replace(
+                            parsed,
+                            external_ref=refs.ref(
+                                exchange,
+                                code,
+                                parsed.paid_date,
+                                parsed.kind,
+                                parsed.gross_amount,
+                                parsed.net_amount,
+                                parsed.withholding_tax,
+                                parsed.drp_quantity,
+                            ),
+                        )
+                    if currency != "NZD" and row.get("rate"):
+                        parsed = replace(parsed, fx_rate=invert_rate(row["rate"]))
+                    result.incomes.append(parsed)
+                except RowProblem as exc:
+                    result.errors.append(RowError(where, str(exc)))
+                continue
             if kind not in _TYPES:
                 result.skipped.append(RowError(where, f"{row['type'] or 'blank'} is not a trade"))
                 continue

@@ -1,6 +1,7 @@
 """Command-line entry point: `portfolio-digest <command>`."""
 
 import argparse
+import json
 import sys
 import uuid
 from datetime import UTC, date, datetime
@@ -12,6 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from portfolio_digest import __version__, migrate, validation
+from portfolio_digest.actions import KINDS, record_action
 from portfolio_digest.akahu import AkahuClient, AkahuError, push_success
 from portfolio_digest.akahu_sync import sync
 from portfolio_digest.config import (
@@ -21,6 +23,7 @@ from portfolio_digest.config import (
     get_settings,
 )
 from portfolio_digest.db import make_engine, session_scope
+from portfolio_digest.dividends import decide, suggest
 from portfolio_digest.gmail import AsbGmailImporter, GmailClient, GmailError, authorise
 from portfolio_digest.importers.base import (
     FileProblem,
@@ -42,6 +45,7 @@ from portfolio_digest.importing import (
     read_input,
     undo_import,
 )
+from portfolio_digest.income import parse_income
 from portfolio_digest.models import (
     PORTFOLIO_NAME_UNIQUE,
     ImportRun,
@@ -51,9 +55,9 @@ from portfolio_digest.models import (
     TradeType,
 )
 from portfolio_digest.prices.fetch import Sources, held_instruments, run_fetch
-from portfolio_digest.prices.http import JsonFetcher, make_client
+from portfolio_digest.prices.http import JsonFetcher, SourceError, make_client
 from portfolio_digest.prices.quality import check_data
-from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES
+from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES, Listing, YahooSource
 from portfolio_digest.prices.symbols import clean_symbol
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
 from portfolio_digest.returns import ReturnError, period_range
@@ -203,7 +207,9 @@ def cmd_returns(args: argparse.Namespace) -> int:
         validation.portfolio_name(args.portfolio)
         period_range(args.period, date.today())
         with session_scope(make_engine()) as session:
-            report = load_returns(session, args.portfolio, args.period)
+            report = load_returns(
+                session, args.portfolio, args.period, args.date, gross_up=args.gross_up
+            )
         print(render_table(report))
         return 0
     except (ReturnError, validation.InvalidInput) as exc:
@@ -430,6 +436,88 @@ def cmd_gmail_authorise(args: argparse.Namespace) -> int:
     return 0
 
 
+def _find_listing(session, label):
+    exchange, code = label.split(":")
+    instrument = session.scalar(
+        select(Instrument).where(Instrument.exchange == exchange, Instrument.code == code)
+    )
+    if instrument is None:
+        raise ImportFailure(f"No instrument called {label}.")
+    return instrument
+
+
+def cmd_action(args):
+    try:
+        details = json.loads(args.details, parse_float=Decimal)
+    except ValueError:
+        raise RowProblem("Action details must be a JSON object.") from None
+    if not isinstance(details, dict):
+        raise RowProblem("Action details must be a JSON object.")
+    with session_scope(make_engine()) as session:
+        if args.kind == "rights_entitlement":
+            exchange, code, currency = listing(*args.instrument.split(":"))
+            instrument = find_or_create_instrument(session, exchange, code, currency)
+            instrument.kind = "rights"
+        else:
+            instrument = _find_listing(session, args.instrument)
+        portfolio = portfolio_named(session, args.portfolio) if args.portfolio else None
+        action = record_action(
+            session, instrument, args.date, args.kind, args.reference, details, portfolio
+        )
+        print(f"Recorded corporate action {action.id}.")
+    return 0
+
+
+def cmd_dividends(args):
+    with session_scope(make_engine()) as session:
+        if args.dividend_command == "suggest":
+            portfolio = portfolio_named(session, args.portfolio)
+            instrument = _find_listing(session, args.instrument)
+            with make_client() as client:
+                source = YahooSource(JsonFetcher(client))
+                symbol = source.symbol(
+                    Listing(instrument.exchange, instrument.code, instrument.yahoo_symbol)
+                )
+                events = source.dividends(symbol, args.start, args.end, instrument.currency)
+            for item in suggest(session, portfolio, instrument, events):
+                print(f"{item.id}\t{item.ex_date}\t{item.gross_amount}\t{item.status}")
+        elif args.dividend_command == "reject":
+            decide(session, args.id, reject=True)
+            print(f"Rejected suggestion {args.id}.")
+        else:
+            from portfolio_digest.models import DividendSuggestion
+
+            item = session.get(DividendSuggestion, args.id)
+            if item is None:
+                raise ImportFailure("No dividend suggestion with that ID.")
+            instrument = session.get(Instrument, item.instrument_id)
+            row = {
+                key: getattr(args, key)
+                for key in (
+                    "gross",
+                    "net",
+                    "tax",
+                    "rwt",
+                    "foreign_tax",
+                    "imputation",
+                    "franking",
+                    "drp",
+                )
+            }
+            row.update(date=args.paid_date.isoformat(), ex_date=item.ex_date.isoformat())
+            parsed = parse_income(
+                "confirmation",
+                row,
+                instrument.exchange,
+                instrument.code,
+                instrument.currency,
+                args.reference,
+            )
+            decide(session, args.id, confirmed=parsed, evidence=args.evidence)
+            print(f"Confirmed suggestion {args.id} from {args.evidence} evidence.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="portfolio-digest")
     parser.add_argument("--version", action="version", version=__version__)
@@ -451,7 +539,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     returns = sub.add_parser("returns", help="Report capital, dividend and currency returns")
     returns.add_argument("--portfolio", required=True)
-    returns.add_argument("--period", required=True, help="week|month|ytd|all|YYYY-MM-DD:YYYY-MM-DD")
+    returns.add_argument("--period", default="all", help="week|month|ytd|all|YYYY-MM-DD:YYYY-MM-DD")
+    returns.add_argument("--date", type=_date, help="Report end date (defaults to today)")
+    returns.add_argument("--gross-up", action="store_true", help="Include NZ imputation in totals")
     returns.set_defaults(func=cmd_returns)
 
     portfolio = sub.add_parser("portfolio", help="Manage portfolios")
@@ -547,6 +637,36 @@ def build_parser() -> argparse.ArgumentParser:
     auth.add_argument("--force", action="store_true", help="Replace an existing token file")
     auth.set_defaults(func=cmd_gmail_authorise)
 
+    actions = sub.add_parser("corporate-actions", help="Record registry corporate actions")
+    actions.add_argument("kind", choices=KINDS)
+    actions.add_argument("instrument", type=_instrument_label)
+    actions.add_argument("--date", required=True, type=_date)
+    actions.add_argument("--reference", required=True)
+    actions.add_argument("--portfolio")
+    actions.add_argument("--details", default="{}", help="JSON event terms; see docs/dividends.md")
+    actions.set_defaults(func=cmd_action)
+
+    dividends = sub.add_parser("dividends", help="Review missing-dividend suggestions")
+    dsub = dividends.add_subparsers(dest="dividend_command", required=True)
+    suggestion = dsub.add_parser("suggest", help="Fetch pending Yahoo estimates")
+    suggestion.add_argument("--portfolio", required=True)
+    suggestion.add_argument("--instrument", type=_instrument_label, required=True)
+    suggestion.add_argument("--start", type=_date, required=True)
+    suggestion.add_argument("--end", type=_date, default=date.today())
+    suggestion.set_defaults(func=cmd_dividends)
+    reject = dsub.add_parser("reject")
+    reject.add_argument("id", type=int)
+    reject.set_defaults(func=cmd_dividends)
+    confirm = dsub.add_parser("confirm", help="Confirm actual broker or registry amounts")
+    confirm.add_argument("id", type=int)
+    confirm.add_argument("--evidence", required=True, choices=("broker", "registry"))
+    confirm.add_argument("--reference", required=True)
+    confirm.add_argument("--paid-date", required=True, type=_date)
+    confirm.add_argument("--gross", required=True)
+    confirm.add_argument("--net", required=True)
+    for name in ("tax", "rwt", "foreign-tax", "imputation", "franking", "drp"):
+        confirm.add_argument("--" + name, default="")
+    confirm.set_defaults(func=cmd_dividends)
     return parser
 
 
@@ -554,6 +674,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
+    except (ImportFailure, RowProblem, SourceError) as exc:
+        _fail(str(exc))
+        return 2
     except (ConfigError, AkahuError) as exc:
         _fail(str(exc))
     except validation.InvalidInput as exc:

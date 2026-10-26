@@ -76,11 +76,13 @@ total = closing value + net sale proceeds - opening value - purchase outlays
 net investment cash flow = purchase outlays - net sale proceeds
 ```
 
-Dividends are gross cash from `income` dividend and distribution rows, converted
-at payment-date FX (or recorded income FX). They include withholding tax but
-exclude imputation credits. Interest and other income are excluded. Payment-date
-recognition and tax/DRP detail can evolve with issue #7. Income rows alone do not
-create shares: reinvested units must also be recorded in trade history.
+Dividends are net cash from `income` dividend and distribution rows, converted
+at payment-date FX (or recorded income FX). Gross cash, withholding tax and NZ
+imputation credits are separate report fields and CLI columns. Totals exclude
+imputation by default; `--gross-up` adds it without changing the net Dividends
+column. AU franking never enters totals. With gross-up enabled, add imputation to
+the accounting identity above. Interest and other income are excluded. Income rows
+alone do not create shares: imported DRPs also create a linked purchase trade.
 
 ## Percentages and rounding
 
@@ -111,7 +113,9 @@ quantity. Inside the period, an adjustment matching a stored Split row rescales
 parcel units, preserving each parcel's total local cost and entry FX. Match once
 per split date against units held before that day's trades, using the exact
 cross-product `quantity_change × shares_before = held × (shares_after - shares_before)`.
-The Split row alone never changes quantity. Zero-fee splits need no transaction-date
+Downloaded Split metadata alone never changes quantity. A registry action recorded
+with `corporate-actions` applies the ratio directly, including before the period's
+opening close. If a matching adjustment already exists, it counts only once. Zero-fee splits need no transaction-date
 FX because no value is converted. A rounded quantity change that does not match
 exactly follows the non-split rule below, rather than guessing cash in lieu.
 

@@ -8,7 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.models import Instrument, Portfolio
-from portfolio_digest.returns import Report, Result, ReturnError, calculate_returns, period_range
+from portfolio_digest.returns import (
+    Report,
+    Result,
+    ReturnError,
+    calculate_returns,
+    holding_units_at,
+    period_range,
+)
 from portfolio_digest.returns_loader import load_inputs
 
 
@@ -52,7 +59,7 @@ class Dashboard:
             self.holdings.append(
                 Holding(
                     instruments[holding.exchange, holding.code],
-                    sum((t.delta for t in holding.trades), Decimal(0)),
+                    holding_units_at(holding, end),
                     quote.value if quote else None,
                     quote.day if quote else None,
                     result,

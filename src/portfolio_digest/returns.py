@@ -300,6 +300,12 @@ def _ordered_trades(holding: Holding, end: date) -> list[Transaction]:
     return ordered
 
 
+@_financial_math
+def holding_units_at(holding: Holding, end: date) -> Decimal:
+    """Closing units from loaded inputs, including registry and recorded splits."""
+    return sum((trade.delta for trade in _ordered_trades(holding, end)), ZERO)
+
+
 def _opening_quantity(holding: Holding, trades: list[Transaction], start: date) -> Decimal:
     """Units held at the opening close; every trade type, adjustments included, counts."""
     quantity = ZERO

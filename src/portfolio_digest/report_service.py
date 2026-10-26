@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
+from portfolio_digest.report_returns import PeriodEngine, ReportError
 from portfolio_digest.reports import build_report, render
-from portfolio_digest.returns import PeriodEngine, ReportError
 from portfolio_digest.scheduling import ScheduleConfig
 
 logger = logging.getLogger(__name__)

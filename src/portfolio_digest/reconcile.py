@@ -1,9 +1,12 @@
-"""Compare stored holding units with a broker or registry snapshot CSV."""
+"""Provider-independent unit reconciliation. Confirmation never edits the ledger."""
 
+from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, localcontext
+from typing import TypeVar
 
-from sqlalchemy import case, func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.importers.base import (
@@ -15,6 +18,56 @@ from portfolio_digest.importers.base import (
     read_csv,
 )
 from portfolio_digest.models import Instrument, Trade, TradeType
+
+
+@dataclass(frozen=True)
+class Mismatch:
+    instrument_id: int
+    ledger: Decimal
+    observed: Decimal
+
+    @property
+    def difference(self) -> Decimal:
+        with localcontext() as context:
+            context.prec = 50
+            return self.observed - self.ledger
+
+
+def ledger_units(session: Session, portfolio_id: int) -> dict[int, Decimal]:
+    """Units from trades only: buys, opening balances and signed adjustments, less sells.
+
+    DRP units are booked as an adjustment or buy trade. `Income.drp_quantity` describes
+    those same units, so adding it here would count a reinvestment twice.
+    """
+    totals: dict[int, Decimal] = defaultdict(Decimal)
+    with localcontext() as context:
+        context.prec = 50
+        for trade in session.scalars(select(Trade).where(Trade.portfolio_id == portfolio_id)):
+            sign = -1 if trade.trade_type == TradeType.SELL else 1
+            totals[trade.instrument_id] += sign * trade.quantity
+    return dict(totals)
+
+
+def reconcile(ledger: dict[int, Decimal], observed: dict[int, Decimal]) -> list[Mismatch]:
+    """Compare the union so missing holdings on either side cannot disappear."""
+    return [
+        Mismatch(key, ledger_units, observed_units)
+        for key, ledger_units, observed_units in _unit_differences(ledger, observed)
+    ]
+
+
+Key = TypeVar("Key", int, tuple[str, str])
+
+
+def _unit_differences(
+    actual: dict[Key, Decimal], snapshot: dict[Key, Decimal]
+) -> Iterator[tuple[Key, Decimal, Decimal]]:
+    for key in sorted(actual.keys() | snapshot.keys()):
+        app_units = actual.get(key, Decimal(0))
+        snapshot_units = snapshot.get(key, Decimal(0))
+        if app_units != snapshot_units:
+            yield key, app_units, snapshot_units
+
 
 COLUMNS = {
     "exchange": ("Exchange", "Market", "Market Code"),
@@ -32,7 +85,9 @@ class Difference:
 
     @property
     def variance(self) -> Decimal:
-        return self.app_units - self.snapshot_units
+        with localcontext() as context:
+            context.prec = 50
+            return self.app_units - self.snapshot_units
 
 
 def parse_snapshot(content: bytes) -> dict[tuple[str, str], Decimal]:
@@ -56,23 +111,17 @@ def parse_snapshot(content: bytes) -> dict[tuple[str, str], Decimal]:
 
 
 def stored_units(session: Session, portfolio_id: int) -> dict[tuple[str, str], Decimal]:
-    signed = case((Trade.trade_type == TradeType.SELL.value, -Trade.quantity), else_=Trade.quantity)
-    rows = session.execute(
-        select(Instrument.exchange, Instrument.code, func.sum(signed))
-        .join(Trade, Trade.instrument_id == Instrument.id)
-        .where(Trade.portfolio_id == portfolio_id)
-        .group_by(Instrument.exchange, Instrument.code)
-    )
-    return {(exchange, code): units for exchange, code, units in rows}
+    units = ledger_units(session, portfolio_id)
+    if not units:
+        return {}
+    instruments = session.scalars(select(Instrument).where(Instrument.id.in_(units)))
+    return {(item.exchange, item.code): units[item.id] for item in instruments}
 
 
 def compare(
     actual: dict[tuple[str, str], Decimal], snapshot: dict[tuple[str, str], Decimal]
 ) -> list[Difference]:
-    differences = []
-    for exchange, code in sorted(actual.keys() | snapshot.keys()):
-        app_units = actual.get((exchange, code), Decimal(0))
-        snapshot_units = snapshot.get((exchange, code), Decimal(0))
-        if app_units != snapshot_units:
-            differences.append(Difference(exchange, code, app_units, snapshot_units))
-    return differences
+    return [
+        Difference(exchange, code, app_units, snapshot_units)
+        for (exchange, code), app_units, snapshot_units in _unit_differences(actual, snapshot)
+    ]

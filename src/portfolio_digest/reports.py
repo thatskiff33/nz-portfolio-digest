@@ -6,7 +6,7 @@ from decimal import Decimal
 from html import escape
 from itertools import groupby
 
-from portfolio_digest.returns import ZERO, HoldingReturn, PeriodEngine
+from portfolio_digest.report_returns import ZERO, HoldingReturn, PeriodEngine
 
 
 @dataclass(frozen=True)

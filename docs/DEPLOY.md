@@ -188,7 +188,11 @@ and subtotals, followed by the portfolio total. Missing price/FX data fails the 
 report with a non-zero exit instead of quietly omitting a holding. Stored stale data can
 be used but is flagged. A failed send also exits non-zero and never pings monitoring.
 
-The reusable model combines all portfolios by listing and reports NZD dollar gains.
+The email model uses `report_returns.PeriodEngine`, combines all portfolios by listing
+and reports NZD dollar gains. The `returns` CLI keeps the separate FIFO engine in
+`returns.py`, documented in [RETURNS.md](RETURNS.md). Its opening-close boundary,
+entry-FX capital attribution and gross dividend convention differ from the email
+model below, so component amounts can differ for the same holdings and dates.
 Opening value is the close before the first date; closing value is the last available
 close on or before the last date. Capital gain is local value movement less trade flows
 and fees, translated at closing FX. Currency gain is the residual after actual NZD flows.

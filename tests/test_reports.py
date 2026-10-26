@@ -11,8 +11,8 @@ from pydantic import SecretStr
 from portfolio_digest import cli, report_service
 from portfolio_digest.mailers import MailError, MailSettings
 from portfolio_digest.models import FxRate, Income, Instrument, Price, Split, Trade
+from portfolio_digest.report_returns import HoldingReturn, PeriodEngine, ReportError
 from portfolio_digest.reports import Report, ValuePoint, build_report, render
-from portfolio_digest.returns import HoldingReturn, PeriodEngine, ReportError
 from portfolio_digest.scheduling import ScheduleConfig
 
 FIXTURES = Path(__file__).parent / "fixtures"

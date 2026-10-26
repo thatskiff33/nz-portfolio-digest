@@ -224,6 +224,121 @@ def test_old_sold_holdings_and_fx_skip_only_when_complete(
     assert len(report.outcomes) == 2
 
 
+@pytest.mark.parametrize(
+    ("sale", "price_day", "fx_day", "still_held", "prices_fetch", "fx_fetch"),
+    [
+        # Saturday sale is complete with Friday's close and FX rate.
+        (date(2023, 3, 4), date(2023, 3, 3), date(2023, 3, 3), False, False, False),
+        # Easter Monday is an NZX holiday, but FX still needs Monday's rate.
+        (date(2023, 4, 10), date(2023, 4, 6), date(2023, 4, 10), False, False, False),
+        (date(2023, 4, 10), date(2023, 4, 6), date(2023, 4, 7), False, False, True),
+        # A missing final trading close must still be fetched.
+        (date(2023, 3, 4), date(2023, 3, 2), date(2023, 3, 2), False, True, True),
+        (date(2023, 4, 10), date(2023, 4, 5), date(2023, 4, 10), False, True, False),
+        # Trading-day sales and still-held instruments keep their existing behaviour.
+        (date(2023, 3, 3), date(2023, 3, 3), date(2023, 3, 3), False, False, False),
+        (date(2023, 3, 4), date(2023, 3, 3), date(2023, 3, 3), True, True, True),
+        (date(2023, 4, 10), date(2023, 4, 6), date(2023, 4, 10), True, True, True),
+    ],
+)
+def test_sold_out_completion_uses_each_markets_last_trading_day(
+    monkeypatch, sale, price_day, fx_day, still_held, prices_fetch, fx_fetch
+):
+    from portfolio_digest import db
+    from portfolio_digest.prices import fetch
+
+    first = date(2023, 3, 1)
+    holding = Holding(1, "NZX", "SOLD", "AUD", None, first, sale, still_held)
+    sessions = [MagicMock() for _ in range(3)]
+    for session in sessions:
+        session.execute.return_value.all.return_value = []
+    price_terminal = price_day if price_day == holding.calendar.last_trading_day(sale) else None
+    fx_terminal = fx_day if fx_day == fetch.calendars.FX.last_trading_day(sale) else None
+    sessions[1].scalar.side_effect = [price_day, price_terminal, None, None]
+    sessions[2].scalar.side_effect = [fx_day, fx_terminal, None]
+    factory = MagicMock(side_effect=sessions)
+    monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
+    monkeypatch.setattr(fetch, "held_instruments", lambda *args: [holding])
+    for name in ("_save_prices", "_save_rates", "_save_splits"):
+        monkeypatch.setattr(fetch, name, MagicMock())
+    prices = FakePriceSource()
+    prices.history = MagicMock(side_effect=SourceError("symbol no longer available (HTTP 404)"))
+    fx = FakeFxSource("mock-fx", error="currency no longer available")
+
+    report = run_fetch(
+        MagicMock(),
+        Sources(prices, [fx]),
+        now=datetime(2026, 10, 3, 5, 30, tzinfo=UTC),
+        base_currency="NZD",
+    )
+
+    assert prices.history.called is prices_fetch
+    assert bool(fx.calls) is fx_fetch
+    assert report.ok is not (prices_fetch or fx_fetch)
+
+
+@pytest.mark.parametrize(
+    ("sale", "price_day", "fx_day"),
+    [
+        (date(2023, 3, 3), date(2023, 3, 3), date(2023, 3, 3)),
+        (date(2023, 3, 4), date(2023, 3, 3), date(2023, 3, 3)),
+        (date(2023, 4, 10), date(2023, 4, 6), date(2023, 4, 10)),
+    ],
+)
+def test_completed_sale_skips_sources_on_next_run(engine, sale, price_day, fx_day):
+    instrument_id = _seed_trade(engine, currency="AUD", code="SOLD")
+    with session_scope(engine) as session:
+        session.get(Instrument, instrument_id).exchange = "NZX"
+        buy = session.scalar(select(Trade).where(Trade.instrument_id == instrument_id))
+        buy.trade_date = date(2023, 3, 1)
+        session.add(
+            Trade(
+                portfolio_id=buy.portfolio_id,
+                instrument_id=instrument_id,
+                trade_date=sale,
+                trade_type="sell",
+                quantity=Decimal("5"),
+                price=Decimal("10"),
+                currency="AUD",
+                source="test",
+                external_ref="sold-sale",
+            )
+        )
+        session.add(
+            Price(
+                instrument_id=instrument_id,
+                price_date=price_day,
+                close=Decimal("10"),
+                source="test",
+            )
+        )
+        session.add(
+            FxRate(
+                rate_date=fx_day,
+                currency="AUD",
+                base_currency="NZD",
+                rate=Decimal("1.1"),
+                source="test",
+            )
+        )
+    prices = FakePriceSource()
+    prices.history = MagicMock(side_effect=SourceError("symbol no longer available (HTTP 404)"))
+    fx = FakeFxSource("mock-fx", error="currency no longer available")
+
+    report = run_fetch(
+        engine,
+        Sources(prices, [fx]),
+        now=datetime(2026, 10, 3, 5, 30, tzinfo=UTC),
+        base_currency="NZD",
+    )
+
+    assert report.ok
+    assert len(report.outcomes) == 2
+    assert all(outcome.fetched == outcome.carried_forward == 0 for outcome in report.outcomes)
+    prices.history.assert_not_called()
+    assert not fx.calls
+
+
 @pytest.mark.parametrize("run_hour", [21, 5])
 @pytest.mark.parametrize("terminal_present", [False, True])
 @pytest.mark.parametrize("fresh_present", [False, True])
@@ -265,8 +380,17 @@ def test_takeover_skips_prices_and_sold_only_fx_with_a_carried_final_value(
     assert len(report.outcomes) == 2
 
 
-def test_takeover_with_stale_rows_through_sale_does_not_refetch_delisted_symbol(engine):
-    first, sale = date(2023, 3, 1), date(2023, 3, 8)
+@pytest.mark.parametrize(
+    ("sale", "terminal", "carried"),
+    [
+        (date(2023, 3, 8), date(2023, 3, 8), 3),
+        (date(2023, 3, 11), date(2023, 3, 10), 5),
+    ],
+)
+def test_takeover_with_stale_rows_through_sale_does_not_refetch_delisted_symbol(
+    engine, sale, terminal, carried
+):
+    first = date(2023, 3, 1)
     instrument_id = _seed_trade(engine, currency="AUD", code="TAKEOVER")
     with session_scope(engine) as session:
         session.get(Instrument, instrument_id).exchange = "NZX"
@@ -291,22 +415,25 @@ def test_takeover_with_stale_rows_through_sale_does_not_refetch_delisted_symbol(
     now = datetime(2026, 10, 3, 5, 30, tzinfo=UTC)
     report = run_fetch(engine, Sources(prices, [fx]), now=now, base_currency="NZD", backfill=True)
     assert report.ok
-    assert [outcome.carried_forward for outcome in report.outcomes] == [3, 3]
+    assert [outcome.carried_forward for outcome in report.outcomes] == [carried, carried]
     with session_scope(engine) as session:
-        assert session.get(Price, (instrument_id, sale)).is_stale
-        assert session.get(FxRate, (sale, "AUD", "NZD")).is_stale
+        assert session.get(Price, (instrument_id, terminal)).is_stale
+        assert session.get(FxRate, (terminal, "AUD", "NZD")).is_stale
+        if terminal != sale:
+            assert session.get(Price, (instrument_id, sale)) is None
+            assert session.get(FxRate, (sale, "AUD", "NZD")) is None
         # Later stored rows must not hide the completed sale-day range.
         session.add(
             Price(
                 instrument_id=instrument_id,
-                price_date=date(2023, 3, 9),
+                price_date=date(2023, 3, 13),
                 close=Decimal("11"),
                 source="test",
             )
         )
         session.add(
             FxRate(
-                rate_date=date(2023, 3, 9),
+                rate_date=date(2023, 3, 13),
                 currency="AUD",
                 base_currency="NZD",
                 rate=Decimal("1.2"),

@@ -59,8 +59,6 @@ class AsbDividendImporter(Importer):
             reference = checked_text(fields["reference"], "Statement reference")
             if not reference or len(reference) > 110:
                 raise RowProblem("Statement reference must contain 1 to 110 characters.")
-            if fields.get("kind", "dividend") not in ("dividend", "distribution"):
-                raise RowProblem("Income kind must be dividend or distribution.")
             exchange, code, currency = listing(fields["market"], fields["code"], fields["currency"])
             result.incomes.append(
                 parse_income(

@@ -180,11 +180,8 @@ def report(
                     else None,
                 )
             )
-        holding = position(
-            converted,
-            session.scalars(select(Split).where(Split.instrument_id == instrument_id)),
-            end,
-        )
+        splits = list(session.scalars(select(Split).where(Split.instrument_id == instrument_id)))
+        holding = position(converted, splits, end)
         value = ZERO
         if holding.units:
             latest = session.scalar(
@@ -196,14 +193,9 @@ def report(
             if latest is None:
                 raise ImportFailure(f"Missing price for {instrument.code} on or before {end}.")
             close = latest.close
-            for split in session.scalars(
-                select(Split).where(
-                    Split.instrument_id == instrument_id,
-                    Split.split_date > latest.price_date,
-                    Split.split_date <= end,
-                )
-            ):
-                close *= split.shares_before / split.shares_after
+            for split in splits:
+                if latest.price_date < split.split_date <= end:
+                    close *= split.shares_before / split.shares_after
             value = (
                 holding.units
                 * close

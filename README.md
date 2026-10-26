@@ -25,7 +25,20 @@ portfolio-digest migrate          # bring the database up to date
 portfolio-digest health           # check the database is reachable and migrated
 portfolio-digest portfolio add "Personal"            # --base-currency AUD for others
 portfolio-digest portfolio list
+
+# Import a complete trade history, then prove its units against a current snapshot.
+portfolio-digest import sharesies transactions.csv --portfolio "Personal"
+portfolio-digest import asb-statement statement.txt --portfolio "Personal"
+portfolio-digest import sharesight-csv trades.csv --portfolio "Personal"
+portfolio-digest reconcile sharesies holdings.csv --portfolio "Personal"
+
+portfolio-digest import list
+portfolio-digest import undo 12
 ```
+
+The app also reads ASB Securities contract notes from one Gmail label with read-only
+access, and supports manual corrections, gifted shares and opening balances. See
+[docs/IMPORTING.md](docs/IMPORTING.md) for file layouts, Gmail setup and the full workflow.
 
 ## Development
 

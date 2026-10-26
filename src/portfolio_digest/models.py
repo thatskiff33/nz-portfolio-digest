@@ -234,6 +234,19 @@ class Trade(Base):
     instrument: Mapped[Instrument] = relationship()
 
 
+class ImportTradeMatch(Base):
+    """A later run that independently supplied an already stored trade."""
+
+    __tablename__ = "import_trade_matches"
+
+    import_run_id: Mapped[int] = mapped_column(
+        ForeignKey("import_runs.id", ondelete="RESTRICT"), primary_key=True
+    )
+    trade_id: Mapped[int] = mapped_column(
+        ForeignKey("trades.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
 class Income(Base):
     """Cash paid to the holder: dividends, fund distributions, interest."""
 

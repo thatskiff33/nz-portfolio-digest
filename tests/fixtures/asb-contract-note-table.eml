@@ -1,0 +1,20 @@
+From: madeup@example.invalid
+To: investor@example.invalid
+Subject: Made-up ASB Securities contract note
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<p>We have BOUGHT the following securities on your behalf</p>
+<table>
+<tr><td>Contract note number:</td><td>40012345</td><td></td></tr>
+<tr><td>Trade date:</td><td>14/03/2024</td></tr>
+<tr><td>Security code:</td><td>FPH</td></tr>
+<tr><td>Security name:</td><td>Example Healthcare</td><td>Limited</td></tr>
+<tr><td>Market:</td><td>NZX</td></tr>
+<tr><td>Quantity:</td><td>100</td></tr>
+<tr><td>Price:</td><td>NZD 27.5000</td></tr>
+<tr><td>Consideration:</td><td>NZD 2,750.00</td></tr>
+<tr><td>Brokerage:</td><td>NZD 30.00</td></tr>
+<tr><td>GST:</td><td>NZD 4.50</td></tr>
+</table>
+</body></html>

@@ -1,0 +1,7 @@
+Order ID,Trade date,Instrument code,Market code,Quantity,Price,Transaction type,Exchange rate,Transaction fee,Currency,Amount,Transaction method
+made-up-1001,2024-01-15,AIR,NZX,12.34567890,7.25,BUY,,1.25,NZD,90.76,Order
+made-up-1002,2024-02-20,USF,NZX,4,12.50,BUY,,0.50,NZD,50.50,Order
+made-up-1003,2024-03-14,BHP,ASX,2.5,45.20,BUY,0.925,2.00,AUD,115.00,Order
+made-up-1004,2024-04-02,MSFT,NASDAQ,0.125,410.1234567,BUY,0.6100,0.50,USD,51.77,Order
+made-up-1005,2024-05-01,AIR,NZX,2,8.00,SELL,,1.00,NZD,15.00,Order
+,2024-05-02,AIR,NZX,0,0,DIVIDEND,,,NZD,1.00,

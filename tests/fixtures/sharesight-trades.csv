@@ -1,0 +1,4 @@
+Trade Date,Instrument Code,Market Code,Quantity,Price in Dollars,Transaction Type,Exchange Rate,Brokerage,Brokerage Currency,Comments
+03/06/2024,VTI,NYSEARCA,1.25,260.50,BUY,0.6125,5.00,NZD,Made-up broker export
+04/06/2024,FPH,NZSE,10,29.25,BUY,,2.50,NZD,
+05/06/2024,VTI,NYSEARCA,0.25,265.00,SELL,0.6200,1.00,USD,

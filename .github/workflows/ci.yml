@@ -8,9 +8,15 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch makes an older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -20,19 +26,32 @@ jobs:
         image: postgres:18-alpine
         env:
           POSTGRES_PASSWORD: ci
-          POSTGRES_DB: portfolio_test
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      TEST_DATABASE_URL: postgresql+psycopg://postgres:ci@localhost:5432/portfolio_test
+      # Tests run as the least-privilege app role, so a migration that needs superuser
+      # rights fails here rather than on the server.
+      TEST_DATABASE_URL: postgresql+psycopg://portfolio:ci-app@localhost:5432/portfolio_test
       REQUIRE_TEST_DB: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # Actions are pinned to commit SHAs so a moved tag cannot change what runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
+      - name: Create the app's database role, as on the server
+        env:
+          PGHOST: localhost
+          PGPASSWORD: ci
+          POSTGRES_USER: postgres
+          APP_DB_PASSWORD: ci-app
+        run: |
+          sh scripts/db-init/10-app-role.sh
+          psql -U postgres -d postgres -c "CREATE DATABASE portfolio_test OWNER portfolio"
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
@@ -40,8 +59,11 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: docker build -t portfolio-digest:ci .
       - run: docker run --rm portfolio-digest:ci --version
       - name: Compose file is valid

@@ -27,12 +27,13 @@ services:
     restart: "no"
     command: ["migrate"]
     environment:
-      DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD}@db:5432/portfolio
+      DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
     depends_on:
       db:
         condition: service_healthy
 
   # Nightly compressed dump of the portfolio database, pruned after BACKUP_KEEP_DAYS.
+  # Take one on demand with: docker compose run --rm backup --once
   backup:
     image: postgres:18-alpine
     restart: unless-stopped
@@ -41,13 +42,27 @@ services:
     user: "${BACKUP_UID:-1000}:${BACKUP_GID:-1000}"
     environment:
       PGHOST: db
-      PGUSER: postgres
-      PGPASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      # The app role owns every table, so it can dump them all; the superuser password
+      # stays in the db container only.
+      PGUSER: portfolio
+      PGPASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
       PGDATABASE: portfolio
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
     volumes:
       - ./scripts/backup.sh:/scripts/backup.sh:ro
-      - ${BACKUP_DIR:-./backups}:/backups
+      # Refuse to start if BACKUP_DIR is missing, rather than Docker creating it owned by
+      # root, where the backup user cannot write.
+      - type: bind
+        source: ${BACKUP_DIR:-./backups}
+        target: /backups
+        bind:
+          create_host_path: false
+    # Shows as unhealthy in `docker compose ps` when no dump has been written for 26 hours.
+    healthcheck:
+      test: ["CMD-SHELL", "find /backups -maxdepth 1 -name 'portfolio-*.dump' -mmin -1560 | grep -q ."]
+      interval: 15m
+      timeout: 10s
+      start_period: 5m
     depends_on:
       db:
         condition: service_healthy

@@ -23,7 +23,7 @@ See [docs/DEPLOY.md](docs/DEPLOY.md).
 ```sh
 portfolio-digest migrate          # bring the database up to date
 portfolio-digest health           # check the database is reachable and migrated
-portfolio-digest portfolio add "Personal"
+portfolio-digest portfolio add "Personal"            # --base-currency AUD for others
 portfolio-digest portfolio list
 ```
 
@@ -38,6 +38,7 @@ ruff check . && ruff format --check .
 TEST_DATABASE_URL=postgresql+psycopg://postgres:pass@localhost:5432/test pytest
 ```
 
-The tests **wipe** the database in `TEST_DATABASE_URL`, so never point it at real data.
+The tests **wipe** the database in `TEST_DATABASE_URL`, so never point it at real data. As a
+safety net they refuse to run unless the database name contains `test`.
 
 How we work on this repo: [docs/WORKING-AGREEMENT.md](docs/WORKING-AGREEMENT.md).

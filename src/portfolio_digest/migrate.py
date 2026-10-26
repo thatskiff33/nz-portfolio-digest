@@ -6,14 +6,20 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from alembic.util import CommandError
 from sqlalchemy import Engine
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
-def alembic_config(engine: Engine) -> Config:
+def _base_config() -> Config:
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    return config
+
+
+def alembic_config(engine: Engine) -> Config:
+    config = _base_config()
     config.attributes["database_url"] = engine.url.render_as_string(hide_password=False)
     return config
 
@@ -26,9 +32,15 @@ def upgrade(engine: Engine, revision: str = "head") -> None:
 
 
 def head_revision() -> str | None:
-    config = Config()
-    config.set_main_option("script_location", str(MIGRATIONS_DIR))
-    return ScriptDirectory.from_config(config).get_current_head()
+    return ScriptDirectory.from_config(_base_config()).get_current_head()
+
+
+def is_known_revision(revision: str) -> bool:
+    """False when the database was migrated by a newer version of the app."""
+    try:
+        return ScriptDirectory.from_config(_base_config()).get_revision(revision) is not None
+    except CommandError:
+        return False
 
 
 def current_revision(engine: Engine) -> str | None:

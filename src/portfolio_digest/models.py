@@ -6,11 +6,15 @@ codes. FX rates are stored as "1 unit of `currency` = `rate` units of the base c
 
 Fixed sets of values (trade types and so on) are plain strings guarded by CHECK
 constraints, which keeps migrations simple and portable.
+
+Financial history is never deleted as a side effect: removing a portfolio, instrument or
+import run that still has trades or income is refused by the database.
 """
 
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
@@ -22,10 +26,13 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from portfolio_digest.validation import PORTFOLIO_NAME_MAX
 
 # Deterministic constraint names so migrations stay stable.
 NAMING_CONVENTION = {
@@ -36,10 +43,27 @@ NAMING_CONVENTION = {
     "pk": "pk_%(table_name)s",
 }
 
+
+class ExactNumeric(TypeDecorator[Decimal]):
+    """`Numeric` that refuses floats and NaN, so rounding errors can never reach the database."""
+
+    impl = Numeric
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any:
+        if isinstance(value, float):
+            raise TypeError("Use Decimal, not float, for money, quantities and rates.")
+        if isinstance(value, Decimal) and not value.is_finite():
+            raise ValueError(f"{value} is not a usable amount.")
+        return value
+
+
 # Quantities allow fractional shares (Sharesies sells fractions).
-Quantity = Numeric(24, 8)
-Money = Numeric(20, 6)
-Rate = Numeric(20, 10)
+Quantity = ExactNumeric(24, 8)
+Money = ExactNumeric(20, 6)
+Rate = ExactNumeric(20, 10)
+
+PORTFOLIO_NAME_UNIQUE = "uq_portfolios_name_lower"
 
 
 class Base(DeclarativeBase):
@@ -53,6 +77,11 @@ def _in(column: str, values: type[StrEnum]) -> str:
 
 def _currency_ok(column: str) -> str:
     return f"{column} ~ '^[A-Z]{{3}}$'"
+
+
+def _not_nan(*columns: str) -> list[CheckConstraint]:
+    # Postgres sorts NaN above every number, so `price >= 0` alone would let it through.
+    return [CheckConstraint(f"{c} <> 'NaN'", name=f"{c}_not_nan") for c in columns]
 
 
 class InstrumentKind(StrEnum):
@@ -88,14 +117,22 @@ class ImportStatus(StrEnum):
 
 class Portfolio(Base):
     __tablename__ = "portfolios"
-    __table_args__ = (CheckConstraint(_currency_ok("base_currency"), name="base_currency_iso"),)
+    __table_args__ = (
+        CheckConstraint(_currency_ok("base_currency"), name="base_currency_iso"),
+        CheckConstraint("btrim(name) <> ''", name="name_not_blank"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    name: Mapped[str] = mapped_column(String(PORTFOLIO_NAME_MAX))
     base_currency: Mapped[str] = mapped_column(String(3), default="NZD", server_default="NZD")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    trades: Mapped[list["Trade"]] = relationship(back_populates="portfolio")
+    # Deletes are left to the database, which refuses while the portfolio still has trades.
+    trades: Mapped[list["Trade"]] = relationship(back_populates="portfolio", passive_deletes="all")
+
+
+# "Personal" and "personal" would be confusing as two portfolios.
+Index(PORTFOLIO_NAME_UNIQUE, func.lower(Portfolio.name), unique=True)
 
 
 class Instrument(Base):
@@ -108,6 +145,8 @@ class Instrument(Base):
         CheckConstraint(_in("kind", InstrumentKind), name="kind_valid"),
         CheckConstraint("exchange = upper(exchange)", name="exchange_upper"),
         CheckConstraint("code = upper(code)", name="code_upper"),
+        CheckConstraint("exchange ~ '^[^[:space:]]+$'", name="exchange_no_spaces"),
+        CheckConstraint("code ~ '^[^[:space:]]+$'", name="code_no_spaces"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -125,10 +164,14 @@ class ImportRun(Base):
     """One import of a file or feed, so imports can be audited and undone."""
 
     __tablename__ = "import_runs"
-    __table_args__ = (CheckConstraint(_in("status", ImportStatus), name="status_valid"),)
+    __table_args__ = (
+        CheckConstraint(_in("status", ImportStatus), name="status_valid"),
+        CheckConstraint("rows_imported >= 0", name="rows_imported_nonnegative"),
+        CheckConstraint("content_sha256 ~ '^[0-9a-f]{64}$'", name="content_sha256_hex"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"))
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="RESTRICT"))
     source: Mapped[str] = mapped_column(String(64))  # e.g. sharesies_csv, asb_contract_note
     filename: Mapped[str | None] = mapped_column(String(255))
     # SHA-256 of the input, used to spot a file that has already been imported.
@@ -154,11 +197,12 @@ class Trade(Base):
         CheckConstraint("price >= 0", name="price_nonnegative"),
         CheckConstraint("fees >= 0", name="fees_nonnegative"),
         CheckConstraint("fx_rate IS NULL OR fx_rate > 0", name="fx_rate_positive"),
+        *_not_nan("quantity", "price", "fees", "fx_rate"),
         Index("ix_trades_portfolio_instrument_date", "portfolio_id", "instrument_id", "trade_date"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"))
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="RESTRICT"))
     instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id", ondelete="RESTRICT"))
     trade_date: Mapped[date] = mapped_column(Date)
     trade_type: Mapped[str] = mapped_column(String(20))
@@ -173,7 +217,7 @@ class Trade(Base):
     source: Mapped[str] = mapped_column(String(64))  # e.g. sharesies, asb_securities, manual
     external_ref: Mapped[str] = mapped_column(String(128))
     import_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("import_runs.id", ondelete="SET NULL"), index=True
+        ForeignKey("import_runs.id", ondelete="RESTRICT"), index=True
     )
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -196,17 +240,29 @@ class Income(Base):
         CheckConstraint("withholding_tax >= 0", name="withholding_nonnegative"),
         CheckConstraint("drp_quantity IS NULL OR drp_quantity > 0", name="drp_quantity_positive"),
         CheckConstraint("fx_rate IS NULL OR fx_rate > 0", name="fx_rate_positive"),
+        CheckConstraint("net_amount <= gross_amount", name="net_not_above_gross"),
+        CheckConstraint("withholding_tax <= gross_amount", name="withholding_not_above_gross"),
+        *_not_nan(
+            "gross_amount",
+            "net_amount",
+            "imputation_credits",
+            "withholding_tax",
+            "drp_quantity",
+            "fx_rate",
+        ),
         Index("ix_income_portfolio_instrument_paid", "portfolio_id", "instrument_id", "paid_date"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="CASCADE"))
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="RESTRICT"))
     instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id", ondelete="RESTRICT"))
     kind: Mapped[str] = mapped_column(String(16), default=IncomeKind.DIVIDEND.value)
     ex_date: Mapped[date | None] = mapped_column(Date)
     paid_date: Mapped[date] = mapped_column(Date)
     currency: Mapped[str] = mapped_column(String(3))
+    # Cash declared before any tax is withheld, not counting imputation credits.
     gross_amount: Mapped[Decimal] = mapped_column(Money)
+    # Cash actually received: gross less withholding tax (RWT, NRWT or foreign tax).
     net_amount: Mapped[Decimal] = mapped_column(Money)
     imputation_credits: Mapped[Decimal] = mapped_column(
         Money, default=Decimal(0), server_default="0"
@@ -218,7 +274,7 @@ class Income(Base):
     source: Mapped[str] = mapped_column(String(64))
     external_ref: Mapped[str] = mapped_column(String(128))
     import_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("import_runs.id", ondelete="SET NULL"), index=True
+        ForeignKey("import_runs.id", ondelete="RESTRICT"), index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -227,7 +283,10 @@ class Price(Base):
     """Daily closing price in the instrument's own currency."""
 
     __tablename__ = "prices"
-    __table_args__ = (CheckConstraint("close >= 0", name="close_nonnegative"),)
+    __table_args__ = (
+        CheckConstraint("close >= 0", name="close_nonnegative"),
+        *_not_nan("close"),
+    )
 
     instrument_id: Mapped[int] = mapped_column(
         ForeignKey("instruments.id", ondelete="CASCADE"), primary_key=True
@@ -249,6 +308,7 @@ class FxRate(Base):
         CheckConstraint(_currency_ok("base_currency"), name="base_currency_iso"),
         CheckConstraint("currency <> base_currency", name="different_currencies"),
         CheckConstraint("rate > 0", name="rate_positive"),
+        *_not_nan("rate"),
     )
 
     rate_date: Mapped[date] = mapped_column(Date, primary_key=True)

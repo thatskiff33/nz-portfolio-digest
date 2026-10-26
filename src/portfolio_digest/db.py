@@ -4,14 +4,19 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from sqlalchemy import Engine, create_engine
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
 
-from portfolio_digest.config import get_settings
+from portfolio_digest.config import ConfigError, get_settings
 
 
 def make_engine(url: str | None = None) -> Engine:
     url = url or get_settings().database_url.get_secret_value()
-    return create_engine(url, pool_pre_ping=True)
+    try:
+        return create_engine(url, pool_pre_ping=True)
+    except (ArgumentError, ValueError):
+        # The original message can quote the URL, password and all.
+        raise ConfigError("DATABASE_URL is not a valid database URL. See .env.example.") from None
 
 
 @contextmanager

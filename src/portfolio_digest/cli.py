@@ -3,12 +3,18 @@
 import argparse
 import sys
 
+from alembic.util import CommandError
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from portfolio_digest import __version__, migrate
+from portfolio_digest import __version__, migrate, validation
+from portfolio_digest.config import ConfigError, get_settings
 from portfolio_digest.db import make_engine, session_scope
-from portfolio_digest.models import Portfolio
+from portfolio_digest.models import PORTFOLIO_NAME_UNIQUE, Portfolio
+
+
+def _fail(message: str) -> None:
+    print(message, file=sys.stderr)
 
 
 def cmd_migrate(_: argparse.Namespace) -> int:
@@ -25,29 +31,44 @@ def cmd_health(_: argparse.Namespace) -> int:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         current, head = migrate.current_revision(engine), migrate.head_revision()
+    except ConfigError as exc:
+        _fail(f"FAIL: {exc}")
+        return 1
     except SQLAlchemyError as exc:
         # Only the exception type: the message can include connection details.
-        print(f"FAIL: cannot reach the database ({type(exc).__name__}).")
+        _fail(f"FAIL: cannot reach the database ({type(exc).__name__}).")
         return 1
     if current != head:
-        print(f"FAIL: database is at revision {current}, expected {head}. Run `migrate`.")
+        if current is not None and not migrate.is_known_revision(current):
+            _fail(
+                f"FAIL: database is at revision {current}, which this version of "
+                "portfolio-digest does not know. Is the app out of date?"
+            )
+        else:
+            _fail(f"FAIL: database is at revision {current}, expected {head}. Run `migrate`.")
         return 1
     print(f"OK: portfolio-digest {__version__}, database at revision {current}.")
     return 0
 
 
 def cmd_portfolio_add(args: argparse.Namespace) -> int:
-    name = args.name.strip()
-    if not name:
-        print("Portfolio name cannot be blank.")
+    try:
+        name = validation.portfolio_name(args.name)
+        currency = validation.currency_code(args.base_currency or get_settings().base_currency)
+    except validation.InvalidInput as exc:
+        _fail(str(exc))
         return 2
     try:
         with session_scope(make_engine()) as session:
-            session.add(Portfolio(name=name, base_currency=args.base_currency.upper()))
-    except IntegrityError:
-        print(f"Could not add portfolio {name!r}: the name is taken or the currency is invalid.")
+            session.add(Portfolio(name=name, base_currency=currency))
+    except IntegrityError as exc:
+        if getattr(getattr(exc.orig, "diag", None), "constraint_name", None) != (
+            PORTFOLIO_NAME_UNIQUE
+        ):
+            raise
+        _fail(f"There is already a portfolio called {name!r} (upper and lower case count as one).")
         return 1
-    print(f"Added portfolio {name!r}.")
+    print(f"Added portfolio {name!r} ({currency}).")
     return 0
 
 
@@ -75,7 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
     psub = portfolio.add_subparsers(dest="portfolio_command", required=True)
     add = psub.add_parser("add", help="Add a portfolio")
     add.add_argument("name")
-    add.add_argument("--base-currency", default="NZD")
+    add.add_argument(
+        "--base-currency", help="ISO currency code (default: the BASE_CURRENCY setting, NZD)"
+    )
     add.set_defaults(func=cmd_portfolio_add)
     psub.add_parser("list", help="List portfolios").set_defaults(func=cmd_portfolio_list)
 
@@ -84,7 +107,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ConfigError as exc:
+        _fail(str(exc))
+    except CommandError as exc:
+        # Alembic's own messages, e.g. a revision it cannot find. They never include the URL.
+        _fail(f"Migration failed: {exc}")
+    except SQLAlchemyError as exc:
+        # Only the exception type: the message can include connection details or row data.
+        _fail(f"Database error ({type(exc).__name__}). Run `portfolio-digest health` to check.")
+    return 1
 
 
 if __name__ == "__main__":

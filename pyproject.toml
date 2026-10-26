@@ -13,6 +13,8 @@ dependencies = [
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.4",
+    # Timezone data for zoneinfo; slim Docker images have none of their own.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

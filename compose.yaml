@@ -37,6 +37,8 @@ services:
     image: postgres:18-alpine
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/scripts/backup.sh"]
+    # Writes as your server user so you can copy the backups off-server.
+    user: "${BACKUP_UID:-1000}:${BACKUP_GID:-1000}"
     environment:
       PGHOST: db
       PGUSER: postgres

@@ -14,6 +14,7 @@ chmod 600 .env
 # Fill in both passwords with: openssl rand -hex 32
 nano .env
 
+mkdir -p backups                                 # must exist before first start
 docker compose up -d db backup
 docker compose run --rm --build migrate          # creates the tables
 docker compose run --rm migrate health           # should print "OK: ..."
@@ -25,6 +26,7 @@ docker compose run --rm migrate portfolio add "Jubbles Enterprises"
 ```sh
 cd ~/portfolio-digest
 git pull
+mkdir -p backups                                 # must exist before first start
 docker compose up -d db backup
 docker compose run --rm --build migrate
 ```

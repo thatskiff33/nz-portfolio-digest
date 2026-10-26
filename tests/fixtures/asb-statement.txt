@@ -1,0 +1,5 @@
+ASB Securities made-up trade statement
+Trade Date Contract No Type Code Market Quantity Price Brokerage Consideration
+14/03/2016 30001234 Buy FPH NZX 100 9.8500 30.00 985.00
+20/04/2017 30005678 Bought BHP ASX 5 24.2000 29.90 121.00
+22/05/2018 30009999 Sell FPH NZX 20 12.1000 30.00 242.00

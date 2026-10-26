@@ -132,3 +132,39 @@ def render_html(report: YearEnd, name: str) -> str:
 <h2>Data quality</h2><ul>{flags or "<li>No carried-forward data flags.</li>"}</ul>
 <p>The attached CSV contains the same figures at full calculation precision.</p>
 </main></body></html>"""
+
+
+def render_text(report: YearEnd, name: str) -> str:
+    """Plain-text alternative with the same figures and notes as HTML."""
+    lines = [
+        f"{name}: year ended 31 March {report.year}",
+        f"1 April {report.year - 1} to 31 March {report.year}. All amounts in NZ$.",
+        "",
+        "Realised sales and income",
+    ]
+    for row in (*report.rows, report.total):
+        lines.append(row.label)
+        lines.extend(
+            f"  {title}: {display_number(getattr(row, field))}" for field, title in COLUMNS
+        )
+    lines.extend(["", "Portfolio performance"])
+    for row in (*report.performance.holdings, report.performance.total):
+        percent = f"{display_number(row.percentages.total)}%" if row.percentages else "N/A"
+        lines.append(
+            f"{row.label}: opening {display_number(row.opening)}, "
+            f"closing {display_number(row.closing)}, total return "
+            f"{display_number(row.amounts.total)} ({percent})"
+        )
+    lines.extend(
+        [
+            "",
+            f"Peak foreign historical cost: NZ$ {display_number(report.foreign_peak)} "
+            f"on {report.foreign_peak_day}.",
+            "Over NZ$50,000 FIF threshold: " + ("Yes" if report.fif_exceeded else "No"),
+            "",
+            *NOTES,
+            *report.flags,
+            "The attached CSV contains the same figures at full calculation precision.",
+        ]
+    )
+    return "\n".join(lines) + "\n"

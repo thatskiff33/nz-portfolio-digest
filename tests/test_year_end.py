@@ -4,23 +4,25 @@ import csv
 import io
 from datetime import UTC, date, datetime
 from decimal import Decimal as D
+from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session
 from test_returns_loader import _sqlite_engine
 
 from portfolio_digest.cli import main
+from portfolio_digest.config import ConfigError
+from portfolio_digest.mailers import MailSettings
 from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.returns import Holding, Observation, ReturnError, SplitEvent, Transaction
+from portfolio_digest.scheduling import ScheduleConfig, read_config
 from portfolio_digest.year_end import Dividend, calculate_year_end
-from portfolio_digest.year_end_delivery import (
-    MailSettings,
-    build_message,
-    deliver,
+from portfolio_digest.year_end_report import render_csv, render_html
+from portfolio_digest.year_end_service import (
     latest_ended_year,
     load_year_end,
+    run_year_end,
 )
-from portfolio_digest.year_end_report import render_csv, render_html
 
 
 def day(value):
@@ -173,13 +175,6 @@ def test_outputs_escape_html_and_preserve_csv_figures(ledger):
     csv_rows = list(csv.reader(io.StringIO(render_csv(r))))
     portfolio = next(row for row in csv_rows if row[:1] == ["Portfolio"])
     assert list(map(D, portfolio[1:])) == [D("142.5"), D(-5), D(96), D(10), D(8), D(3), D(85)]
-    message = build_message(
-        r, "Invented", MailSettings(sender="a@example.invalid", recipient="b@example.invalid")
-    )
-    assert message.get_body(preferencelist=("html",)).get_content_type() == "text/html"
-    attachment = next(message.iter_attachments())
-    assert attachment.get_filename() == "year-end-2026.csv"
-    assert attachment.get_payload(decode=True).decode() == render_csv(r)
 
 
 @pytest.fixture
@@ -268,9 +263,9 @@ def year_engine(monkeypatch, ledger):
 
 def test_database_loader_and_cli_dry_run_never_sends(year_engine, monkeypatch, tmp_path, ledger):
     def forbidden(*args, **kwargs):
-        pytest.fail("dry-run attempted SMTP")
+        pytest.fail("dry-run attempted mail delivery")
 
-    monkeypatch.setattr("portfolio_digest.year_end_delivery.smtplib.SMTP", forbidden)
+    monkeypatch.setattr("portfolio_digest.report_service.send", forbidden)
     monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: year_engine)
     with Session(year_engine) as session:
         loaded = load_year_end(session, "Invented", 2026)
@@ -313,55 +308,75 @@ def test_invalid_cli_and_missing_data_do_not_send(monkeypatch, ledger, tmp_path)
     h, dividends, _ = ledger
     with pytest.raises(ReturnError, match="Missing"):
         calculate_year_end(h, dividends, {}, 2026)
-    with pytest.raises(ReturnError, match="--out"):
-        deliver(calculate_year_end(*ledger, 2026), "Invented", dry_run=True)
 
 
-def test_delivery_starttls_attachment_and_sanitised_failure(ledger, monkeypatch):
-    r = calculate_year_end(*ledger, 2026)
-    monkeypatch.setenv("SMTP_HOST", "smtp.example.invalid")
-    monkeypatch.setenv("SMTP_SENDER", "a@example.invalid")
-    monkeypatch.setenv("SMTP_RECIPIENT", "b@example.invalid")
-    monkeypatch.setenv("SMTP_USERNAME", "invented")
-    monkeypatch.setenv("SMTP_PASSWORD", "invented-password")
+@pytest.mark.parametrize("provider", ["gmail", "smtp", "postmark", "ses"])
+@pytest.mark.parametrize("recipients", [[], ["first@example.invalid", "second@example.invalid"]])
+def test_delivery_uses_shared_mailer_and_attachment(year_engine, monkeypatch, provider, recipients):
+    settings = MailSettings(
+        _env_file=None,
+        mailer=provider,
+        mail_from="digest@example.invalid",
+        mail_owner="owner@example.invalid",
+    )
+    config = ScheduleConfig(schedules=[], recipients=recipients)
     calls = []
+    monkeypatch.setattr(
+        "portfolio_digest.report_service.send", lambda s, m, r: calls.append((s, m, r))
+    )
+    with Session(year_engine) as session:
+        run_year_end(session, config, "Invented", 2026, settings=settings)
+    used_settings, message, envelope = calls[0]
+    assert used_settings is settings
+    assert envelope == (recipients or ["owner@example.invalid"])
+    assert message["To"] == "undisclosed-recipients:;"
+    assert "31 March 2026" in message["Subject"]
+    assert "12,638.00" in message.get_body(preferencelist=("html",)).get_content()
+    assert "12,638.00" in message.get_body(preferencelist=("plain",)).get_content()
+    attachment = next(message.iter_attachments())
+    assert attachment.get_filename() == "year-end-2026.csv"
+    assert "12638" in attachment.get_payload(decode=True).decode()
 
-    class FakeSMTP:
-        def __init__(self, host, port, timeout):
-            assert host == "smtp.example.invalid" and port == 587 and timeout == 30
 
-        def __enter__(self):
-            return self
+def test_year_end_preview_requires_html_path(year_engine, tmp_path):
+    with Session(year_engine) as session:
+        with pytest.raises(ConfigError, match="--out"):
+            run_year_end(session, ScheduleConfig(schedules=[]), "Invented", 2026, dry_run=True)
+        with pytest.raises(ConfigError, match="--out"):
+            run_year_end(
+                session,
+                ScheduleConfig(schedules=[]),
+                "Invented",
+                2026,
+                dry_run=True,
+                out=tmp_path / "preview.csv",
+            )
 
-        def __exit__(self, *args):
-            pass
 
-        def starttls(self, *, context):
-            assert context.check_hostname
-            calls.append("tls")
+def test_scheduled_year_end_uses_original_due_year_and_previews_without_credentials(
+    year_engine, monkeypatch, tmp_path
+):
+    from portfolio_digest.report_service import run_report
 
-        def login(self, username, password):
-            assert calls == ["tls"] and password == "invented-password"  # noqa: S105
-            calls.append("login")
-
-        def send_message(self, message):
-            assert calls == ["tls", "login"]
-            assert len(list(message.iter_attachments())) == 1
-            calls.append("sent")
-
-    monkeypatch.setattr("portfolio_digest.year_end_delivery.smtplib.SMTP", FakeSMTP)
-    deliver(r, "Invented", dry_run=False)
-    assert calls == ["tls", "login", "sent"]
-
-    def broken(*args, **kwargs):
-        raise OSError("invented-password")
-
-    monkeypatch.setattr("portfolio_digest.year_end_delivery.smtplib.SMTP", broken)
-    from portfolio_digest.config import ConfigError
-
-    with pytest.raises(ConfigError, match="could not be sent") as exc:
-        deliver(r, "Invented", dry_run=False)
-    assert "invented-password" not in str(exc.value)
+    config = read_config(Path("schedules.toml"))
+    monkeypatch.setattr(
+        "portfolio_digest.report_service.mail_settings",
+        lambda: pytest.fail("Preview loaded credentials"),
+    )
+    monkeypatch.setattr("portfolio_digest.report_service.send", lambda *a: pytest.fail("Sent"))
+    monkeypatch.setattr("portfolio_digest.report_service.ping_kuma", lambda *a: pytest.fail("Ping"))
+    with Session(year_engine) as session:
+        run_report(
+            session,
+            config,
+            "year-end",
+            dry_run=True,
+            out=tmp_path / "annual.html",
+            now=datetime(2026, 3, 31, 20, tzinfo=UTC),
+        )
+    assert "31 March 2026" in (tmp_path / "annual-portfolio-1.txt").read_text()
+    assert "Invented" in (tmp_path / "annual-portfolio-1.html").read_text()
+    assert "12638" in (tmp_path / "annual-portfolio-1.csv").read_text()
 
 
 def test_all_portfolios_continue_after_one_fails(year_engine, monkeypatch, tmp_path):
@@ -412,3 +427,98 @@ def test_completed_pre_year_positions_need_no_historical_fx(rebuy):
     assert report.total.gains == D(200 if rebuy else 0)
     assert report.foreign_peak == D(800 if rebuy else 0)
     assert report.flags == ()
+
+
+def test_year_end_loader_retains_historical_broker_fx(monkeypatch):
+    engine = _sqlite_engine(monkeypatch)
+    with Session(engine) as session:
+        portfolio = Portfolio(name="Historical", base_currency="NZD")
+        instrument = Instrument(exchange="NASDAQ", code="OLD", name="Invented", currency="USD")
+        session.add_all([portfolio, instrument])
+        session.flush()
+        for when, kind, price, fx in [
+            ("2024-05-01", "buy", "20", "1.5"),
+            ("2025-05-01", "sell", "30", "2"),
+        ]:
+            session.add(
+                Trade(
+                    portfolio_id=portfolio.id,
+                    instrument_id=instrument.id,
+                    trade_date=day(when),
+                    trade_type=kind,
+                    quantity=D(10),
+                    price=D(price),
+                    currency="USD",
+                    fx_rate=D(fx),
+                    source="invented",
+                    external_ref=kind,
+                )
+            )
+        session.add_all(
+            [
+                Price(
+                    instrument_id=instrument.id,
+                    price_date=day("2025-03-31"),
+                    close=D(25),
+                    source="invented",
+                ),
+                FxRate(
+                    currency="USD",
+                    base_currency="NZD",
+                    rate_date=day("2025-03-31"),
+                    rate=D(2),
+                    source="invented",
+                ),
+            ]
+        )
+        session.commit()
+        result = load_year_end(session, portfolio.name, 2026)
+        # No historical market FX exists: recorded execution FX must survive loading.
+        assert result.total.gains == D(300)  # 10*30*2 proceeds - 10*20*1.5 cost.
+        assert result.foreign_peak == D(300)
+    engine.dispose()
+
+
+def test_scheduled_year_end_send_failure_exits_nonzero_without_monitoring(
+    year_engine, monkeypatch, capsys
+):
+    from portfolio_digest.mailers import MailError
+
+    monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: year_engine)
+    monkeypatch.setattr(
+        "portfolio_digest.report_service.mail_settings",
+        lambda: MailSettings(
+            _env_file=None, mail_from="a@example.invalid", mail_owner="b@example.invalid"
+        ),
+    )
+
+    def fail(*args):
+        raise MailError("Mail delivery failed.")
+
+    monkeypatch.setattr("portfolio_digest.report_service.send", fail)
+    monkeypatch.setattr("portfolio_digest.report_service.ping_kuma", lambda *a: pytest.fail("Ping"))
+    monkeypatch.setattr("portfolio_digest.year_end_service.latest_ended_year", lambda *a: 2026)
+    assert main(["report", "send-now", "--schedule", "year-end"]) == 1
+    assert "Mail delivery failed" in capsys.readouterr().err
+
+
+def test_year_end_scheduler_dispatch_retains_persisted_due_date(year_engine, monkeypatch):
+    import argparse
+
+    from portfolio_digest.cli import cmd_scheduler
+    from portfolio_digest.scheduling import Scheduler
+
+    due = datetime(2026, 3, 31, 20, tzinfo=UTC)
+    seen = []
+
+    def run(self, execute):
+        return execute(self.config.named_report("year-end"), due)
+
+    monkeypatch.setattr(Scheduler, "run", run)
+    monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: year_engine)
+    monkeypatch.setattr(
+        "portfolio_digest.cli.run_report",
+        lambda session, config, name, **kwargs: seen.append((name, kwargs["now"])),
+    )
+    assert cmd_scheduler(argparse.Namespace(config="schedules.toml", state="unused.json")) == 0
+    assert seen == [("year-end", due)]

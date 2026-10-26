@@ -100,12 +100,13 @@ portfolio-digest year-end --portfolio "Example" --year 2026 --dry-run --out ./pr
 portfolio-digest year-end --portfolio "Example" --year 2026
 ```
 
-The preview writes `year-end-2026.html` and `year-end-2026.csv` and sends nothing.
-Keep these private financial reports outside git. The send command emails HTML with a
-CSV attachment. Configure `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_SENDER` and
-`SMTP_RECIPIENT` in the server's `.env`; authenticated servers also need `SMTP_USERNAME`
-and `SMTP_PASSWORD`. SMTP always uses STARTTLS with certificate verification. Compose
-passes these settings to the app. Preview mode needs no SMTP configuration.
+The preview writes `year-end-2026.html`, `year-end-2026.txt` and
+`year-end-2026.csv` and sends nothing. Keep these private financial reports outside git.
+The send command emails HTML and plain text with a CSV attachment, using the same
+`MAILER`, `MAIL_FROM`, `MAIL_OWNER` and provider credentials as weekly and monthly reports.
+The recipients in `schedules.toml` override `MAIL_OWNER` for every report. Use `--config`
+to select another schedule file. See [email setup](docs/DEPLOY.md#email-reports).
+Preview mode needs no mail configuration.
 
 The summary includes per-holding and portfolio realised gains and losses, gross dividends,
 imputation credits, resident and foreign withholding, net received or reinvested, opening
@@ -133,26 +134,32 @@ overseas. Gross cash dividends exclude imputation credits, which are shown separ
 NZ generally does not tax capital gains for long-term investors, but exceptions apply.
 This summary is information, not tax advice.
 
-For automatic delivery, install the annual timer alongside the existing price timers:
+The shared scheduler runs the `year-end` entry in `schedules.toml` on
+**1 April at 09:00 Pacific/Auckland**, sending one email per NZD portfolio for the latest
+year ended 31 March. No separate annual systemd timer is needed. If one was installed
+from PR #29, disable it before starting the shared scheduler; see
+[deployment](docs/DEPLOY.md#shared-price-and-report-schedule).
+
+The 09:00 send uses data already stored. The US 31 March close coincides with this time
+in NZ daylight saving, before the normal daily price fetch, so US holdings may use the
+preceding stored close. Review carried-forward flags; refresh prices and FX through
+31 March and rerun manually if you need that closing observation.
+
+For an all-portfolio preview, use `year-end --all --year 2026 --dry-run --out
+./private-preview`; each portfolio gets a numbered subdirectory. Other portfolios continue
+if one fails, and the command exits non-zero if any failed. Manual reruns send again.
+The scheduler retries failed occurrences after restart using their original tax year;
+a retry may resend to portfolios already delivered. Check provider delivery before
+retrying an uncertain result. Inspect failures with `docker compose logs scheduler`.
+
+The scheduled report can also be sent or previewed through the shared report command:
 
 ```sh
-cp deploy/systemd/portfolio-digest-year-end.{service,timer} ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now portfolio-digest-year-end.timer
+portfolio-digest report send-now --schedule year-end
+portfolio-digest report send-now --schedule year-end --dry-run --out annual.html
 ```
 
-It runs `year-end --all` on **1 April at 09:00 Pacific/Auckland**, sending one email per
-portfolio for the latest year ended 31 March. `Persistent=true` catches a missed run after
-restart. The working directory follows the other units (`~/portfolio-digest`); adjust it
-if needed. The 09:00 send uses data already stored. The US 31 March close coincides with this
-time in NZ daylight saving, before the normal daily price fetch, so US holdings may use
-the preceding stored close. Review the source dates in the carried-forward flags; refresh
-prices and FX through 31 March and rerun manually if you need that closing observation. Check
-`journalctl --user -u portfolio-digest-year-end.service` for failures. Other portfolios
-continue if one has missing data. Manual reruns send again, so check delivery before retrying
-an uncertain SMTP result. For an all-portfolio preview, use `year-end --all --year 2026
---dry-run --out ./private-preview`; each portfolio gets a numbered subdirectory.
-
-This checkout does not yet contain the #13 report/mailer, so the year-end email has a
-self-contained, reusable SMTP boundary and a plain table style. Scheduling uses the existing
-systemd convention. It reads dividend fields directly from the existing income records.
+The latter writes `annual-portfolio-ID.html`, `.txt` and `.csv` for each portfolio,
+using its database ID. A scheduled report stops on the first failed portfolio, exits
+non-zero and does not ping monitoring. First startup schedules future occurrences;
+existing pending occurrences catch up once after downtime.

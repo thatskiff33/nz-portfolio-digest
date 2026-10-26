@@ -104,18 +104,23 @@ def test_gmail_cli_builds_importer_and_imports_with_fake_client(engine, monkeypa
 
         def message_ids(self, label_id):
             assert label_id == "made-up-label-id"
-            return iter(["made-up-message"])
+            return iter(["unreadable", "made-up-message"])
 
         def raw_message(self, message_id):
+            original = (FIXTURES / "asb-contract-note.eml").read_bytes()
+            if message_id == "unreadable":
+                return original.replace(b"Quantity: 100\n", b"")
             assert message_id == "made-up-message"
-            return (FIXTURES / "asb-contract-note.eml").read_bytes()
+            return original
 
     monkeypatch.setattr(cli, "GmailClient", FakeClient)
     monkeypatch.setattr(cli, "get_gmail_settings", lambda: GmailSettings(label="Made-up ASB label"))
     assert main(["portfolio", "add", "Personal"]) == 0
     for expected in ("imported 1, duplicates 0", "imported 0, duplicates 1"):
         assert main(["import", "asb-gmail", "--portfolio", "Personal"]) == 0
-        assert expected in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert expected + ", skipped 1" in output
+        assert "Skipped message unreadable: contract note is missing: quantity" in output
     with Session(engine) as session:
         trade = session.scalars(select(Trade)).one()
         assert trade.external_ref == "contract:40012345"
@@ -307,7 +312,8 @@ def test_asb_statement_and_email_share_fee_basis(engine, tmp_path, capsys, gst_c
 
 
 @pytest.mark.parametrize("phase", ["file_parse", "gmail_fetch", "file_store", "gmail_store"])
-def test_unexpected_import_exception_marks_run_failed(engine, monkeypatch, capsys, phase):
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt, SystemExit])
+def test_unexpected_import_exception_marks_run_failed(engine, monkeypatch, capsys, phase, failure):
     from portfolio_digest import cli, importing
     from portfolio_digest.config import GmailSettings
 
@@ -315,7 +321,7 @@ def test_unexpected_import_exception_marks_run_failed(engine, monkeypatch, capsy
         if phase.endswith("store"):
             args[0].add(Instrument(exchange="NZX", code="AIR", name="Made-up", currency="NZD"))
             args[0].flush()
-        raise RuntimeError("made-up private contents must not appear")
+        raise failure("made-up private contents must not appear")
 
     gmail = phase.startswith("gmail")
     if phase.endswith("store"):
@@ -337,9 +343,14 @@ def test_unexpected_import_exception_marks_run_failed(engine, monkeypatch, capsy
         if gmail
         else ["import", "sharesies", str(FIXTURES / "sharesies-transactions.csv")]
     )
-    assert main([*args, "--portfolio", "Personal"]) == 2
-    error = capsys.readouterr().err
-    assert "failed unexpectedly" in error
+    if failure is RuntimeError:
+        assert main([*args, "--portfolio", "Personal"]) == 2
+        error = capsys.readouterr().err
+        assert "failed unexpectedly" in error
+    else:
+        with pytest.raises(failure, match="made-up private contents"):
+            main([*args, "--portfolio", "Personal"])
+        error = capsys.readouterr().err
     assert "private contents" not in error
     with Session(engine) as session:
         run = session.scalars(select(ImportRun)).one()
@@ -350,7 +361,16 @@ def test_unexpected_import_exception_marks_run_failed(engine, monkeypatch, capsy
         assert session.scalar(select(func.count()).select_from(Instrument)) == 0
 
 
-@pytest.mark.parametrize("old,new", [(b"260.50", b"1e30"), (b"0.6125", b"1e-25")])
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        (b"260.50", b"1e30"),
+        (b"0.6125", b"1e-25"),
+        (b",1.25,", b",1e20,"),
+        (b",5.00,", b",100000000000000,"),
+        (b",5.00,", b",1e25,"),
+    ],
+)
 def test_out_of_range_decimal_is_a_logged_row_error(engine, tmp_path, capsys, old, new):
     assert main(["portfolio", "add", "Personal"]) == 0
     path = tmp_path / "made-up-range.csv"

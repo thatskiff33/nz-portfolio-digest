@@ -147,3 +147,35 @@ def test_authorise_cli_passes_force_and_names_env_variable_without_exposing_toke
     output = capsys.readouterr()
     assert "GMAIL_REFRESH_TOKEN" in output.out and ".env" in output.out
     assert "made-up-refresh-token" not in output.out + output.err
+
+
+@pytest.mark.parametrize(
+    "old,new,reason",
+    [
+        (b"Market: NZX", b"Market: LSE", "exchange"),
+        (b"Quantity: 100\n", b"", "missing: quantity"),
+        (b"Brokerage: NZD", b"Brokerage: AUD", "expected NZD"),
+        (b"charset=utf-8", b"charset=made-up-encoding", "encoding we cannot read"),
+    ],
+)
+def test_unreadable_gmail_notes_are_skipped_without_blocking_later_messages(old, new, reason):
+    original = (FIXTURES / "asb-contract-note.eml").read_bytes()
+
+    class Client:
+        def label_id(self, name):
+            return "made-up-label"
+
+        def message_ids(self, label_id):
+            return iter(("unreadable", "valid"))
+
+        def raw_message(self, message_id):
+            return original.replace(old, new) if message_id == "unreadable" else original
+
+    importer = AsbGmailImporter(Client(), "ASB notes")
+    for _ in range(2):
+        result = importer.fetch()
+        assert not result.errors
+        assert [trade.external_ref for trade in result.trades] == ["contract:40012345"]
+        assert len(result.skipped) == 1
+        assert result.skipped[0].where == "message unreadable"
+        assert reason in result.skipped[0].message

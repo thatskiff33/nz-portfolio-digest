@@ -209,6 +209,8 @@ def parse_quantity(value: str, what: str = "quantity", *, allow_negative: bool =
     if number == 0 or (number < 0 and not allow_negative):
         requirement = "non-zero" if allow_negative else "more than zero"
         raise RowProblem(f"{what} must be {requirement}, not {value!r}.")
+    if number.copy_abs() >= Decimal("1e16"):
+        raise RowProblem(f"{what} is outside the supported quantity range.")
     if _places(number) > QUANTITY_PLACES:
         raise RowProblem(f"{what} {value!r} has more than {QUANTITY_PLACES} decimal places.")
     return number
@@ -239,6 +241,8 @@ def parse_money(
     if not value.strip():
         return Decimal(0)
     number = parse_decimal(value, what, currency=currency)
+    if number.copy_abs() >= Decimal("1e14"):
+        raise RowProblem(f"{what} is outside the supported money range.")
     if number < 0:
         if not allow_negative:
             raise RowProblem(f"{what} cannot be negative ({value!r}).")

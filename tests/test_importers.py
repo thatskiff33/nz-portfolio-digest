@@ -244,3 +244,59 @@ def test_broker_negative_cash_fees_still_parse_as_positive():
     from portfolio_digest.importers.base import parse_money
 
     assert parse_money("-5", "Brokerage") == Decimal("5")
+
+
+@pytest.mark.parametrize("value", ["1e16", "1e20", "-1e16", "1e999999999"])
+def test_quantity_outside_database_range_is_a_row_problem(value):
+    from portfolio_digest.importers.base import RowProblem, parse_quantity
+
+    with pytest.raises(RowProblem, match="supported quantity range"):
+        parse_quantity(value, allow_negative=True)
+
+
+@pytest.mark.parametrize("value", ["1e14", "1e25", "-1e14", "-1e999999999"])
+def test_money_outside_database_range_is_a_row_problem(value):
+    from portfolio_digest.importers.base import RowProblem, parse_money
+
+    with pytest.raises(RowProblem, match="supported money range"):
+        parse_money(value, "Brokerage")
+
+
+def test_quantity_and_money_accept_database_boundaries():
+    from portfolio_digest.importers.base import parse_money, parse_quantity
+
+    quantity = "9999999999999999.99999999"
+    money = "99999999999999.999999"
+    assert parse_quantity(quantity) == Decimal(quantity)
+    assert parse_quantity("-" + quantity, allow_negative=True) == -Decimal(quantity)
+    assert parse_money(money, "Brokerage") == Decimal(money)
+    assert parse_money("-" + money, "Brokerage") == Decimal(money)
+
+
+@pytest.mark.parametrize("fee,rate", [("1e25", "0.6"), ("9e13", "1e9")])
+def test_sharesight_oversized_brokerage_is_a_located_row_error(fee, rate):
+    content = (
+        "Trade Date,Instrument Code,Market Code,Quantity,Price in Dollars,"
+        "Transaction Type,Exchange Rate,Brokerage,Brokerage Currency\n"
+        f"03/06/2024,MSFT,NASDAQ,1,100,BUY,{rate},{fee},NZD\n"
+    ).encode()
+    result = SharesightCsvImporter().parse(content, ParseContext())
+    assert not result.trades
+    assert len(result.errors) == 1
+    assert result.errors[0].where == "line 2"
+    assert "Brokerage is outside the supported" in result.errors[0].message
+
+
+def test_sharesight_brokerage_arithmetic_error_is_a_located_row_error():
+    from decimal import localcontext
+
+    content = (
+        b"Trade Date,Instrument Code,Market Code,Quantity,Price in Dollars,"
+        b"Transaction Type,Exchange Rate,Brokerage,Brokerage Currency\n"
+        b"03/06/2024,MSFT,NASDAQ,1,100,BUY,1e9,9e13,NZD\n"
+    )
+    with localcontext() as context:
+        context.Emax = 14
+        result = SharesightCsvImporter().parse(content, ParseContext())
+    assert not result.trades
+    assert str(result.errors[0]) == "line 2: Brokerage is outside the supported money range."

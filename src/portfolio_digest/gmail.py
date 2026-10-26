@@ -166,10 +166,8 @@ class AsbGmailImporter:
                 result.trades.append(parse_contract_note(raw, where))
             except NotAContractNote:
                 result.skipped.append(RowError(where, "not an ASB contract note"))
-            except FileProblem as exc:
-                result.errors.append(RowError(where, str(exc)))
-            except RowProblem as exc:
-                result.errors.append(RowError(where, str(exc)))
+            except (FileProblem, RowProblem) as exc:
+                result.skipped.append(RowError(where, str(exc)))
         return result
 
 

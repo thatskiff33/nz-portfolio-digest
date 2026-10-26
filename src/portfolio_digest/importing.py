@@ -303,8 +303,10 @@ def import_file(session: Session, source: str, path: Path, portfolio_name: str) 
         portfolio = session.get(Portfolio, portfolio.id, with_for_update=True)
         assert portfolio is not None  # protected by the import run foreign key
         return _store_result(session, portfolio, run, importer.trade_source, result)
-    except Exception as exc:
+    except BaseException as exc:
         _mark_run_failed(session, run_id)
+        if not isinstance(exc, Exception):
+            raise
         if isinstance(exc, (ImportFailure, SQLAlchemyError)):
             raise
         # Unexpected exception messages may contain private source data or credentials.
@@ -326,8 +328,10 @@ def import_gmail(
         return _store_result(
             session, portfolio, run, importer.trade_source, result, skip_conflicts=True
         )
-    except Exception as exc:
+    except BaseException as exc:
         _mark_run_failed(session, run_id)
+        if not isinstance(exc, Exception):
+            raise
         if isinstance(exc, (ImportFailure, SQLAlchemyError, GmailError)):
             raise
         raise ImportFailure(

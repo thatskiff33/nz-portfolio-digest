@@ -15,10 +15,9 @@ here talks to Sharesight itself. The columns we read (headers may say "(optional
   fee in the portfolio's currency is converted using the row's exchange rate.
 """
 
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import DecimalException
 
 from portfolio_digest.importers.base import (
-    MONEY_PLACES,
     Fingerprinter,
     Importer,
     ParseContext,
@@ -105,9 +104,10 @@ class SharesightCsvImporter(Importer):
                     f"Brokerage is in {fee_currency} but the trade is in {currency}, and there "
                     "is no exchange rate to convert it."
                 )
-            fees = (fees * foreign_per_base).quantize(
-                Decimal(1).scaleb(-MONEY_PLACES), ROUND_HALF_EVEN
-            )
+            try:
+                fees = parse_price(str(fees * foreign_per_base), "Brokerage")
+            except DecimalException:
+                raise RowProblem("Brokerage is outside the supported money range.") from None
 
         return ParsedTrade(
             where=where,

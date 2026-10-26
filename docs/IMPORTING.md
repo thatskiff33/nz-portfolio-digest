@@ -16,7 +16,9 @@ is only a duplicate when its trade fields match. Conflicting references fail fil
 For Gmail, a conflicting message is skipped with its message ID and reference in the CLI
 output, allowing the rest of the label to import. The stored trade is retained; review the
 amendment and correct the history explicitly rather than overwriting it automatically.
-The first accepted version of a new reference in a Gmail batch is retained.
+The first accepted version of a new reference in a Gmail batch is retained. Unreadable
+Gmail contract notes are also skipped with a message ID and reason; review and correct
+them explicitly so the history is complete. Interrupted imports are marked failed.
 Currency prefixes on prices and fees must agree with their declared currency.
 
 Broker exports contain private financial information. Keep them outside the repository,

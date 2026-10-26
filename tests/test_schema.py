@@ -195,6 +195,23 @@ def test_deleting_an_import_run_never_orphans_its_trades(engine):
         session.delete(session.get(ImportRun, run.id))
 
 
+@pytest.mark.parametrize("table", ["trades", "income"])
+def test_rows_cannot_point_at_another_portfolios_import(engine, table):
+    """Undoing an import must only ever touch its own portfolio."""
+    with session_scope(engine) as session:
+        portfolio, instrument = _seed(session)
+        other = Portfolio(name="Kids")
+        session.add(other)
+        session.flush()
+        run = ImportRun(portfolio_id=other.id, source="manual")
+        session.add(run)
+        session.flush()
+    make_row = {"trades": _trade, "income": _income}[table]
+    guard = f"fk_{table}_import_run_id"
+    with pytest.raises(IntegrityError, match=guard), session_scope(engine) as session:
+        session.add(make_row(portfolio, instrument, import_run_id=run.id))
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

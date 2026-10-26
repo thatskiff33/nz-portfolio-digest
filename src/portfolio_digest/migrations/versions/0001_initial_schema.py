@@ -127,6 +127,7 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_import_runs")),
+        sa.UniqueConstraint("id", "portfolio_id", name=op.f("uq_import_runs_id_portfolio_id")),
     )
     op.create_index(
         op.f("ix_import_runs_content_sha256"), "import_runs", ["content_sha256"], unique=False
@@ -219,8 +220,8 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("withholding_tax >= 0", name=op.f("ck_income_withholding_nonnegative")),
         sa.ForeignKeyConstraint(
-            ["import_run_id"],
-            ["import_runs.id"],
+            ["import_run_id", "portfolio_id"],
+            ["import_runs.id", "import_runs.portfolio_id"],
             name=op.f("fk_income_import_run_id_import_runs"),
             ondelete="RESTRICT",
         ),
@@ -293,8 +294,8 @@ def upgrade() -> None:
         sa.CheckConstraint("price >= 0", name=op.f("ck_trades_price_nonnegative")),
         sa.CheckConstraint("quantity <> 0", name=op.f("ck_trades_quantity_nonzero")),
         sa.ForeignKeyConstraint(
-            ["import_run_id"],
-            ["import_runs.id"],
+            ["import_run_id", "portfolio_id"],
+            ["import_runs.id", "import_runs.portfolio_id"],
             name=op.f("fk_trades_import_run_id_import_runs"),
             ondelete="RESTRICT",
         ),

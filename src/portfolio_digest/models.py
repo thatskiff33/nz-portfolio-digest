@@ -21,6 +21,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     MetaData,
     Numeric,
@@ -168,6 +169,9 @@ class ImportRun(Base):
         CheckConstraint(_in("status", ImportStatus), name="status_valid"),
         CheckConstraint("rows_imported >= 0", name="rows_imported_nonnegative"),
         CheckConstraint("content_sha256 ~ '^[0-9a-f]{64}$'", name="content_sha256_hex"),
+        # Lets trades and income point at (id, portfolio_id), so a row can only belong to
+        # an import into its own portfolio.
+        UniqueConstraint("id", "portfolio_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -199,6 +203,12 @@ class Trade(Base):
         CheckConstraint("fx_rate IS NULL OR fx_rate > 0", name="fx_rate_positive"),
         *_not_nan("quantity", "price", "fees", "fx_rate"),
         Index("ix_trades_portfolio_instrument_date", "portfolio_id", "instrument_id", "trade_date"),
+        # An import into another portfolio is refused. NULL means not imported.
+        ForeignKeyConstraint(
+            ["import_run_id", "portfolio_id"],
+            ["import_runs.id", "import_runs.portfolio_id"],
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -216,9 +226,7 @@ class Trade(Base):
     fx_rate: Mapped[Decimal | None] = mapped_column(Rate)
     source: Mapped[str] = mapped_column(String(64))  # e.g. sharesies, asb_securities, manual
     external_ref: Mapped[str] = mapped_column(String(128))
-    import_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("import_runs.id", ondelete="RESTRICT"), index=True
-    )
+    import_run_id: Mapped[int | None] = mapped_column(index=True)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -251,6 +259,12 @@ class Income(Base):
             "fx_rate",
         ),
         Index("ix_income_portfolio_instrument_paid", "portfolio_id", "instrument_id", "paid_date"),
+        # An import into another portfolio is refused. NULL means not imported.
+        ForeignKeyConstraint(
+            ["import_run_id", "portfolio_id"],
+            ["import_runs.id", "import_runs.portfolio_id"],
+            ondelete="RESTRICT",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -273,9 +287,7 @@ class Income(Base):
     fx_rate: Mapped[Decimal | None] = mapped_column(Rate)
     source: Mapped[str] = mapped_column(String(64))
     external_ref: Mapped[str] = mapped_column(String(128))
-    import_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("import_runs.id", ondelete="RESTRICT"), index=True
-    )
+    import_run_id: Mapped[int | None] = mapped_column(index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

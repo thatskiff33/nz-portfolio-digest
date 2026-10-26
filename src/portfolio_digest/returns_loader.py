@@ -1,5 +1,6 @@
 """Database boundary for the pure returns engine. No writes or remote price fetching."""
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -22,12 +23,28 @@ from portfolio_digest.returns import (
 from portfolio_digest.validation import portfolio_name
 
 
-def load_returns(
+@dataclass(frozen=True)
+class PortfolioInputs:
+    base_currency: str
+    holdings: tuple[Holding, ...]
+    rates: dict[str, tuple[Observation, ...]]
+    income: tuple[Income, ...]
+    instruments: tuple[Instrument, ...]
+    start: date
+    end: date
+
+
+def load_returns(session: Session, name: str, period: str, today: date | None = None) -> Report:
+    data = load_inputs(session, name, period, today)
+    return calculate_returns(data.holdings, data.start, data.end, data.rates, data.base_currency)
+
+
+def load_inputs(
     session: Session,
     name: str,
     period: str,
     today: date | None = None,
-) -> Report:
+) -> PortfolioInputs:
     today = today or datetime.now(ZoneInfo(get_settings().timezone)).date()
     # Validate syntax before querying; 'all' is resolved after loading trades.
     start, end = period_range(period, today)
@@ -106,4 +123,12 @@ def load_returns(
                 ),
             )
         )
-    return calculate_returns(tuple(holdings), start, end, rates, portfolio.base_currency)
+    return PortfolioInputs(
+        portfolio.base_currency,
+        tuple(holdings),
+        rates,
+        tuple(income),
+        tuple(instruments),
+        start,
+        end,
+    )

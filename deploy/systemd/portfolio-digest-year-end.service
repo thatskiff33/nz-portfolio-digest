@@ -1,0 +1,7 @@
+[Unit]
+Description=Email NZ tax-year portfolio summaries
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/portfolio-digest
+ExecStart=/usr/bin/env docker compose run --rm migrate year-end --all

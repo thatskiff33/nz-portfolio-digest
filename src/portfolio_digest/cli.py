@@ -60,6 +60,8 @@ from portfolio_digest.returns import ReturnError, period_range
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.returns_table import render_table
 from portfolio_digest.terminal import terminal_text
+from portfolio_digest.year_end import tax_year
+from portfolio_digest.year_end_delivery import deliver, latest_ended_year, load_year_end
 
 
 def _fail(message: str) -> None:
@@ -158,6 +160,42 @@ def cmd_akahu_sync(args: argparse.Namespace) -> int:
     if settings.uptime_kuma_push_url and settings.uptime_kuma_push_url.get_secret_value():
         push_success(settings.uptime_kuma_push_url)
     return 0
+
+
+def cmd_year_end(args: argparse.Namespace) -> int:
+    try:
+        if args.year is None and not args.all:
+            raise ReturnError("--year is required with --portfolio.")
+        year = args.year if args.year is not None else latest_ended_year()
+        tax_year(year)
+        if args.out and not args.dry_run:
+            raise ReturnError("--out requires --dry-run.")
+        if args.dry_run and not args.out:
+            raise ReturnError("--dry-run requires --out DIR.")
+        if args.portfolio:
+            validation.portfolio_name(args.portfolio)
+        with session_scope(make_engine()) as session:
+            names = (
+                [args.portfolio]
+                if args.portfolio
+                else list(session.scalars(select(Portfolio.name).order_by(Portfolio.id)))
+            )
+            failed = False
+            for index, name in enumerate(names):
+                try:
+                    report = load_year_end(session, name, year)
+                    out = args.out
+                    if args.all and out:
+                        out = out / f"portfolio-{index + 1}"
+                    deliver(report, name, dry_run=args.dry_run, out=out)
+                    print(f"Year-end {year}: {'wrote preview' if args.dry_run else 'sent email'}.")
+                except (ReturnError, ConfigError) as exc:
+                    failed = True
+                    _fail(terminal_text(str(exc)))
+            return 1 if failed else 0
+    except (ReturnError, validation.InvalidInput) as exc:
+        _fail(terminal_text(str(exc)))
+        return 2
 
 
 def cmd_returns(args: argparse.Namespace) -> int:
@@ -401,6 +439,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("health", help="Check the database is reachable and migrated").set_defaults(
         func=cmd_health
     )
+
+    year_end = sub.add_parser("year-end", help="NZ tax-year HTML email and CSV summary")
+    scope = year_end.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--portfolio")
+    scope.add_argument("--all", action="store_true", help="All portfolios, for the annual timer")
+    year_end.add_argument("--year", type=int, help="Year ending 31 March; --all defaults to latest")
+    year_end.add_argument("--dry-run", action="store_true")
+    year_end.add_argument("--out", type=Path)
+    year_end.set_defaults(func=cmd_year_end)
 
     returns = sub.add_parser("returns", help="Report capital, dividend and currency returns")
     returns.add_argument("--portfolio", required=True)

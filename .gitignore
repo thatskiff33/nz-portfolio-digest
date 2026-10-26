@@ -16,3 +16,6 @@ imports/
 *.csv
 *.pdf
 !tests/fixtures/**
+
+# Locally rendered year-end reports contain private financial data.
+private-preview/

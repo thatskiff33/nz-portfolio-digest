@@ -16,13 +16,15 @@ follows it. It is adapted from the owner's house standard for all their repos. T
   section (options, each with a **Recommended** default) wherever a real choice exists,
   and a "Done when" check. Issues waiting on a choice carry the `needs-decision` label.
 
-## The owner's role (two touch-points per issue)
+## The owner's role
 
-1. **Before work starts:** decisions are asked **in the Claude session as pop-up
-   questions**, not by ticking boxes on GitHub. The session then ticks the chosen options
-   on the issue, records them in a comment, and removes `needs-decision`.
-2. **Before each merge:** when a PR is marked ✅ *Ready to merge*, read the plain-English
-   summary and, if happy, comment exactly **`Approved and ok to merge`** on that PR.
+The owner does not review PRs (owner decision, 26 Oct 2026). Work runs autonomously.
+
+- **Decisions:** when the owner is in a Claude session, real choices are asked there as
+  pop-up questions, not by ticking boxes on GitHub. Otherwise the **Recommended** option is
+  used. Either way the session ticks the chosen option on the issue, records it in a
+  comment, and removes `needs-decision`.
+- **Merging:** no approval comment is needed. A PR merges as soon as it is ready (below).
 
 ## Who builds: Sekreton
 
@@ -35,7 +37,8 @@ issue's scope and recorded decisions, and `depends_on` keeps waves in order.
   GitHub CI runs them against a real Postgres, and must be green before merge.
 - Sekreton's sandboxes can't comment on GitHub. A Claude session (the orchestrator) does
   the claim, review, *Ready to merge* comment and merge steps below.
-- Sekreton tasks never auto-merge. The owner's approval phrase still gates every merge.
+- The orchestrator merges a Sekreton task (which opens its PR) once its review is done, then
+  merges the PR when GitHub CI is green.
 
 ## The build loop
 
@@ -55,12 +58,13 @@ issue's scope and recorded decisions, and `depends_on` keeps waves in order.
    against a throwaway Postgres) and in CI, then post a ✅ **Ready to merge** comment in
    plain English: what was built, which reviews ran, what they found, how each was fixed,
    test results, and any carry-forwards.
-7. **Merge** only on the owner's exact comment `Approved and ok to merge`: squash-merge,
-   tick the Epic checklist, delete the branch. Keep building the next issue while waiting.
+7. **Merge** straight after the ready comment: squash-merge, tick the Epic checklist,
+   delete the branch, then move on to the next issue.
 
 ## Firm rules
 
-- **Never merge without the exact approval phrase**, per PR, never assumed.
+- **Never merge a PR that is unreviewed, has unfixed findings, or is not green** on its
+  exact head.
 - **No secrets in the repo**: `.env`, app passwords, API tokens and Akahu tokens live only
   on the server. Error messages and logs never print them.
 - **No personal financial data in the repo**: broker exports, statements and database

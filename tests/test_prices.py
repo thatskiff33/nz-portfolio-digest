@@ -199,8 +199,14 @@ def test_old_sold_holdings_and_fx_skip_only_when_complete(
     sessions = [MagicMock() for _ in range(3)]
     for session in sessions:
         session.execute.return_value.all.return_value = []
-    sessions[1].scalar.side_effect = [last_good, last_good, None]
-    sessions[2].scalar.side_effect = [last_good, None]
+    inactive_check = (
+        not (still_held or options)
+        and last_good is not None
+        and (now.date() - holding.last_trade).days > 31
+    )
+    terminal = [last_good if last_good == holding.last_trade else None] if inactive_check else []
+    sessions[1].scalar.side_effect = [last_good, *terminal, last_good, None]
+    sessions[2].scalar.side_effect = [last_good, *terminal, None]
     factory = MagicMock(side_effect=sessions)
     monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
     monkeypatch.setattr(fetch, "held_instruments", lambda *args: [holding])
@@ -216,6 +222,111 @@ def test_old_sold_holdings_and_fx_skip_only_when_complete(
     assert bool(fx.calls) is should_fetch
     assert report.ok is not should_fetch
     assert len(report.outcomes) == 2
+
+
+@pytest.mark.parametrize("run_hour", [21, 5])
+@pytest.mark.parametrize("terminal_present", [False, True])
+@pytest.mark.parametrize("fresh_present", [False, True])
+def test_takeover_skips_prices_and_sold_only_fx_with_a_carried_final_value(
+    monkeypatch, run_hour, terminal_present, fresh_present
+):
+    from portfolio_digest import db
+    from portfolio_digest.prices import fetch
+
+    first, last_close, sale = date(2023, 3, 1), date(2023, 3, 3), date(2023, 3, 8)
+    holding = Holding(1, "NZX", "OLD", "AUD", None, first, sale, False)
+    sessions = [MagicMock() for _ in range(3)]
+    last_good = last_close if fresh_present else None
+    terminal = [sale if terminal_present else None] if fresh_present else []
+    for session in sessions:
+        session.execute.return_value.all.return_value = []
+    sessions[1].scalar.side_effect = [last_good, *terminal, first, None]
+    sessions[2].scalar.side_effect = [last_good, *terminal, None]
+    factory = MagicMock(side_effect=sessions)
+    monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
+    monkeypatch.setattr(fetch, "held_instruments", lambda *args: [holding])
+    for name in ("_save_prices", "_save_rates", "_save_splits"):
+        monkeypatch.setattr(fetch, name, MagicMock())
+    prices = FakePriceSource()
+    prices.history = MagicMock(side_effect=SourceError("symbol no longer available (HTTP 404)"))
+    fx = FakeFxSource("mock-fx", error="currency no longer available")
+
+    report = run_fetch(
+        MagicMock(),
+        Sources(prices, [fx]),
+        now=datetime(2026, 10, 3, run_hour, 30, tzinfo=UTC),
+        base_currency="NZD",
+    )
+
+    complete = terminal_present and fresh_present
+    assert report.ok is complete
+    assert prices.history.called is not complete
+    assert bool(fx.calls) is not complete
+    assert len(report.outcomes) == 2
+
+
+def test_takeover_with_stale_rows_through_sale_does_not_refetch_delisted_symbol(engine):
+    first, sale = date(2023, 3, 1), date(2023, 3, 8)
+    instrument_id = _seed_trade(engine, currency="AUD", code="TAKEOVER")
+    with session_scope(engine) as session:
+        session.get(Instrument, instrument_id).exchange = "NZX"
+        buy = session.scalar(select(Trade).where(Trade.instrument_id == instrument_id))
+        buy.trade_date = first
+        session.add(
+            Trade(
+                portfolio_id=buy.portfolio_id,
+                instrument_id=instrument_id,
+                trade_date=sale,
+                trade_type="sell",
+                quantity=Decimal("5"),
+                price=Decimal("10"),
+                currency="AUD",
+                source="test",
+                external_ref="takeover-sale",
+            )
+        )
+    closes = {date(2023, 3, day): Decimal("10") for day in range(1, 4)}
+    rates = {day: Decimal("1.1") for day in closes}
+    prices, fx = FakePriceSource(closes), FakeFxSource("mock-fx", rates)
+    now = datetime(2026, 10, 3, 5, 30, tzinfo=UTC)
+    report = run_fetch(engine, Sources(prices, [fx]), now=now, base_currency="NZD", backfill=True)
+    assert report.ok
+    assert [outcome.carried_forward for outcome in report.outcomes] == [3, 3]
+    with session_scope(engine) as session:
+        assert session.get(Price, (instrument_id, sale)).is_stale
+        assert session.get(FxRate, (sale, "AUD", "NZD")).is_stale
+        # Later stored rows must not hide the completed sale-day range.
+        session.add(
+            Price(
+                instrument_id=instrument_id,
+                price_date=date(2023, 3, 9),
+                close=Decimal("11"),
+                source="test",
+            )
+        )
+        session.add(
+            FxRate(
+                rate_date=date(2023, 3, 9),
+                currency="AUD",
+                base_currency="NZD",
+                rate=Decimal("1.2"),
+                source="test",
+            )
+        )
+    prices.history = MagicMock(side_effect=SourceError("symbol no longer available (HTTP 404)"))
+    fx.calls.clear()
+    fx.error = "currency no longer available"
+    for run_hour in (21, 5):
+        report = run_fetch(
+            engine,
+            Sources(prices, [fx]),
+            now=now.replace(hour=run_hour),
+            base_currency="NZD",
+        )
+        assert report.ok
+        assert all(outcome.fetched == outcome.carried_forward == 0 for outcome in report.outcomes)
+    prices.history.assert_not_called()
+    assert not fx.calls
 
 
 def test_carried_price_overflow_does_not_stop_next_instrument_or_fx(monkeypatch):

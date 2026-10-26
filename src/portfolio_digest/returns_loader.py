@@ -38,27 +38,29 @@ def load_returns(
     )
     if portfolio is None:
         raise ReturnError("Portfolio not found.")
-    trades = session.scalars(
-        select(Trade)
-        .where(Trade.portfolio_id == portfolio.id, Trade.trade_date <= end)
-        .order_by(Trade.trade_date, Trade.id)
-    ).all()
     if period == "all":
-        first_income = session.scalar(
-            select(func.min(Income.paid_date)).where(
-                Income.portfolio_id == portfolio.id,
-                Income.paid_date <= end,
-                Income.kind.in_(("dividend", "distribution")),
-            )
-        )
-        dates = [t.trade_date for t in trades]
-        if first_income is not None:
-            dates.append(first_income)
-        start, end = period_range(period, today, min(dates, default=None))
+        start, end = period_range(period, today, first_activity_date(session, portfolio.id, end))
     holdings, rates = load_inputs(session, portfolio, start, end)
     return calculate_returns(
         holdings, start, end, rates, portfolio.base_currency, gross_up=gross_up
     )
+
+
+def first_activity_date(session: Session, portfolio_id: int, end: date) -> date | None:
+    """Earliest reportable stored activity, including income without trades."""
+    first_trade = session.scalar(
+        select(func.min(Trade.trade_date)).where(
+            Trade.portfolio_id == portfolio_id, Trade.trade_date <= end
+        )
+    )
+    first_income = session.scalar(
+        select(func.min(Income.paid_date)).where(
+            Income.portfolio_id == portfolio_id,
+            Income.paid_date <= end,
+            Income.kind.in_(("dividend", "distribution")),
+        )
+    )
+    return min((day for day in (first_trade, first_income) if day is not None), default=None)
 
 
 def load_inputs(

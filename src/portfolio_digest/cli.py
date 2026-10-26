@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from alembic.util import CommandError
@@ -26,10 +27,12 @@ from portfolio_digest.gmail import AsbGmailImporter, GmailClient, GmailError, au
 from portfolio_digest.importers.base import (
     FileProblem,
     RowProblem,
+    listing,
 )
 from portfolio_digest.importing import (
     FILE_IMPORTERS,
     ImportFailure,
+    find_or_create_instrument,
     import_file,
     import_gmail,
     portfolio_named,

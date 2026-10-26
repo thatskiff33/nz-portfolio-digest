@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.db import make_engine
@@ -18,6 +18,7 @@ from portfolio_digest.importing import ImportFailure, undo_import
 from portfolio_digest.manual import add_trade, prepare_trade
 from portfolio_digest.models import ImportRun, Income, Instrument, Portfolio, Price, Trade
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
+from portfolio_digest.returns_loader import first_activity_date
 from portfolio_digest.web.security import COOKIE, LIFETIME, Security
 from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
@@ -149,10 +150,7 @@ def create_app(
         with Session(engine) as session:
             p = portfolio(session, pid)
             today = datetime.now(ZoneInfo(timezone)).date()
-            first = (
-                session.scalar(select(func.min(Trade.trade_date)).where(Trade.portfolio_id == pid))
-                or today
-            )
+            first = first_activity_date(session, pid, today) or today
             try:
                 begin, finish = period_dates(period, today, first, start, end)
             except ValueError:
@@ -222,10 +220,20 @@ def create_app(
                     select(Price).where(Price.instrument_id == iid).order_by(Price.price_date)
                 )
             )
+            today = datetime.now(ZoneInfo(timezone)).date()
+            begin, finish = period_dates(
+                "all", today, first_activity_date(session, pid, today) or today
+            )
+            values = Dashboard(session, p, begin, finish)
+            result = next((row.result for row in values.holdings if row.instrument.id == iid), None)
             return render(
                 request,
                 session,
                 "holding.html",
+                result=result,
+                returns_error=values.error,
+                start=begin,
+                end=finish,
                 portfolio=p,
                 instrument=instrument,
                 trades=trades,

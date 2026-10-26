@@ -1,10 +1,4 @@
-{% macro returns(result) %}
-    {% for field in ['capital', 'dividends', 'currency', 'total'] %}
-        <td>{{ (result.amounts|attr(field) if result else none)|money }}
-            <small>{{ (result.percentages|attr(field))|money ~ '%' if result and result.percentages else 'n/a' }}</small>
-        </td>
-    {% endfor %}
-{% endmacro %}
+{% from "returns.html" import returns %}
 {% extends "base.html" %}
 {% block title %}
     {{ portfolio.name }} · Portfolio digest
@@ -110,9 +104,12 @@
                             <th scope="col">Price</th>
                             <th scope="col">Value</th>
                             <th scope="col">Capital gain</th>
-                            <th scope="col">Dividend return</th>
+                            <th scope="col">Net dividends</th>
                             <th scope="col">Currency gain</th>
                             <th scope="col">Total return</th>
+                            <th scope="col">Gross income</th>
+                            <th scope="col">Withholding tax</th>
+                            <th scope="col">Imputation credits</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -150,7 +147,10 @@
         {% endfor %}
         <div class="table-scroll" role="region" aria-label="Portfolio returns" tabindex="0">
         <table><thead><tr><th scope="col">Total</th><th scope="col">Capital gain</th>
-            <th scope="col">Dividend return</th><th scope="col">Currency gain</th><th scope="col">Total return</th>
+            <th scope="col">Net dividends</th><th scope="col">Currency gain</th><th scope="col">Total return</th>
+                            <th scope="col">Gross income</th>
+                            <th scope="col">Withholding tax</th>
+                            <th scope="col">Imputation credits</th>
         </tr></thead><tbody><tr>
             <th scope="row">Portfolio total</th>
             {{ returns(report.total if report else none) }}

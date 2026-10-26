@@ -481,3 +481,36 @@ def test_all_period_includes_income_without_trades(monkeypatch):
         assert result.total.amounts.dividends == 90
         assert result.total.percentages is None
     engine.dispose()
+
+
+def test_cli_keeps_corporate_action_command_after_dashboard_merge(monkeypatch, capsys):
+    engine = _sqlite_engine(monkeypatch)
+    with Session(engine) as session:
+        session.add(Portfolio(name="Rights example", base_currency="NZD"))
+        session.commit()
+    monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: engine)
+    assert (
+        main(
+            [
+                "corporate-actions",
+                "rights_entitlement",
+                "NZX:EXAMPLERG",
+                "--date",
+                "2026-10-20",
+                "--reference",
+                "fictional-entitlement",
+                "--portfolio",
+                "Rights example",
+                "--details",
+                '{"quantity": "10"}',
+            ]
+        )
+        == 0
+    )
+    assert "Recorded corporate action" in capsys.readouterr().out
+    with Session(engine) as session:
+        instrument = session.scalar(select(Instrument).where(Instrument.code == "EXAMPLERG"))
+        assert instrument.kind == "rights"
+        trade = session.scalar(select(Trade).where(Trade.instrument_id == instrument.id))
+        assert trade.quantity == D(10)
+    engine.dispose()

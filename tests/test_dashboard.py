@@ -1,8 +1,9 @@
 """Dashboard contracts, with made-up data and a portable test-only schema."""
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -123,6 +124,8 @@ def sample_engine(engine=None):
                     kind="dividend",
                     gross_amount=Decimal("10"),
                     net_amount=Decimal("7"),
+                    withholding_tax=Decimal("3"),
+                    imputation_credits=Decimal("2.8"),
                     source="test",
                     external_ref="fake-income",
                 ),
@@ -215,7 +218,62 @@ def test_dashboard_equals_returns_engine(engine_web, period):
                 assert f"{getattr(result.amounts, field):,.2f}" in response.text
                 if result.percentages:
                     assert f"{getattr(result.percentages, field):,.2f}%" in response.text
+            for field in ("gross_dividends", "withholding_tax", "imputation_gross_up"):
+                assert f"{getattr(result, field):,.2f}" in response.text
         assert "Returns engine has not landed" not in response.text
+
+
+def test_holding_detail_income_matches_engine(engine_web):
+    with Session(engine_web) as session:
+        expected = load_returns(
+            session, "Kōwhai Fund", "all", datetime.now(ZoneInfo("Pacific/Auckland")).date()
+        )
+        result = next(row for row in expected.holdings if row.label == "NZX:KOW")
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        response = client.get("/p/1/holding/1")
+    assert response.status_code == 200
+    assert response.context["result"] == result
+    for label, amount in (
+        ("Net dividends", result.amounts.dividends),
+        ("Gross income", result.gross_dividends),
+        ("Withholding tax", result.withholding_tax),
+        ("Imputation credits", result.imputation_gross_up),
+    ):
+        assert label in response.text
+        assert f"{amount:,.2f}" in response.text
+    assert result.amounts.dividends == Decimal("7")
+    assert result.gross_dividends == Decimal("10")
+    assert result.withholding_tax == Decimal("3")
+    assert result.imputation_gross_up == Decimal("2.8")
+
+
+def test_all_time_dashboard_includes_income_without_trades(engine_web):
+    with Session(engine_web) as session:
+        session.add(
+            Income(
+                portfolio_id=2,
+                instrument_id=1,
+                paid_date=DAY,
+                kind="dividend",
+                currency="NZD",
+                gross_amount=Decimal("45"),
+                net_amount=Decimal("40"),
+                withholding_tax=Decimal("5"),
+                imputation_credits=Decimal("12"),
+                source="test",
+                external_ref="income-only",
+            )
+        )
+        session.commit()
+        expected = load_returns(
+            session, "Harbour Fund", "all", datetime.now(ZoneInfo("Pacific/Auckland")).date()
+        )
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        overview = client.get("/p/2?period=all")
+        detail = client.get("/p/2/holding/1")
+    assert overview.context["report"] == expected
+    assert detail.context["result"] == expected.holdings[0]
+    assert expected.total.amounts.dividends == Decimal("40")
 
 
 def test_missing_inputs_are_explained(engine_web):

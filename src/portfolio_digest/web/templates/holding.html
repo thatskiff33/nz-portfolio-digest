@@ -1,8 +1,28 @@
 {% extends "base.html" %}
+{% from "returns.html" import returns %}
 {% block content %}
     <p class="eyebrow">{{ portfolio.name }} / {{ instrument.exchange }}</p>
     <h1>{{ instrument.code }}</h1>
     <p class="muted">{{ instrument.name }} · Prices in {{ instrument.currency }}</p>
+    <section class="panel">
+        <h2>All-time returns</h2>
+        <p class="muted">{{ start }} to {{ end }} · Values in {{ portfolio.base_currency }}</p>
+        {% if returns_error %}<p class="notice">Figures unavailable: {{ returns_error }}</p>{% endif %}
+        <div class="table-scroll" role="region" aria-label="Holding returns" tabindex="0">
+            <table>
+                <thead><tr>
+                    <th scope="col">Capital gain</th>
+                    <th scope="col">Net dividends</th>
+                    <th scope="col">Currency gain</th>
+                    <th scope="col">Total return</th>
+                    <th scope="col">Gross income</th>
+                    <th scope="col">Withholding tax</th>
+                    <th scope="col">Imputation credits</th>
+                </tr></thead>
+                <tbody><tr>{{ returns(result) }}</tr></tbody>
+            </table>
+        </div>
+    </section>
     <section class="panel">
         <h2>Price history</h2>
         {% include "chart.html" %}

@@ -30,6 +30,7 @@ EXPECTED_TABLES = {
     "income",
     "prices",
     "fx_rates",
+    "splits",
 }
 
 
@@ -294,6 +295,13 @@ def test_nan_is_refused_by_the_database(engine, table, column):
             text(
                 "INSERT INTO prices (instrument_id, price_date, close, source) "
                 "VALUES (:i, '2026-10-01', 1, 'test')"
+            ),
+            {"i": instrument.id},
+        )
+        session.execute(
+            text(
+                "INSERT INTO splits (instrument_id, split_date, shares_before, shares_after, "
+                "source) VALUES (:i, '2026-10-01', 1, 2, 'test')"
             ),
             {"i": instrument.id},
         )

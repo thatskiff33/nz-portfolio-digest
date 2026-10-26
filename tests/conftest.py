@@ -57,7 +57,7 @@ def engine(empty_engine: Engine) -> Engine:
 def no_settings_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Settings come only from the environment the test sets, never a stray `.env`."""
     monkeypatch.chdir(tmp_path)
-    for name in ("DATABASE_URL", "BASE_CURRENCY", "TIMEZONE"):
+    for name in ("DATABASE_URL", "BASE_CURRENCY", "TIMEZONE", "PRICE_SOURCE", "FX_SOURCES"):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
     yield

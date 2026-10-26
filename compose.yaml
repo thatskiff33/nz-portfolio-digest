@@ -28,6 +28,10 @@ services:
     command: ["migrate"]
     environment:
       DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
+      BASE_CURRENCY: ${BASE_CURRENCY:-NZD}
+      TIMEZONE: ${TIMEZONE:-Pacific/Auckland}
+      PRICE_SOURCE: ${PRICE_SOURCE:-yahoo}
+      FX_SOURCES: ${FX_SOURCES:-yahoo,frankfurter}
     depends_on:
       db:
         condition: service_healthy

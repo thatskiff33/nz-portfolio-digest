@@ -20,11 +20,93 @@ docker compose up -d db backup
 docker compose run --rm --build migrate          # creates the tables
 docker compose run --rm migrate health           # should print "OK: ..."
 docker compose run --rm migrate portfolio add "Family Trust"
+docker compose run --rm migrate prices fetch --backfill
 ```
 
 If you set `BACKUP_DIR` to somewhere else, create that folder instead. The `backup`
 service refuses to start until the folder exists, so a typo cannot quietly send backups
 nowhere.
+
+## Prices and exchange rates
+
+The first backfill starts at each instrument's first trade. To deliberately use a later
+date, add `--start YYYY-MM-DD`. Normal runs re-read recent history so corrections from the
+source replace carried-forward values. Commands are safe to repeat: an existing day is
+updated, not duplicated.
+
+```sh
+docker compose run --rm migrate prices fetch --backfill
+docker compose run --rm migrate prices fetch --backfill --start 2020-01-01
+docker compose run --rm migrate prices fetch --instrument NZX:AIR
+docker compose run --rm migrate prices check
+```
+
+Yahoo symbols are inferred for NZX (`AIR.NZ`), ASX (`BHP.AX`), NASDAQ and NYSE listings.
+For a right, renamed code, delisted security or other exception, store an override on the
+instrument:
+
+```sh
+docker compose run --rm migrate prices symbol NZX:AIRRG AIRRG.NZ
+docker compose run --rm migrate prices symbol NZX:AIRRG --clear
+```
+
+Yahoo is unofficial, so requests retry with exponential backoff. Missing closes and rates
+are carried forward and marked stale. `prices check` exits non-zero and lists missing or
+stale days, zero prices, and daily moves over 50 per cent that have no recorded split.
+Exchange rates use the database convention that one unit of the foreign currency equals
+the stored number of NZ dollars. Yahoo is tried first and the free ECB rates from
+Frankfurter are the default fallback. `PRICE_SOURCE` and `FX_SOURCES` in `.env` select the
+adapters.
+
+### Stored price convention for the returns engine (#4)
+
+Closes are raw, unadjusted prices in the instrument's major currency units. Yahoo's
+`quote.close` is retrospectively split-adjusted, so the adapter reverses all later split
+ratios before storing it. Split events are fetched from the earliest stored price or first
+trade through the present, even for sold holdings. A new, changed or withdrawn split
+triggers a full re-read of that instrument, including rows outside the normal 31-day
+refresh window.
+After a successful scan, stored split rows absent from the source are removed.
+Yahoo currently returns the full chart for this event scan on each run.
+
+A 4-for-1 split therefore stores a pre-split close of $40 and a post-split close of $10.
+ADJUSTMENT trades are the single source of quantity changes for the returns engine (#4),
+including split units (1 share becomes 4). Split rows are used only for price un-adjustment
+and quality checks. Do not apply split rows to quantities or split-adjust these closes
+again. Closes are not dividend-adjusted; account for distributions separately.
+
+Yahoo metadata currencies `GBp`, `ZAc` and `ILA` are converted to `GBP`, `ZAR` and
+`ILS` by dividing by 100. Missing or mismatched quote currencies fail that source request
+rather than storing a price in the wrong units. Malformed or excessively nested JSON
+also fails the source request, allowing other instruments and FX fallbacks to continue.
+
+For rows fetched before this convention was introduced, run
+`portfolio-digest prices fetch --backfill` once to replace any existing adjusted closes.
+
+### Twice-daily schedule
+
+The checked-in systemd user timer runs at 10:30 and 18:30 in `Pacific/Auckland`, including
+daylight-saving changes. The first run follows the US close and the second follows the NZX
+and ASX closes. From early November to mid-March (the second Sunday in March),
+the US uses standard time while NZ uses daylight time. The FX day then closes at
+17:00 New York, which is 11:00 NZDT.
+The 10:30 run gets US share closes, but the previous day's exchange rate only arrives
+at the 18:30 run. Both scheduled times remain as decided by the owner.
+Install it as the server account that owns this checkout:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/portfolio-digest-prices.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now portfolio-digest-prices.timer
+systemctl --user list-timers portfolio-digest-prices.timer
+```
+
+The service expects the checkout at `~/portfolio-digest`; edit its `WorkingDirectory` if
+you installed elsewhere. Enable lingering once with
+`loginctl enable-linger "$USER"` if user services do not run while logged out. Inspect the
+last scheduled run with
+`journalctl --user -u portfolio-digest-prices.service --since today`.
 
 ## Updating
 

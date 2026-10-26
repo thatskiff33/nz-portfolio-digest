@@ -14,7 +14,14 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from portfolio_digest import __version__, migrate, validation
 from portfolio_digest.actions import KINDS, record_action
-from portfolio_digest.config import ConfigError, get_gmail_settings, get_settings
+from portfolio_digest.akahu import AkahuClient, AkahuError, push_success
+from portfolio_digest.akahu_sync import sync
+from portfolio_digest.config import (
+    ConfigError,
+    akahu_account_ids,
+    get_gmail_settings,
+    get_settings,
+)
 from portfolio_digest.db import make_engine, session_scope
 from portfolio_digest.dividends import decide, suggest
 from portfolio_digest.gmail import AsbGmailImporter, GmailClient, GmailError, authorise
@@ -53,7 +60,10 @@ from portfolio_digest.prices.quality import check_data
 from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES, Listing, YahooSource
 from portfolio_digest.prices.symbols import clean_symbol
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
-from portfolio_digest.returns import report
+from portfolio_digest.returns import ReturnError, period_range
+from portfolio_digest.returns_loader import load_returns
+from portfolio_digest.returns_table import render_table
+from portfolio_digest.terminal import terminal_text
 
 
 def _fail(message: str) -> None:
@@ -126,6 +136,47 @@ def cmd_portfolio_list(_: argparse.Namespace) -> int:
         for p in portfolios:
             print(f"{p.id}\t{p.name}\t{p.base_currency}")
     return 0
+
+
+def cmd_akahu_sync(args: argparse.Namespace) -> int:
+    settings = get_settings()
+    if not all(
+        token and token.get_secret_value().strip()
+        for token in (settings.akahu_app_token, settings.akahu_user_token)
+    ):
+        raise ConfigError("Set AKAHU_APP_TOKEN and AKAHU_USER_TOKEN in env/.env.")
+    account_ids = akahu_account_ids(settings.akahu_account_ids)
+    client = AkahuClient(settings.akahu_app_token, settings.akahu_user_token)
+    snapshot_id, mismatches, unmapped = sync(make_engine(), args.portfolio, client, account_ids)
+    print(f"Akahu snapshot {snapshot_id}. Cached data may be about a day old.")
+    for mismatch in mismatches:
+        print(
+            f"Instrument {mismatch.instrument_id}: ledger={mismatch.ledger} "
+            f"Akahu={mismatch.observed} difference={mismatch.difference}"
+        )
+    if unmapped:
+        print(f"Unmapped holdings: {unmapped}. See snapshot report and docs/AKAHU.md.")
+    if mismatches or unmapped:
+        return 1
+    print("Holdings match the ledger.")
+    if settings.uptime_kuma_push_url and settings.uptime_kuma_push_url.get_secret_value():
+        push_success(settings.uptime_kuma_push_url)
+    return 0
+
+
+def cmd_returns(args: argparse.Namespace) -> int:
+    try:
+        validation.portfolio_name(args.portfolio)
+        period_range(args.period, date.today())
+        with session_scope(make_engine()) as session:
+            report = load_returns(
+                session, args.portfolio, args.period, args.date, gross_up=args.gross_up
+            )
+        print(render_table(report))
+        return 0
+    except (ReturnError, validation.InvalidInput) as exc:
+        _fail(terminal_text(str(exc)))
+        return 2
 
 
 def _date(value: str) -> date:
@@ -357,21 +408,6 @@ def _find_listing(session, label):
     return instrument
 
 
-def cmd_returns(args):
-    with session_scope(make_engine()) as session:
-        portfolio = portfolio_named(session, args.portfolio)
-        rows = report(session, portfolio, args.date, gross_up=args.gross_up)
-        print(
-            "INSTRUMENT\tCURRENCY\tUNITS\tCOST BASE\tVALUE\tDIVIDENDS NET\tGROSS\tTAX"
-            "\tIMPUTATION GROSS-UP\tTOTAL RETURN"
-        )
-        for row in rows:
-            from dataclasses import astuple
-
-            print("\t".join(str(value) for value in astuple(row)))
-    return 0
-
-
 def cmd_action(args):
     try:
         details = json.loads(args.details, parse_float=Decimal)
@@ -454,6 +490,13 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_health
     )
 
+    returns = sub.add_parser("returns", help="Report capital, dividend and currency returns")
+    returns.add_argument("--portfolio", required=True)
+    returns.add_argument("--period", default="all", help="week|month|ytd|all|YYYY-MM-DD:YYYY-MM-DD")
+    returns.add_argument("--date", type=_date, help="Report end date (defaults to today)")
+    returns.add_argument("--gross-up", action="store_true", help="Include NZ imputation in totals")
+    returns.set_defaults(func=cmd_returns)
+
     portfolio = sub.add_parser("portfolio", help="Manage portfolios")
     psub = portfolio.add_subparsers(dest="portfolio_command", required=True)
     add = psub.add_parser("add", help="Add a portfolio")
@@ -463,6 +506,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add.set_defaults(func=cmd_portfolio_add)
     psub.add_parser("list", help="List portfolios").set_defaults(func=cmd_portfolio_list)
+
+    akahu = sub.add_parser("akahu", help="Confirm ledger holdings using Akahu")
+    asub = akahu.add_subparsers(dest="akahu_command", required=True)
+    sync_parser = asub.add_parser("sync", help="Store holdings and report unit drift")
+    sync_parser.add_argument("--portfolio", required=True)
+    sync_parser.set_defaults(func=cmd_akahu_sync)
 
     prices = sub.add_parser("prices", help="Fetch and check daily prices and exchange rates")
     price_sub = prices.add_subparsers(dest="prices_command", required=True)
@@ -541,12 +590,6 @@ def build_parser() -> argparse.ArgumentParser:
     auth.add_argument("--force", action="store_true", help="Replace an existing token file")
     auth.set_defaults(func=cmd_gmail_authorise)
 
-    returns = sub.add_parser("returns", help="Lifetime returns in the portfolio base currency")
-    returns.add_argument("--portfolio", required=True)
-    returns.add_argument("--date", type=_date, default=date.today())
-    returns.add_argument("--gross-up", action="store_true", help="Include NZ imputation in totals")
-    returns.set_defaults(func=cmd_returns)
-
     actions = sub.add_parser("corporate-actions", help="Record registry corporate actions")
     actions.add_argument("kind", choices=KINDS)
     actions.add_argument("instrument", type=_instrument_label)
@@ -587,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
     except (ImportFailure, RowProblem, SourceError) as exc:
         _fail(str(exc))
         return 2
-    except ConfigError as exc:
+    except (ConfigError, AkahuError) as exc:
         _fail(str(exc))
     except validation.InvalidInput as exc:
         _fail(str(exc))

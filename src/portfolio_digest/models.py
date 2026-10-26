@@ -364,6 +364,35 @@ class FxRate(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AkahuMapping(Base):
+    """Manual override scoped to a portfolio, account and upstream holding identifier."""
+
+    __tablename__ = "akahu_mappings"
+    portfolio_id: Mapped[int] = mapped_column(
+        ForeignKey("portfolios.id", ondelete="RESTRICT"), primary_key=True
+    )
+    account_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    holding_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id", ondelete="RESTRICT"))
+
+
+class AkahuSnapshot(Base):
+    """One confirmation attempt. JSON text stores decimals as strings without rounding."""
+
+    __tablename__ = "akahu_snapshots"
+    __table_args__ = (
+        CheckConstraint("status IN ('running', 'matched', 'drift', 'failed')", name="status_valid"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="RESTRICT"))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    # Selected fields only, never account names, credentials or full upstream responses.
+    observations: Mapped[str] = mapped_column(Text, default="{}")
+    report: Mapped[str] = mapped_column(Text, default="{}")
+
+
 class Split(Base):
     """A share split or consolidation: `shares_before` old shares became `shares_after` new ones.
 

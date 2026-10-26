@@ -126,16 +126,22 @@ portfolio-digest returns --portfolio Personal --date 2024-12-31
 portfolio-digest returns --portfolio Personal --date 2024-12-31 --gross-up
 ```
 
-The shared `returns.report` model exposes units, weighted-average cost base, market value,
-net dividends, gross dividends, withholding, a separate imputation gross-up column and
-lifetime total return. Totals use net dividends by default; `--gross-up` adds NZ imputation
-credits. Franking credits never enter totals. DRP income and the reinvestment purchase are
-both included, preserving the distinction between earned income and invested cash.
+The CLI uses the shared period report (`returns_loader.load_returns`), retaining capital
+and currency attribution, holding and market subtotals, percentages and stale-data flags.
+`--period` accepts `week`, `month`, `ytd`, `all` (the default) or an explicit date range;
+`--date` sets the end date for named periods. Gross dividends, withholding and NZ
+imputation appear separately alongside net Dividends. Totals use net dividends by default;
+`--gross-up` adds imputation credits to total return. Franking credits never enter totals.
+DRP income and the linked reinvestment purchase are both included, preserving the
+distinction between earned income and invested cash.
 
 Amounts convert to portfolio base currency at each cash flow's date, using broker FX
 when given, otherwise the latest stored FX rate on or before that date. Valuations use
-the latest raw close on or before the report date, adjusted for any later recorded split.
-Missing prices or FX raise an explicit error. This lifetime monetary gain is market value
-plus sale proceeds plus recognised income minus purchases; it is not a time-weighted,
-money-weighted or tax return. Report labels use current instrument names/codes. Email
-and dashboard consumers can reuse the same report model when introduced.
+the latest raw close on or before the report date, adjusted for later registry splits.
+Missing prices or FX raise an explicit error; stale observations are flagged. See
+[period returns](RETURNS.md) for attribution and denominator conventions. Report labels
+use current instrument codes. Email and dashboard consumers can reuse the shared report.
+
+The original `returns.report` lifetime API also remains available for units,
+weighted-average cost base, market value, net/gross dividends, tax, imputation and
+monetary gain. Neither report is a tax return or a time-weighted or money-weighted return.

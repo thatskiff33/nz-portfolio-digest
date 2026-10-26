@@ -37,25 +37,40 @@ portfolio-digest reconcile sharesies holdings.csv --portfolio "Personal"
 
 portfolio-digest import list
 portfolio-digest import undo 12
+portfolio-digest returns --portfolio "Personal" --period week
+portfolio-digest returns --portfolio "Personal" --period 2026-10-01:2026-10-26
 ```
 
 NZX and ASX codes map automatically to Yahoo's `.NZ` and `.AX` symbols. NASDAQ and NYSE
 codes are used as-is. Set an exception for a right, renamed or delisted security with
 `portfolio-digest prices symbol NZX:AIRRG AIRRG.NZ`. See the deployment guide for the
 twice-daily schedule and recovery commands. Stored closes are raw, unadjusted prices in
-major currency units. Recorded splits and consolidations adjust holdings without changing
-total cost. Do not also enter an ADJUSTMENT for a recorded split.
+major currency units. Registry-recorded splits and consolidations adjust units without
+changing total cost. Do not also enter an ADJUSTMENT for a recorded registry action.
+For downloaded Split metadata, an ADJUSTMENT trade records the quantity change; the
+returns engine preserves parcel cost when it matches that ratio. Other adjustments
+move units at their recorded price without cash. Do not split-adjust stored closes again.
 
 Dividends and ETF distributions import from Sharesies CSV and ASB dividend advice. Yahoo
 can suggest missing dividends, which stay outside returns until explicitly confirmed.
-`portfolio-digest returns --portfolio Personal` reports net dividends, gross income, tax
-and a separate imputation column; `--gross-up` includes NZ imputation in totals. See
-[dividends and corporate actions](docs/dividends.md) for tax fields, DRP, suggestions,
+`portfolio-digest returns --portfolio Personal --period all` reports net dividends, gross
+income, tax and a separate imputation column; `--gross-up` includes NZ imputation in totals.
+See [dividends and corporate actions](docs/dividends.md) for tax fields, DRP, suggestions,
 rights issues and instrument history.
 
 The app also reads ASB Securities contract notes from one Gmail label with read-only
 access, and supports manual corrections, gifted shares and opening balances. See
 [docs/IMPORTING.md](docs/IMPORTING.md) for file layouts, Gmail setup and the full workflow.
+
+Returns include capital gain, dividends, currency gain and total return as base-currency
+amounts and simple period percentages, per holding, market and portfolio. Use `week`,
+`month`, `ytd`, `all` (since first purchase), or an explicit date range. Holdings
+sold during the period remain in the report; those sold earlier are omitted unless paid income. Missing
+trading days and stored stale flags are reported; normal weekends and exchange
+holidays do not make a price stale. Missing history stops the report rather than
+producing a misleading zero. The command reads stored data;
+it does not fetch prices. See [the calculation conventions and invented weekly example](docs/RETURNS.md)
+for boundaries, FIFO attribution, dividend treatment and percentage denominators.
 
 ## Development
 
@@ -72,3 +87,6 @@ The tests **wipe** the database in `TEST_DATABASE_URL`, so never point it at rea
 safety net they refuse to run unless the database name contains `test`.
 
 How we work on this repo: [docs/WORKING-AGREEMENT.md](docs/WORKING-AGREEMENT.md).
+
+Akahu can confirm ledger holdings without changing trade history. See
+[Akahu setup and drift](docs/AKAHU.md) and [adding a provider](docs/ADDING-A-PROVIDER.md).

@@ -35,6 +35,8 @@ EXPECTED_TABLES = {
     "corporate_actions",
     "dividend_suggestions",
     "import_income_matches",
+    "akahu_mappings",
+    "akahu_snapshots",
 }
 
 

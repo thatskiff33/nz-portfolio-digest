@@ -40,13 +40,17 @@ class TradingCalendar:
                 yield day
             day += timedelta(days=1)
 
+    def last_trading_day(self, day: date) -> date:
+        """The last trading day on or before `day`."""
+        while not self.is_trading_day(day):
+            day -= timedelta(days=1)
+        return day
+
     def latest_closed_day(self, now: datetime) -> date:
         """The most recent trading day whose close is at or before `now` (timezone aware)."""
         local = now.astimezone(ZoneInfo(self.timezone))
         day = local.date() if local.time() >= self.close else local.date() - timedelta(days=1)
-        while not self.is_trading_day(day):
-            day -= timedelta(days=1)
-        return day
+        return self.last_trading_day(day)
 
 
 # Close times allow a little for the closing auction and for the source to catch up.

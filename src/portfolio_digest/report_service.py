@@ -58,7 +58,10 @@ def run_report(
         from portfolio_digest.year_end_service import latest_ended_year, run_year_end
 
         year = latest_ended_year(now)
-        for portfolio in session.scalars(select(Portfolio).order_by(Portfolio.id)):
+        portfolios = (
+            select(Portfolio).where(Portfolio.base_currency == "NZD").order_by(Portfolio.id)
+        )
+        for portfolio in session.scalars(portfolios):
             preview = (
                 out.with_name(f"{out.stem}-portfolio-{portfolio.id}{out.suffix}") if out else None
             )

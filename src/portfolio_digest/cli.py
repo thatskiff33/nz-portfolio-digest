@@ -2,9 +2,7 @@
 
 import argparse
 import sys
-import uuid
 from datetime import UTC, date, datetime
-from decimal import Decimal
 from pathlib import Path
 
 from alembic.util import CommandError
@@ -18,29 +16,22 @@ from portfolio_digest.gmail import AsbGmailImporter, GmailClient, GmailError, au
 from portfolio_digest.importers.base import (
     FileProblem,
     RowProblem,
-    listing,
-    parse_date,
-    parse_money,
-    parse_price,
-    parse_quantity,
-    parse_security_name,
 )
 from portfolio_digest.importing import (
     FILE_IMPORTERS,
     ImportFailure,
-    find_or_create_instrument,
     import_file,
     import_gmail,
     portfolio_named,
     read_input,
     undo_import,
 )
+from portfolio_digest.manual import add_trade, prepare_trade
 from portfolio_digest.models import (
     PORTFOLIO_NAME_UNIQUE,
     ImportRun,
     Instrument,
     Portfolio,
-    Trade,
     TradeType,
 )
 from portfolio_digest.prices.fetch import Sources, held_instruments, run_fetch
@@ -263,51 +254,31 @@ def cmd_import_undo(args: argparse.Namespace) -> int:
     return 0
 
 
-def _manual_quantity(value: str, kind: TradeType) -> Decimal:
-    return parse_quantity(
-        value,
-        "Quantity",
-        allow_negative=kind == TradeType.ADJUSTMENT,
-    )
-
-
 def cmd_trade_add(args: argparse.Namespace) -> int:
     try:
-        kind = TradeType(args.type)
-        exchange, code, currency = listing(args.exchange, args.code, args.currency)
-        trade_date = parse_date(args.date, "Trade date")
-        quantity = _manual_quantity(args.quantity, kind)
-        price = parse_price(args.price, "Price", currency=currency)
-        fees = parse_money(args.fees, "Fees", currency=currency, allow_negative=False)
-        name = parse_security_name(args.name)
-    except (RowProblem, ValueError) as exc:
-        _fail(str(exc))
-        return 2
-
-    try:
+        entry = prepare_trade(
+            exchange=args.exchange,
+            code=args.code,
+            currency=args.currency,
+            trade_date=args.date,
+            trade_type=args.type,
+            quantity=args.quantity,
+            price=args.price,
+            fees=args.fees,
+            name=args.name,
+            notes=args.notes,
+        )
         with session_scope(make_engine()) as session:
-            portfolio = portfolio_named(session, args.portfolio, lock=True)
-            instrument = find_or_create_instrument(session, exchange, code, currency, name)
-            trade = Trade(
-                portfolio_id=portfolio.id,
-                instrument_id=instrument.id,
-                trade_date=trade_date,
-                trade_type=kind.value,
-                quantity=quantity,
-                price=price,
-                currency=currency,
-                fees=fees,
-                source="manual",
-                external_ref=f"manual:{uuid.uuid4().hex}",
-                notes=args.notes,
-            )
-            session.add(trade)
-            session.flush()
+            trade = add_trade(session, args.portfolio, entry)
             trade_id = trade.id
-    except ImportFailure as exc:
+            description = (
+                f"{trade.trade_type} {trade.quantity} "
+                f"{trade.instrument.exchange}:{trade.instrument.code}"
+            )
+    except (ImportFailure, RowProblem, ValueError) as exc:
         _fail(str(exc))
         return 2
-    print(f"Added manual trade {trade_id}: {kind.value} {quantity} {exchange}:{code}.")
+    print(f"Added manual trade {trade_id}: {description}.")
     return 0
 
 

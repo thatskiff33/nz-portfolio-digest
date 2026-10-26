@@ -14,3 +14,8 @@ run = ".venv/bin/ruff check . && .venv/bin/ruff format --check ."
 
 [jobs.test]
 run = ".venv/bin/pytest -q"
+
+# Manual action, intended for an environment with Docker and the server's .env.
+[deploy.dashboard]
+on_merge = false
+run = "scripts/deploy-dashboard.sh"

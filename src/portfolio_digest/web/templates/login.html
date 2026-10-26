@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+    <p class="eyebrow">Private workspace</p>
+    <h1>Sign in to make changes</h1>
+    <p class="muted">Reading is open on this private address. Your password unlocks trades, corrections and import undo for eight hours.</p>
+    <form class="panel entry-form"
+          action="/login"
+          method="post"
+          hx-boost="false">
+        <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
+        <label>
+            App password<input type="password"
+       name="password"
+       autocomplete="current-password"
+       maxlength="1024"
+       required>
+        </label>
+        <button>Sign in</button>
+    </form>
+{% endblock %}

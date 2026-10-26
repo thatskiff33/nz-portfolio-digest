@@ -1,0 +1,35 @@
+{% if series %}
+    <div class="chart-wrap">
+        <canvas class="portfolio-chart"
+                aria-label="{{ 'Price' if instrument is defined else 'Value' }} over time"
+                role="img">
+        </canvas>
+    </div>
+    <details class="chart-data">
+        <summary>View chart data as a table</summary>
+        <div class="table-scroll"
+             tabindex="0"
+             role="region"
+             aria-label="Chart data">
+            <table>
+                <thead>
+                    <tr>
+                        <th scope="col">Date</th>
+                        <th scope="col">{{ 'Price' if instrument is defined else 'Value' }}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for day,value in series %}
+                        <tr data-chart-date="{{ day }}"
+                            data-chart-value="{{ value if value is not none else '' }}">
+                            <td>{{ day }}</td>
+                            <td>{{ value|money }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </details>
+{% else %}
+    <p>No prices recorded yet.</p>
+{% endif %}

@@ -185,18 +185,28 @@ def currencies_needed(
 
 
 def carry_forward(
-    trading_days: Iterable[date], known: Mapping[date, Decimal], previous: Decimal | None
+    trading_days: Iterable[date],
+    known: Mapping[date, Decimal],
+    previous: Decimal | None,
+    *,
+    splits: Mapping[date, tuple[Decimal, Decimal]] | None = None,
 ) -> dict[date, Decimal]:
     """Trading days with no known value, each given the last value before it.
 
     `previous` is the last value from before the first day. Days before any value at all
-    stay empty, since there is nothing to carry.
+    stay empty, since there is nothing to carry. Price callers supply splits within the
+    range to keep carried raw closes in the units effective on each day.
     """
     stale: dict[date, Decimal] = {}
-    for day in sorted(set(trading_days) | set(known)):
+    days = set(trading_days)
+    splits = splits or {}
+    for day in sorted(days | set(known) | set(splits)):
+        if day in splits and previous is not None:
+            before, after = splits[day]
+            previous = previous * before / after
         if day in known:
             previous = known[day]
-        elif previous is not None:
+        elif day in days and previous is not None:
             stale[day] = previous
     return stale
 
@@ -279,12 +289,32 @@ def _update_instrument(
     if begin > end:
         return outcome
 
+    recorded_splits = {
+        day: (before, after)
+        for day, before, after in session.execute(
+            select(Split.split_date, Split.shares_before, Split.shares_after).where(
+                Split.instrument_id == h.instrument_id
+            )
+        )
+    }
     closes: dict[date, Decimal] = {}
     splits: dict[date, tuple[Decimal, Decimal]] = {}
     try:
         symbol = source.symbol(h.listing)
         outcome.label = f"{h.label} ({symbol})"
-        history = source.history(symbol, begin, end)
+        first_stored = session.scalar(
+            select(func.min(Price.price_date)).where(Price.instrument_id == h.instrument_id)
+        )
+        full_start = min(h.first_trade, first_stored or h.first_trade, begin)
+        history = source.history(symbol, begin, end, currency=h.currency, split_start=full_start)
+        if begin > full_start and any(
+            recorded_splits.get(day) != ratio for day, ratio in history.splits.items()
+        ):
+            # Do not save a new or corrected event until the full refresh succeeds.
+            history = source.history(
+                symbol, full_start, end, currency=h.currency, split_start=full_start
+            )
+            begin = full_start
         closes = {d: c for d, c in history.closes.items() if begin <= d <= end}
         splits = history.splits
     except (SourceError, UnknownSymbol) as exc:
@@ -309,7 +339,14 @@ def _update_instrument(
         .order_by(Price.price_date.desc())
         .limit(1)
     )
-    stale = carry_forward(h.calendar.trading_days(begin, end), existing, previous)
+    stale = carry_forward(
+        h.calendar.trading_days(begin, end),
+        existing,
+        previous,
+        splits={
+            day: ratio for day, ratio in (recorded_splits | splits).items() if begin <= day <= end
+        },
+    )
     _save_prices(session, h.instrument_id, stale, source.name, stale=True)
 
     outcome.fetched = len(closes)

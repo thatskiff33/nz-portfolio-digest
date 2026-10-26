@@ -44,7 +44,7 @@ class FakePriceSource:
     def symbol(self, listing: Listing) -> str:
         return f"{listing.code}.TEST"
 
-    def history(self, symbol, start, end):
+    def history(self, symbol, start, end, *, currency=None, split_start=None):
         self.calls.append((symbol, start, end))
         return PriceHistory(dict(self.closes), dict(self.splits))
 
@@ -280,3 +280,56 @@ def test_quality_check_does_not_call_a_multi_day_move_a_one_day_jump(engine):
     with session_scope(engine) as session:
         findings = check_data(session, held_instruments(session), "NZD", now)
     assert not [item for item in findings if item.kind == "suspicious-jump"]
+
+
+def test_new_split_refreshes_full_stored_history_once(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from portfolio_digest.prices import fetch
+
+    first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
+    holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
+    session = MagicMock()
+    source = FakePriceSource(
+        {first: Decimal("40"), recent: Decimal("40"), split_day: Decimal("10")},
+        {split_day: (Decimal("1"), Decimal("4"))},
+    )
+    saved = []
+    monkeypatch.setattr(fetch, "_save_prices", lambda *args, **kwargs: saved.append((args, kwargs)))
+    monkeypatch.setattr(fetch, "_save_splits", lambda *args: None)
+
+    def run(recorded):
+        session.scalar.side_effect = [recent, first, None]
+        split_rows = MagicMock()
+        split_rows.__iter__.return_value = iter(recorded)
+        existing_rows = MagicMock()
+        existing_rows.all.return_value = list(source.closes.items())
+        session.execute.side_effect = [split_rows, existing_rows]
+        return fetch._update_instrument(
+            session, source, holding, datetime(2026, 10, 3, 12, tzinfo=UTC), False, None
+        )
+
+    assert run([]).error is None
+    assert [call[1] for call in source.calls] == [date(2026, 9, 1), first]
+    assert saved[0][0][2][first] == Decimal("40")
+    source.calls.clear()
+    assert run([(split_day, Decimal("1"), Decimal("4"))]).error is None
+    assert [call[1] for call in source.calls] == [date(2026, 9, 1)]
+
+
+def test_raw_carry_forward_changes_units_on_split_date():
+    first, split_day, next_day = date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5)
+    splits = {split_day: (Decimal("1"), Decimal("4"))}
+    assert carry_forward(
+        [first, split_day, next_day],
+        {first: Decimal("40")},
+        None,
+        splits=splits,
+    ) == {split_day: Decimal("10"), next_day: Decimal("10")}
+    # A real split-day close is already in the new units and replaces the carry.
+    assert carry_forward(
+        [split_day, next_day],
+        {split_day: Decimal("11")},
+        Decimal("40"),
+        splits=splits,
+    ) == {next_day: Decimal("11")}

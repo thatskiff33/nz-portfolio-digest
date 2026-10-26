@@ -58,6 +58,28 @@ the stored number of NZ dollars. Yahoo is tried first and the free ECB rates fro
 Frankfurter are the default fallback. `PRICE_SOURCE` and `FX_SOURCES` in `.env` select the
 adapters.
 
+### Stored price convention for the returns engine (#4)
+
+Closes are raw, unadjusted prices in the instrument's major currency units. Yahoo's
+`quote.close` is retrospectively split-adjusted, so the adapter reverses all later split
+ratios before storing it. Split events are fetched from the earliest stored price or first
+trade through the present, even for sold holdings. A new or changed split triggers a full
+re-read of that instrument, including rows outside the normal 31-day refresh window.
+Yahoo currently returns the full chart for this event scan on each run.
+
+A 4-for-1 split therefore stores a pre-split close of $40 and a post-split close of $10.
+The returns engine must use the recorded split's shares-before/shares-after ratio to
+change quantities on its effective date (1 share becomes 4), and must not split-adjust
+these closes again. Closes are not dividend-adjusted; account for distributions separately.
+
+Yahoo metadata currencies `GBp`, `ZAc` and `ILA` are converted to `GBP`, `ZAR` and
+`ILS` by dividing by 100. Missing or mismatched quote currencies fail that source request
+rather than storing a price in the wrong units. Malformed or excessively nested JSON
+also fails the source request, allowing other instruments and FX fallbacks to continue.
+
+For rows fetched before this convention was introduced, run
+`portfolio-digest prices fetch --backfill` once to replace any existing adjusted closes.
+
 ### Twice-daily schedule
 
 The checked-in systemd user timer runs at 10:30 and 18:30 in `Pacific/Auckland`, including

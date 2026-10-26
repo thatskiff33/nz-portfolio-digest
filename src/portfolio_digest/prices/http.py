@@ -91,7 +91,7 @@ def _decode(response: httpx.Response, url: str, max_bytes: int) -> Any:
                 raise SourceError(f"{_host(url)} exceeded the response-size limit.")
             chunks.append(chunk)
         return json.loads(b"".join(chunks), parse_float=Decimal)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise SourceError(f"{_host(url)} sent something that is not JSON.") from None
 
 

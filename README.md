@@ -33,7 +33,9 @@ portfolio-digest prices check                         # missing, stale, zero or 
 NZX and ASX codes map automatically to Yahoo's `.NZ` and `.AX` symbols. NASDAQ and NYSE
 codes are used as-is. Set an exception for a right, renamed or delisted security with
 `portfolio-digest prices symbol NZX:AIRRG AIRRG.NZ`. See the deployment guide for the
-twice-daily schedule and recovery commands.
+twice-daily schedule and recovery commands. Stored closes are raw, unadjusted prices in
+major currency units. The returns engine (#4) must apply the recorded splits to quantities
+on their effective dates, rather than adjusting these closes again.
 
 ## Development
 

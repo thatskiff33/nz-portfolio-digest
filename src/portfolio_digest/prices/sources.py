@@ -28,7 +28,7 @@ class Listing:
 
 @dataclass
 class PriceHistory:
-    """Daily closes in the instrument's own currency, plus any splits in the same period."""
+    """Raw daily closes in major currency units, plus splits used to restore them."""
 
     closes: dict[date, Decimal] = field(default_factory=dict)
     # Split date -> (shares before, shares after), e.g. (1, 4) for a 4-for-1 split.
@@ -42,8 +42,19 @@ class PriceSource(Protocol):
         """The source's own symbol for the listing. Raises ValueError if it has none."""
         ...
 
-    def history(self, symbol: str, start: date, end: date) -> PriceHistory:
-        """Daily closes from `start` to `end` (both included, in the market's own dates)."""
+    def history(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        *,
+        currency: str | None = None,
+        split_start: date | None = None,
+    ) -> PriceHistory:
+        """Raw closes in `currency` from `start` to `end`, inclusive.
+
+        Include split events since `split_start` so callers can detect historical changes.
+        """
         ...
 
 
@@ -73,27 +84,44 @@ class YahooSource:
     def symbol(self, listing: Listing) -> str:
         return yahoo_symbol(listing.exchange, listing.code, listing.yahoo_symbol)
 
-    def history(self, symbol: str, start: date, end: date) -> PriceHistory:
+    def history(
+        self,
+        symbol: str,
+        start: date,
+        end: date,
+        *,
+        currency: str | None = None,
+        split_start: date | None = None,
+    ) -> PriceHistory:
         # Ask for a couple of days either side, since markets ahead of UTC (NZX) start
         # their day on the previous UTC date. Bars outside the range are dropped below.
         params = {
-            "period1": _unix(start - timedelta(days=2)),
-            "period2": _unix(end + timedelta(days=2)),
+            "period1": _unix(min(start, split_start or start) - timedelta(days=2)),
+            # Even a sold holding's old closes reflect splits up to the present.
+            "period2": _unix(max(end, datetime.now(UTC).date()) + timedelta(days=2)),
             "interval": "1d",
-            "events": "split",
+            "events": "splits",
             "includePrePost": "false",
         }
         data = self.fetcher.get(YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")), params)
         try:
-            return _parse_chart(data, start, end)
-        except (KeyError, IndexError, TypeError, ValueError, ArithmeticError, OSError):
+            return _parse_chart(data, start, end, currency)
+        except (
+            KeyError,
+            IndexError,
+            TypeError,
+            AttributeError,
+            ValueError,
+            ArithmeticError,
+            OSError,
+        ):
             raise SourceError(
                 f"Yahoo sent price data for {symbol} in an unexpected shape."
             ) from None
 
     def rates(self, currency: str, base: str, start: date, end: date) -> dict[date, Decimal]:
         # USDNZD=X is NZ$ per US$, which is exactly how rates are stored.
-        rates = self.history(f"{currency}{base}=X", start, end).closes
+        rates = self.history(f"{currency}{base}=X", start, end, currency=base).closes
         if any(rate <= 0 for rate in rates.values()):
             raise SourceError(f"Yahoo sent an impossible {currency}/{base} rate.")
         return rates
@@ -103,27 +131,45 @@ def _unix(day: date) -> int:
     return int(datetime.combine(day, time(), tzinfo=UTC).timestamp())
 
 
-def _parse_chart(data: Any, start: date, end: date) -> PriceHistory:
+def _parse_chart(data: Any, start: date, end: date, currency: str | None = None) -> PriceHistory:
+    if not isinstance(data, dict):
+        raise SourceError("Yahoo sent price data in an unexpected shape.")
     result = (data.get("chart") or {}).get("result")
     if not result:
         raise SourceError("Yahoo sent no price data.")
     chart = result[0]
-    tz = _zone(chart.get("meta", {}).get("exchangeTimezoneName"))
+    meta = chart.get("meta", {})
+    tz = _zone(meta.get("exchangeTimezoneName"))
+    quoted_currency = meta.get("currency")
+    major_currency, scale = {
+        "GBp": ("GBP", Decimal("0.01")),
+        "ZAc": ("ZAR", Decimal("0.01")),
+        "ILA": ("ILS", Decimal("0.01")),
+    }.get(quoted_currency, (quoted_currency, Decimal("1")))
+    if currency is not None and major_currency != currency:
+        raise SourceError(f"Yahoo quote currency does not match {currency}.")
     history = PriceHistory()
+    # Yahoo's quote.close is retrospectively split-adjusted, even without adjclose.
+    # Undo all later splits, including those beyond the requested close range.
+    for split in ((chart.get("events") or {}).get("splits") or {}).values():
+        day = datetime.fromtimestamp(split["date"], tz).date()
+        before, after = Decimal(str(split["denominator"])), Decimal(str(split["numerator"]))
+        if not before.is_finite() or not after.is_finite() or before <= 0 or after <= 0:
+            raise SourceError("Yahoo sent an impossible split ratio.")
+        history.splits[day] = (before, after)
     closes = chart["indicators"]["quote"][0].get("close") or []
     for stamp, close in zip(chart.get("timestamp") or [], closes, strict=False):
         day = datetime.fromtimestamp(stamp, tz).date()
         if close is None or not start <= day <= end:
             continue
-        value = _YAHOO_PRECISION.plus(Decimal(close))
+        value = Decimal(close)
         if not value.is_finite() or value < 0:
             raise SourceError(f"Yahoo sent an impossible price ({value}) for {day}.")
-        history.closes[day] = value
-    for split in ((chart.get("events") or {}).get("splits") or {}).values():
-        day = datetime.fromtimestamp(split["date"], tz).date()
-        before, after = Decimal(str(split["denominator"])), Decimal(str(split["numerator"]))
-        if start <= day <= end and before > 0 and after > 0:
-            history.splits[day] = (before, after)
+        value *= scale
+        for split_day, (before, after) in sorted(history.splits.items()):
+            if day < split_day:
+                value = value * after / before
+        history.closes[day] = _YAHOO_PRECISION.plus(value)
     return history
 
 

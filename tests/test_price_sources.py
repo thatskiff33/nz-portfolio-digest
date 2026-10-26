@@ -146,7 +146,7 @@ def test_yahoo_refuses_zero_exchange_rates_so_a_fallback_can_run():
             "chart": {
                 "result": [
                     {
-                        "meta": {"exchangeTimezoneName": "UTC"},
+                        "meta": {"exchangeTimezoneName": "UTC", "currency": "NZD"},
                         "timestamp": [stamp],
                         "indicators": {"quote": [{"close": [0]}]},
                     }
@@ -156,3 +156,141 @@ def test_yahoo_refuses_zero_exchange_rates_so_a_fallback_can_run():
     )
     with pytest.raises(SourceError, match="impossible USD/NZD rate"):
         YahooSource(fetcher).rates("USD", "NZD", date(2026, 10, 1), date(2026, 10, 1))
+
+
+def test_json_fetcher_wraps_excessive_json_nesting(monkeypatch):
+    import sys
+
+    from portfolio_digest.prices import http
+
+    def recursion_error(*args, **kwargs):
+        raise RecursionError("JSON nesting exceeded the parser limit")
+
+    # Parser depth limits vary between Python versions. Simulate the decoder's
+    # failure so this regression still exercises the error path on all versions.
+    monkeypatch.setattr(http.json, "loads", recursion_error)
+    depth = sys.getrecursionlimit() * 2
+    body = b"[" * depth + b"0" + b"]" * depth
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+        ) as client,
+        pytest.raises(SourceError, match="not JSON"),
+    ):
+        JsonFetcher(client).get("https://example.test/prices")
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [],
+        {"chart": {"result": [None]}},
+        {"chart": {"result": [{"meta": None}]}},
+        {"chart": []},
+        {"chart": {"result": [{"meta": []}]}},
+    ],
+)
+def test_yahoo_wraps_malformed_chart_shapes(data):
+    with pytest.raises(SourceError, match="Yahoo sent"):
+        YahooSource(StubFetcher(data)).history("TEST", date(2026, 10, 1), date(2026, 10, 2))
+
+
+def _chart(closes, *, currency="USD", splits=()):
+    def stamp(day):
+        return int(datetime.combine(day, datetime.min.time(), tzinfo=UTC).timestamp())
+
+    return {
+        "chart": {
+            "result": [
+                {
+                    "meta": {"exchangeTimezoneName": "UTC", "currency": currency},
+                    "timestamp": [stamp(day) for day in closes],
+                    "indicators": {"quote": [{"close": list(closes.values())}]},
+                    "events": {
+                        "splits": {
+                            str(stamp(day)): {
+                                "date": stamp(day),
+                                "denominator": before,
+                                "numerator": after,
+                            }
+                            for day, before, after in splits
+                        }
+                    },
+                }
+            ]
+        }
+    }
+
+
+def test_yahoo_restores_raw_closes_before_splits_including_later_events():
+    first, split_day, later = date(2026, 9, 1), date(2026, 10, 2), date(2026, 10, 5)
+    fetcher = StubFetcher(
+        _chart(
+            {first: Decimal("20"), split_day: Decimal("20"), later: Decimal("40")},
+            splits=[(split_day, 1, 4), (later, 2, 1)],
+        )
+    )
+    source = YahooSource(fetcher)
+    history = source.history("TEST", first, split_day, currency="USD", split_start=first)
+    # Undo the 4:1 split and the later 1:2 reverse split. The split day's close
+    # already uses that day's new units, so only the later split affects it.
+    assert history.closes == {first: Decimal("40"), split_day: Decimal("10")}
+    assert history.splits == {
+        split_day: (Decimal("1"), Decimal("4")),
+        later: (Decimal("2"), Decimal("1")),
+    }
+    source.history("TEST", split_day, split_day, currency="USD", split_start=first)
+    params = fetcher.calls[-1][1]
+    assert params["period1"] < int(datetime(2026, 9, 1, tzinfo=UTC).timestamp())
+    assert params["period2"] > int(datetime(2026, 10, 5, tzinfo=UTC).timestamp())
+
+
+@pytest.mark.parametrize(
+    ("quoted", "currency", "expected"),
+    [
+        ("GBp", "GBP", Decimal("1.2345")),
+        ("ZAc", "ZAR", Decimal("1.2345")),
+        ("ILA", "ILS", Decimal("1.2345")),
+        ("GBP", "GBP", Decimal("123.45")),
+    ],
+)
+def test_yahoo_converts_minor_units_to_instrument_currency(quoted, currency, expected):
+    day = date(2026, 10, 1)
+    source = YahooSource(StubFetcher(_chart({day: Decimal("123.45")}, currency=quoted)))
+    assert source.history("OVERRIDE", day, day, currency=currency).closes == {day: expected}
+
+
+@pytest.mark.parametrize("quoted", ["USD", "GBp", None])
+def test_yahoo_rejects_mismatched_or_missing_quote_currency(quoted):
+    day = date(2026, 10, 1)
+    source = YahooSource(StubFetcher(_chart({day: Decimal("100")}, currency=quoted)))
+    with pytest.raises(SourceError, match="currency does not match NZD"):
+        source.history("OVERRIDE", day, day, currency="NZD")
+
+
+def test_malformed_yahoo_fx_can_fall_back_to_frankfurter():
+    day = date(2026, 10, 1)
+    for source in [
+        YahooSource(StubFetcher({"chart": {"result": [None]}})),
+        FrankfurterSource(StubFetcher({"rates": {day.isoformat(): {"NZD": Decimal("1.7")}}})),
+    ]:
+        try:
+            rates = source.rates("USD", "NZD", day, day)
+        except SourceError:
+            continue
+        break
+    assert rates == {day: Decimal("1.7")}
+
+
+def test_yahoo_rounds_only_after_restoring_raw_price_precision():
+    first, split_day = date(2026, 10, 1), date(2026, 10, 2)
+    source = YahooSource(
+        StubFetcher(
+            _chart(
+                {first: Decimal("13.333333015441895"), split_day: Decimal("13.333333015441895")},
+                splits=[(split_day, 1, 3)],
+            )
+        )
+    )
+    history = source.history("TEST", first, split_day, currency="USD")
+    assert history.closes == {first: Decimal("40.00000"), split_day: Decimal("13.33333")}

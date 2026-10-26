@@ -221,13 +221,11 @@ original imported records and their audit trail.
 
 ### Valuation and returns integration
 
-The base revision for dashboard issue #6 includes prices (#3) and importers (#2), but not
-the returns engine (#4) or email report model (#13). `web/viewmodel.py` therefore keeps
-Decimal valuation separate for later reuse/convergence. It values signed trade quantities
-using the latest stored close and FX on or before each chart date. Adjustment trades are
-the only source of split quantity changes. Missing data makes totals unavailable;
-carried-forward dates are flagged, including normal weekends. Values exclude cash.
-The chart is sampled to at most 180 points and does not measure investment performance.
-Capital gain, income return, currency gain and total return remain explicitly unavailable
-until the returns engine lands. Tests verify independently calculated exact valuations;
-returns-engine equality cannot yet be tested against this base revision.
+The dashboard loads the same stored inputs as the CLI returns report and uses the #4
+returns engine for opening and closing values, capital gain, gross dividends, currency
+gain, total return and percentages, including market and portfolio totals. Periods use
+the engine's opening-close boundaries (see [RETURNS.md](RETURNS.md)). Missing inputs
+make the selected period's figures unavailable with an explanation; carried-forward
+observations use the engine's trading-calendar flags. All calculations use Decimal.
+The value chart samples at most 180 closing valuations calculated by the same engine.
+Values exclude cash; changes in value include trades and are not investment returns.

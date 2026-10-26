@@ -43,6 +43,19 @@ def load_returns(
     ).all()
     if period == "all":
         start, end = period_range(period, today, min((t.trade_date for t in trades), default=None))
+    holdings, rates = load_inputs(session, portfolio, start, end)
+    return calculate_returns(holdings, start, end, rates, portfolio.base_currency)
+
+
+def load_inputs(
+    session: Session, portfolio: Portfolio, start: date, end: date
+) -> tuple[tuple[Holding, ...], dict[str, tuple[Observation, ...]]]:
+    """Shared stored inputs for reports and sampled dashboard valuations."""
+    trades = session.scalars(
+        select(Trade)
+        .where(Trade.portfolio_id == portfolio.id, Trade.trade_date <= end)
+        .order_by(Trade.trade_date, Trade.id)
+    ).all()
     income = session.scalars(
         select(Income).where(
             Income.portfolio_id == portfolio.id,
@@ -106,4 +119,4 @@ def load_returns(
                 ),
             )
         )
-    return calculate_returns(tuple(holdings), start, end, rates, portfolio.base_currency)
+    return tuple(holdings), rates

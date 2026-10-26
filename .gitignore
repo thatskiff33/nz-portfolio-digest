@@ -1,0 +1,18 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+backups/
+*.dump
+# Broker exports and statements contain personal financial data.
+imports/
+*.csv
+*.pdf
+!tests/fixtures/**

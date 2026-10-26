@@ -394,3 +394,21 @@ def test_fifo_multiple_parcels_and_reverse_split_same_day_buy():
     # Oldest two post-split shares cost 44, next one costs 42. Net proceeds 118.
     assert r.total.gains == D(32)
     assert r.performance.total.closing == D(150)
+
+
+@pytest.mark.parametrize("rebuy", [False, True])
+def test_completed_pre_year_positions_need_no_historical_fx(rebuy):
+    trades = (
+        trade("2020-01-01", "buy", "10", "20"),
+        trade("2021-01-01", "sell", "10", "30"),
+    )
+    if rebuy:
+        trades += (
+            trade("2025-05-01", "buy", "10", "40", fx="2"),
+            trade("2025-06-01", "sell", "10", "50", fx="2"),
+        )
+    h = Holding("NASDAQ", "OLD", "USD", trades)
+    report = calculate_year_end((h,), (), {}, 2026)
+    assert report.total.gains == D(200 if rebuy else 0)
+    assert report.foreign_peak == D(800 if rebuy else 0)
+    assert report.flags == ()

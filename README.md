@@ -136,7 +136,10 @@ systemctl --user enable --now portfolio-digest-year-end.timer
 It runs `year-end --all` on **1 April at 09:00 Pacific/Auckland**, sending one email per
 portfolio for the latest year ended 31 March. `Persistent=true` catches a missed run after
 restart. The working directory follows the other units (`~/portfolio-digest`); adjust it
-if needed. Ensure prices and FX through 31 March are available before running. Check
+if needed. The 09:00 send uses data already stored. The US 31 March close coincides with this
+time in NZ daylight saving, before the normal daily price fetch, so US holdings may use
+the preceding stored close. Review the source dates in the carried-forward flags; refresh
+prices and FX through 31 March and rerun manually if you need that closing observation. Check
 `journalctl --user -u portfolio-digest-year-end.service` for failures. Other portfolios
 continue if one has missing data. Manual reruns send again, so check delivery before retrying
 an uncertain SMTP result. For an all-portfolio preview, use `year-end --all --year 2026

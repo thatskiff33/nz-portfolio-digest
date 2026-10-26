@@ -79,3 +79,6 @@ The tests **wipe** the database in `TEST_DATABASE_URL`, so never point it at rea
 safety net they refuse to run unless the database name contains `test`.
 
 How we work on this repo: [docs/WORKING-AGREEMENT.md](docs/WORKING-AGREEMENT.md).
+
+Akahu can confirm ledger holdings without changing trade history. See
+[Akahu setup and drift](docs/AKAHU.md) and [adding a provider](docs/ADDING-A-PROVIDER.md).

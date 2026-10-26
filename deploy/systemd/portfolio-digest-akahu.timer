@@ -1,0 +1,10 @@
+[Unit]
+Description=Confirm portfolio holdings nightly
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 Pacific/Auckland
+Persistent=true
+Unit=portfolio-digest-akahu.service
+
+[Install]
+WantedBy=timers.target

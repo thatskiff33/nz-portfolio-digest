@@ -19,9 +19,10 @@ from portfolio_digest.models import (
     Instrument,
     Portfolio,
     Price,
+    Split,
     Trade,
 )
-from portfolio_digest.returns import ReturnError
+from portfolio_digest.returns import ReturnError, instrument_position
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.web.app import create_app
 from portfolio_digest.web.binding import private_host
@@ -274,6 +275,46 @@ def test_all_time_dashboard_includes_income_without_trades(engine_web):
     assert overview.context["report"] == expected
     assert detail.context["result"] == expected.holdings[0]
     assert expected.total.amounts.dividends == Decimal("40")
+
+
+@pytest.mark.parametrize("after", [Decimal("2"), Decimal("0.5")])
+@pytest.mark.parametrize("recorded_adjustment", [False, True])
+def test_dashboard_quantity_replays_splits(engine_web, after, recorded_adjustment):
+    with Session(engine_web) as session:
+        session.add(
+            Split(
+                instrument_id=1,
+                split_date=DAY,
+                shares_before=Decimal("1"),
+                shares_after=after,
+                source="registry",
+            )
+        )
+        if recorded_adjustment:
+            session.add(
+                Trade(
+                    portfolio_id=1,
+                    instrument_id=1,
+                    trade_date=DAY,
+                    trade_type="adjustment",
+                    quantity=Decimal("100.125") * (after - 1),
+                    price=Decimal("0"),
+                    currency="NZD",
+                    source="test",
+                    external_ref="split-adjustment",
+                )
+            )
+        session.commit()
+        expected = load_returns(session, "Kōwhai Fund", "all", DAY)
+        units = instrument_position(session, 1, 1, DAY).units
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        response = client.get(f"/p/1?period=custom&start={expected.start}&end={DAY}")
+    assert response.status_code == 200
+    assert response.context["report"] == expected
+    row = next(r for r in response.context["dashboard"].holdings if r.instrument.id == 1)
+    assert row.quantity == units == Decimal("100.125") * after
+    assert row.value == units * row.price
+    assert f"<td>{units.normalize():f}</td>" in response.text
 
 
 def test_missing_inputs_are_explained(engine_web):

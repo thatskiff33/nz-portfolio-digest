@@ -95,11 +95,15 @@ def load_returns(
         )
     conversion_flags: set[str] = set()
 
-    def recorded_fx(value, day):
+    def recorded_fx(value, day, currency):
         if day <= start:
             return None
         if value is None or target_currency == portfolio.base_currency:
             return value
+        if currency == target_currency:
+            # Native target-currency amounts need no conversion. Broker FX and
+            # market cross-rates need not be exact reciprocals.
+            return None
         # Broker FX is relative to the portfolio base. Translate that base using
         # the same dated lookup and stale-data rules as every other engine input.
         with localcontext() as context:
@@ -131,7 +135,7 @@ def load_returns(
                         t.quantity,
                         t.consideration / t.quantity if t.consideration is not None else t.price,
                         t.fees,
-                        recorded_fx(t.fx_rate, t.trade_date),
+                        recorded_fx(t.fx_rate, t.trade_date, t.currency),
                     )
                     for t in instrument_trades
                 ),
@@ -145,7 +149,7 @@ def load_returns(
                         p.paid_date,
                         p.net_amount,
                         p.currency,
-                        recorded_fx(p.fx_rate, p.paid_date),
+                        recorded_fx(p.fx_rate, p.paid_date, p.currency),
                         p.gross_amount,
                         p.withholding_tax,
                         p.imputation_credits,

@@ -598,3 +598,76 @@ def test_email_missing_history_fails_safely(returns_engine):
         assert "IMAGINARY" not in str(error.value)
         with pytest.raises(ReportError, match="start"):
             build_report(session, date(2026, 10, 20), date(2026, 10, 19))
+
+
+@pytest.mark.parametrize("broker_fx", [D(".61"), None])
+def test_email_keeps_nzd_trades_and_income_native_in_foreign_portfolio(returns_engine, broker_fx):
+    from portfolio_digest.reports import build_report
+
+    with Session(returns_engine) as session:
+        foreign = session.scalar(select(Portfolio).where(Portfolio.name == "Separate"))
+        foreign.base_currency = "USD"
+        for trade in session.scalars(select(Trade).where(Trade.portfolio_id == foreign.id)):
+            session.delete(trade)
+        instrument = Instrument(
+            exchange="NZX", code="NATIVE", name="Native Example", currency="NZD"
+        )
+        session.add(instrument)
+        session.flush()
+        session.add_all(
+            [
+                Trade(
+                    portfolio_id=foreign.id,
+                    instrument_id=instrument.id,
+                    trade_date=date(2026, 10, 15),
+                    trade_type="buy",
+                    quantity=D(10),
+                    price=D(10),
+                    fees=D(0),
+                    currency="NZD",
+                    fx_rate=broker_fx,
+                    source="made_up",
+                    external_ref="native-buy",
+                ),
+                Income(
+                    portfolio_id=foreign.id,
+                    instrument_id=instrument.id,
+                    paid_date=date(2026, 10, 15),
+                    kind="dividend",
+                    currency="NZD",
+                    gross_amount=D(5),
+                    net_amount=D(4),
+                    withholding_tax=D(1),
+                    imputation_credits=D(".5"),
+                    fx_rate=broker_fx,
+                    source="made_up",
+                    external_ref="native-income",
+                ),
+                Price(
+                    instrument_id=instrument.id,
+                    price_date=date(2026, 10, 15),
+                    close=D(12),
+                    source="made_up",
+                ),
+            ]
+        )
+        session.commit()
+        # The USD/NZD market rate is 1.5, so .61 broker FX is not its reciprocal.
+        # Neither rate should affect native NZD cash flows.
+        email = build_report(session, date(2026, 10, 15), date(2026, 10, 19))
+        row = next(r for r in email.holdings if r.label == "NZX:NATIVE")
+        assert row.closing == D(120)
+        assert row.amounts.capital == D(20)
+        assert row.amounts.dividends == D(4)
+        assert row.amounts.currency == D(0)
+        assert row.amounts.total == D(24)
+        assert row.gross_dividends == D(5)
+        assert row.withholding_tax == D(1)
+        assert row.imputation_gross_up == D(".5")
+
+        # Native NZD rows also work when no foreign market quote is available.
+        for quote in session.scalars(select(FxRate)):
+            session.delete(quote)
+        session.flush()
+        native = load_returns(session, "Separate", "2026-10-14:2026-10-19", base_currency="NZD")
+        assert native.holdings == (row,)

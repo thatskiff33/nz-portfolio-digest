@@ -31,16 +31,23 @@ The owner does not review PRs (owner decision, 26 Oct 2026). Work runs autonomou
 Issues are built by [Sekreton](https://sekreton.com) tasks in the project
 `nz-portfolio-digest` (task prefix `NZP`). One task per issue; its brief carries the
 issue's scope and recorded decisions, and `depends_on` keeps waves in order.
+All changes, including docs and small fixes, go through Sekreton tasks.
 
 - The task sandbox runs [`.sekreton/config.toml`](../.sekreton/config.toml): it installs the
   app with dev tools and runs `ruff` and `pytest`. Database tests skip there (no Postgres);
   GitHub CI runs them against a real Postgres, and must be green before merge.
-- Sekreton's sandboxes can't comment on GitHub. A Claude session (the orchestrator) does
-  the claim, review, *Ready to merge* comment and merge steps below.
-- The orchestrator merges a Sekreton task (which opens its PR) once its review is done, then
-  merges the PR when GitHub CI is green.
+- Sekreton does the ideas, plans, implementation, review and fixes (owner decision, 27 Oct
+  2026). Other agents direct and unblock it and do the GitHub steps, because Sekreton's
+  sandboxes can't write to GitHub. [AGENTS.md](../AGENTS.md) sets out exactly how.
+- Every task has auto-merge on. The directing agent merges a task in diff review as soon as
+  its gates pass and Sekreton's review has finished (this opens its PR), then merges the PR
+  when GitHub CI is green.
 
 ## The build loop
+
+For Sekreton tasks, Sekreton runs steps 2 to 5 itself (build, its own independent reviews,
+fixes, residual risks), and the directing agent handles steps 6 and 7 as set out in
+[AGENTS.md](../AGENTS.md). The steps below are the standard any builder follows.
 
 1. **Claim** the issue (comment on it); branch `feat/<n>-<slug>`; open a **draft** PR
    early whose body ends with `Closes #<n>`.

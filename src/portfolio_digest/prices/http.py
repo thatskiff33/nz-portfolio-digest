@@ -72,7 +72,7 @@ class JsonFetcher:
                         return _decode(response, url, self.max_response_bytes)
                     problem = f"{_status(response)} from {_host(url)}"
                     wait = max(wait, _retry_after(response))
-            except httpx.TransportError as exc:
+            except httpx.HTTPError as exc:
                 problem = f"{type(exc).__name__} from {_host(url)}"
             if attempt == self.attempts:
                 raise SourceError(f"{problem}, gave up after {self.attempts} attempts.")

@@ -79,6 +79,7 @@ class CurrencyNeed:
     base_currency: str
     first_day: date
     last_day: date
+    still_held: bool = True
 
     @property
     def label(self) -> str:
@@ -180,6 +181,7 @@ def currencies_needed(
                 base_currency=base_currency,
                 first_day=min(h.first_trade for h in group),
                 last_day=min(last, latest),
+                still_held=any(h.still_held for h in group),
             )
         )
     return needs
@@ -251,7 +253,9 @@ def run_fetch(
     for holding in holdings:
         try:
             with session_scope(engine) as session:
-                outcome = _update_instrument(session, sources.prices, holding, now, backfill, start)
+                outcome = _update_instrument(
+                    session, sources.prices, holding, now, backfill, start, bool(only)
+                )
         except SQLAlchemyError:
             # session_scope rolls back, including failures during commit. Do not expose
             # SQL or bound parameters from the exception in logs or the report.
@@ -261,7 +265,9 @@ def run_fetch(
     for need in currencies_needed(holdings, base_currency, now):
         try:
             with session_scope(engine) as session:
-                outcome = _update_currency(session, sources.fx, need, backfill, start)
+                outcome = _update_currency(
+                    session, sources.fx, need, backfill, start, now, bool(only)
+                )
         except SQLAlchemyError:
             outcome = Outcome(need.label, error="database error; changes rolled back")
             log.warning("%s: %s", outcome.label, outcome.error)
@@ -288,14 +294,23 @@ def _update_instrument(
     now: datetime,
     backfill: bool,
     start: date | None,
+    force: bool = False,
 ) -> Outcome:
     outcome = Outcome(h.label, source=source.name)
     end = h.last_day_needed(now)
     last_good = session.scalar(
         select(func.max(Price.price_date)).where(
-            Price.instrument_id == h.instrument_id, Price.is_stale.is_(False)
+            Price.instrument_id == h.instrument_id,
+            Price.price_date <= end,
+            Price.is_stale.is_(False),
         )
     )
+    if (
+        not (h.still_held or backfill or start is not None or force)
+        and last_good == end
+        and (now.date() - end).days > REFRESH_DAYS
+    ):
+        return outcome
     begin = _range(h.first_trade, end, last_good, backfill, start)
     if begin > end:
         return outcome
@@ -382,12 +397,22 @@ def _update_currency(
     need: CurrencyNeed,
     backfill: bool,
     start: date | None,
+    now: datetime,
+    force: bool = False,
 ) -> Outcome:
     outcome = Outcome(need.label, source=sources[0].name if sources else "none")
     keys = (FxRate.currency == need.currency, FxRate.base_currency == need.base_currency)
     last_good = session.scalar(
-        select(func.max(FxRate.rate_date)).where(*keys, FxRate.is_stale.is_(False))
+        select(func.max(FxRate.rate_date)).where(
+            *keys, FxRate.rate_date <= need.last_day, FxRate.is_stale.is_(False)
+        )
     )
+    if (
+        not (need.still_held or backfill or start is not None or force)
+        and last_good == need.last_day
+        and (now.date() - need.last_day).days > REFRESH_DAYS
+    ):
+        return outcome
     begin = _range(need.first_day, need.last_day, last_good, backfill, start)
     end = need.last_day
     if begin > end:

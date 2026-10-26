@@ -2,6 +2,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -16,9 +17,9 @@ from portfolio_digest.prices.fetch import (
     held_instruments,
     run_fetch,
 )
-from portfolio_digest.prices.http import SourceError
+from portfolio_digest.prices.http import JsonFetcher, SourceError
 from portfolio_digest.prices.quality import check_data
-from portfolio_digest.prices.sources import Listing, PriceHistory
+from portfolio_digest.prices.sources import Listing, PriceHistory, YahooSource
 
 
 def test_normal_fetch_rechecks_recent_history_but_backfill_range_starts_at_first_trade():
@@ -89,6 +90,132 @@ def _seed_trade(engine, *, currency="USD", code="TEST"):
             )
         )
         return instrument.id
+
+
+@pytest.mark.parametrize("run_hour", [21, 5])
+def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, run_hour):
+    from portfolio_digest import db
+    from portfolio_digest.prices import fetch
+
+    first = date(2026, 10, 1)
+    holdings = [
+        Holding(i, "NASDAQ", code, "USD", None, first, first, True)
+        for i, code in enumerate(["AAA", "BBB"], 1)
+    ]
+    sessions = [MagicMock() for _ in range(4)]
+    for session in sessions:
+        session.scalar.return_value = None
+        session.execute.return_value.all.return_value = []
+    factory = MagicMock(side_effect=sessions)
+    monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
+    monkeypatch.setattr(fetch, "held_instruments", lambda *args: holdings)
+    for name in ("_save_prices", "_save_rates", "_save_splits"):
+        monkeypatch.setattr(fetch, name, MagicMock())
+    calls = []
+
+    def handler(request):
+        symbol = request.url.path.rsplit("/", 1)[-1]
+        calls.append(symbol)
+        if symbol == "AAA":
+            return httpx.Response(
+                200,
+                headers={"Content-Encoding": "gzip"},
+                stream=httpx.ByteStream(b"not a gzip body"),
+            )
+        return httpx.Response(
+            200,
+            json={
+                "chart": {
+                    "result": [
+                        {
+                            "meta": {
+                                "exchangeTimezoneName": "UTC",
+                                "currency": "NZD" if "=X" in symbol else "USD",
+                            },
+                            "timestamp": [int(datetime(2026, 10, 1, 12, tzinfo=UTC).timestamp())],
+                            "indicators": {"quote": [{"close": [2]}]},
+                        }
+                    ]
+                }
+            },
+        )
+
+    waits = []
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        yahoo = YahooSource(JsonFetcher(client, attempts=2, backoff=1, sleep=waits.append))
+        report = run_fetch(
+            MagicMock(),
+            Sources(yahoo, [yahoo]),
+            now=datetime(2026, 10, 3, run_hour, 30, tzinfo=UTC),
+            base_currency="NZD",
+            backfill=True,
+        )
+
+    assert not report.ok
+    assert report.outcomes[0].error == (
+        "DecodingError from query2.finance.yahoo.com, gave up after 2 attempts."
+    )
+    assert all(outcome.error is None for outcome in report.outcomes[1:])
+    assert [outcome.fetched for outcome in report.outcomes] == [0, 1, 1]
+    assert calls == ["AAA", "AAA", "BBB", "USDNZD=X"]
+    assert waits == [1]
+
+
+@pytest.mark.parametrize(
+    ("options", "last_good", "still_held", "now", "should_fetch"),
+    [
+        ({}, date(2023, 3, 3), False, datetime(2026, 10, 3, 12, tzinfo=UTC), False),
+        ({"backfill": True}, date(2023, 3, 3), False, datetime(2026, 10, 3, 12, tzinfo=UTC), True),
+        (
+            {"start": date(2023, 3, 1)},
+            date(2023, 3, 3),
+            False,
+            datetime(2026, 10, 3, 12, tzinfo=UTC),
+            True,
+        ),
+        (
+            {"only": ["NASDAQ:OLD"]},
+            date(2023, 3, 3),
+            False,
+            datetime(2026, 10, 3, 12, tzinfo=UTC),
+            True,
+        ),
+        ({}, date(2023, 3, 2), False, datetime(2026, 10, 3, 12, tzinfo=UTC), True),
+        ({}, None, False, datetime(2026, 10, 3, 12, tzinfo=UTC), True),
+        ({}, date(2023, 3, 3), False, datetime(2023, 4, 3, 12, tzinfo=UTC), True),
+        ({}, date(2023, 3, 3), False, datetime(2023, 4, 4, 12, tzinfo=UTC), False),
+        ({}, date(2023, 3, 3), True, datetime(2026, 10, 3, 12, tzinfo=UTC), True),
+    ],
+)
+def test_old_sold_holdings_and_fx_skip_only_when_complete(
+    monkeypatch, options, last_good, still_held, now, should_fetch
+):
+    from portfolio_digest import db
+    from portfolio_digest.prices import fetch
+
+    holding = Holding(
+        1, "NASDAQ", "OLD", "USD", None, date(2023, 3, 1), date(2023, 3, 3), still_held
+    )
+    sessions = [MagicMock() for _ in range(3)]
+    for session in sessions:
+        session.execute.return_value.all.return_value = []
+    sessions[1].scalar.side_effect = [last_good, last_good, None]
+    sessions[2].scalar.side_effect = [last_good, None]
+    factory = MagicMock(side_effect=sessions)
+    monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
+    monkeypatch.setattr(fetch, "held_instruments", lambda *args: [holding])
+    for name in ("_save_prices", "_save_rates", "_save_splits"):
+        monkeypatch.setattr(fetch, name, MagicMock())
+    prices = FakePriceSource()
+    prices.history = MagicMock(side_effect=SourceError("symbol no longer available (HTTP 404)"))
+    fx = FakeFxSource("mock-fx", error="currency no longer available")
+
+    report = run_fetch(MagicMock(), Sources(prices, [fx]), now=now, base_currency="NZD", **options)
+
+    assert prices.history.called is should_fetch
+    assert bool(fx.calls) is should_fetch
+    assert report.ok is not should_fetch
+    assert len(report.outcomes) == 2
 
 
 def test_carried_price_overflow_does_not_stop_next_instrument_or_fx(monkeypatch):

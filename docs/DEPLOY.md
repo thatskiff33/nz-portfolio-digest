@@ -87,8 +87,9 @@ For rows fetched before this convention was introduced, run
 
 The checked-in systemd user timer runs at 10:30 and 18:30 in `Pacific/Auckland`, including
 daylight-saving changes. The first run follows the US close and the second follows the NZX
-and ASX closes. From early November to early March, the US uses standard time while NZ
-uses daylight time. The FX day then closes at 17:00 New York, which is 11:00 NZDT.
+and ASX closes. From early November to mid-March (the second Sunday in March),
+the US uses standard time while NZ uses daylight time. The FX day then closes at
+17:00 New York, which is 11:00 NZDT.
 The 10:30 run gets US share closes, but the previous day's exchange rate only arrives
 at the 18:30 run. Both scheduled times remain as decided by the owner.
 Install it as the server account that owns this checkout:

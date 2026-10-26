@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal as D
+from decimal import getcontext, localcontext
 
 import pytest
 
@@ -260,3 +261,22 @@ def test_table_keeps_holdings_when_exchange_contains_colon():
     assert table.count("NZX:FICTION") == 1
     assert table.count("NZX:ALT:FICTION") == 1
     assert report.total.closing == 240
+
+
+def test_schema_sized_values_preserve_gain_and_render_without_changing_context():
+    from portfolio_digest.returns_table import render_table
+
+    quantity = D("9999999999999999.99999999")
+    h = holding(
+        trades=[trade(quantity=str(quantity))],
+        p0="99999999999999.000000",
+        p1="99999999999999.000001",
+    )
+    precision = getcontext().prec
+    report = calculate_returns((h,), START, END, {})
+    assert report.total.amounts.capital == D("9999999999.99999999999999")
+    with localcontext() as context:
+        context.prec = 80
+        assert report.total.amounts.total == report.total.closing - report.total.opening
+    assert "10,000,000,000.00" in render_table(report)
+    assert getcontext().prec == precision

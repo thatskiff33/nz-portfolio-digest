@@ -90,6 +90,10 @@ then calculates its own percentages. It never averages holding percentages.
 Zero denominators display `n/a`, including for dividend-only rows. All calculations
 use Decimal. The CLI rounds only at display to 2 decimal places, half up, so
 independently rounded components may differ from a displayed total by a cent.
+Calculations use a local precision of at least 80 significant digits: the schema's
+quantity, money and FX fields need up to 64 digits per product, with headroom for
+subtraction and aggregation. A higher caller precision is preserved; the caller's
+Decimal context is never modified. Display precision also accommodates large totals.
 
 `Result` retains opening and closing values, purchases and sales separately.
 Transactions retain dates and cash flows, leaving room for a separate

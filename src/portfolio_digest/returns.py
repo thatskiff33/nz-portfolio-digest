@@ -9,12 +9,29 @@ as denominator. Sales are withdrawals, not a reduction in capital put at risk.
 See docs/RETURNS.md for boundaries, income and missing-data conventions.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
+from functools import wraps
+from typing import ParamSpec, TypeVar
 
 ZERO = Decimal(0)
 HUNDRED = Decimal(100)
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def _financial_math(function: Callable[P, T]) -> Callable[P, T]:
+    """Allow 64-digit schema products plus subtraction and aggregation headroom."""
+
+    @wraps(function)
+    def exact(*args: P.args, **kwargs: P.kwargs) -> T:
+        with localcontext() as context:
+            context.prec = max(context.prec, 80)
+            return function(*args, **kwargs)
+
+    return exact
 
 
 class ReturnError(ValueError):
@@ -93,6 +110,7 @@ class Components:
     currency: Decimal = ZERO
 
     @property
+    @_financial_math
     def total(self) -> Decimal:
         return self.capital + self.dividends + self.currency
 
@@ -109,10 +127,12 @@ class Result:
     exchange: str | None = None
 
     @property
+    @_financial_math
     def denominator(self) -> Decimal:
         return self.opening + self.purchases
 
     @property
+    @_financial_math
     def percentages(self) -> Components | None:
         if self.denominator == ZERO:
             return None
@@ -167,6 +187,7 @@ def _lookup(points: tuple[Observation, ...], day: date, label: str, flags: set[s
     return point.value
 
 
+@_financial_math
 def holding_return(
     holding: Holding,
     start: date,
@@ -262,6 +283,7 @@ def holding_return(
     )
 
 
+@_financial_math
 def subtotal(label: str, rows: tuple[Result, ...]) -> Result:
     return Result(
         label,
@@ -278,6 +300,7 @@ def subtotal(label: str, rows: tuple[Result, ...]) -> Result:
     )
 
 
+@_financial_math
 def calculate_returns(
     holdings: tuple[Holding, ...],
     start: date,

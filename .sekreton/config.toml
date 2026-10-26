@@ -14,3 +14,12 @@ run = ".venv/bin/ruff check . && .venv/bin/ruff format --check ."
 
 [jobs.test]
 run = ".venv/bin/pytest -q"
+
+[environment]
+packages = ["openssh-client"]
+
+# Optional manual update of an already provisioned server; no deployment on merge.
+[deploy.server]
+secrets = ["DEPLOY_HOST", "DEPLOY_USER", "DEPLOY_CHECKOUT", "DEPLOY_SSH_KEY", "DEPLOY_KNOWN_HOSTS"]
+on_merge = false
+run = "scripts/deploy.sh"

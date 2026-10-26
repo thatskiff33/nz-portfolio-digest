@@ -26,7 +26,9 @@ services:
     build: .
     restart: "no"
     command: ["migrate"]
-    environment:
+    volumes:
+      - ./schedules.toml:/app/schedules.toml:ro
+    environment: &app_environment
       DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
       AKAHU_APP_TOKEN: ${AKAHU_APP_TOKEN:-}
       AKAHU_USER_TOKEN: ${AKAHU_USER_TOKEN:-}
@@ -37,9 +39,40 @@ services:
       TIMEZONE: ${TIMEZONE:-Pacific/Auckland}
       PRICE_SOURCE: ${PRICE_SOURCE:-yahoo}
       FX_SOURCES: ${FX_SOURCES:-yahoo,frankfurter}
+      MAILER: ${MAILER:-gmail}
+      MAIL_FROM: ${MAIL_FROM:-}
+      MAIL_OWNER: ${MAIL_OWNER:-}
+      GMAIL_SMTP_USERNAME: ${GMAIL_SMTP_USERNAME:-}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
+      POSTMARK_SERVER_TOKEN: ${POSTMARK_SERVER_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-ap-southeast-2}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      SES_SMTP_USERNAME: ${SES_SMTP_USERNAME:-}
+      SES_SMTP_PASSWORD: ${SES_SMTP_PASSWORD:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_TLS: ${SMTP_TLS:-starttls}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
     depends_on:
       db:
         condition: service_healthy
+
+  # The only scheduler: both price downloads and emailed reports use schedules.toml.
+  scheduler:
+    build: .
+    restart: unless-stopped
+    init: true
+    command: ["scheduler"]
+    environment: *app_environment
+    volumes:
+      - ./schedules.toml:/app/schedules.toml:ro
+      - scheduler-state:/app/state
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   # Nightly compressed dump of the portfolio database, pruned after BACKUP_KEEP_DAYS.
   # Take one on demand with: docker compose run --rm backup --once
@@ -82,3 +115,4 @@ services:
 
 volumes:
   pgdata:
+  scheduler-state:

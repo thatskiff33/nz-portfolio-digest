@@ -19,6 +19,7 @@ from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Sp
 from portfolio_digest.prices.calendars import for_exchange
 from portfolio_digest.returns import ReturnError, units_at
 from portfolio_digest.returns_loader import load_returns
+from portfolio_digest.returns_table import format_number as money
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,7 @@ def evaluate(session, portfolio, config, now):
                 Trigger(
                     "portfolio",
                     f"Portfolio value changed {change:+.2f}% over {rules.period_days} days: "
-                    f"{total.opening:.2f} to {total.closing:.2f} {report.base_currency}.",
+                    f"{money(total.opening)} to {money(total.closing)} {report.base_currency}.",
                 )
                 if change < -rules.portfolio_drop_percent
                 else None

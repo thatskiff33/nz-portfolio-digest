@@ -250,3 +250,13 @@ def test_all_includes_execution_gain_and_opening_balance():
     assert r.opening == 0 and r.purchases == 102
     assert r.amounts.capital == 18
     assert r.closing - r.purchases == r.amounts.total
+
+
+def test_table_keeps_holdings_when_exchange_contains_colon():
+    from portfolio_digest.returns_table import render_table
+
+    report = calculate_returns((holding(), replace(holding(), exchange="NZX:ALT")), START, END, {})
+    table = render_table(report)
+    assert table.count("NZX:FICTION") == 1
+    assert table.count("NZX:ALT:FICTION") == 1
+    assert report.total.closing == 240

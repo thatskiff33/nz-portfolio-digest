@@ -30,7 +30,7 @@ def render_table(report: Report) -> str:
 
     rows = [headers]
     for market in report.markets:
-        rows.extend(row(h) for h in report.holdings if h.label.split(":", 1)[0] == market.label)
+        rows.extend(row(h) for h in report.holdings if h.exchange == market.label)
         rows.append(row(market))
     rows.append(row(report.total))
     widths = [max(len(r[i]) for r in rows) for i in range(len(headers))]

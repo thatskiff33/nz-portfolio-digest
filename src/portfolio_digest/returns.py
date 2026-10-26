@@ -106,6 +106,7 @@ class Result:
     sales: Decimal
     amounts: Components
     flags: tuple[str, ...] = ()
+    exchange: str | None = None
 
     @property
     def denominator(self) -> Decimal:
@@ -257,6 +258,7 @@ def holding_return(
         sales,
         Components(capital, dividends, currency_gain),
         tuple(sorted(flags)),
+        holding.exchange,
     )
 
 

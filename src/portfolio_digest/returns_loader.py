@@ -7,13 +7,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.config import get_settings
-from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Trade
+from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.returns import (
     Holding,
     Observation,
     Payment,
     Report,
     ReturnError,
+    SplitEvent,
     Transaction,
     calculate_returns,
     period_range,
@@ -58,6 +59,9 @@ def load_returns(
             Price.price_date <= end,
         )
     ).all()
+    split_rows = session.scalars(
+        select(Split).where(Split.instrument_id.in_(ids), Split.split_date <= end)
+    ).all()
     fx_rows = session.scalars(
         select(FxRate).where(
             FxRate.base_currency == portfolio.base_currency,
@@ -94,6 +98,11 @@ def load_returns(
                     Payment(p.paid_date, p.gross_amount, p.currency, p.fx_rate)
                     for p in income
                     if p.instrument_id == instrument.id
+                ),
+                tuple(
+                    SplitEvent(s.split_date, s.shares_before, s.shares_after)
+                    for s in split_rows
+                    if s.instrument_id == instrument.id
                 ),
             )
         )

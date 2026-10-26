@@ -4,22 +4,30 @@ from datetime import date
 from decimal import Decimal as D
 
 import pytest
-from sqlalchemy import CheckConstraint, MetaData, create_engine
+from sqlalchemy import CheckConstraint, MetaData, create_engine, select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.cli import main
 from portfolio_digest.config import get_settings
-from portfolio_digest.models import Base, FxRate, Income, Instrument, Portfolio, Price, Trade
+from portfolio_digest.models import (
+    Base,
+    FxRate,
+    Income,
+    Instrument,
+    Portfolio,
+    Price,
+    Split,
+    Trade,
+)
 from portfolio_digest.returns import ReturnError
 from portfolio_digest.returns_loader import load_returns
 
 
-@pytest.fixture
-def returns_engine(monkeypatch):
+def _sqlite_engine(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite://")
     get_settings.cache_clear()
-    # SQLite exercises SQL selection/mapping without a Postgres service. Only remove
-    # Postgres-specific CHECK expressions; the existing schema suite tests constraints.
+    # SQLite runs without a Postgres service. Only Postgres-specific CHECK expressions
+    # are removed; the Postgres run below keeps every constraint.
     engine = create_engine("sqlite://")
     metadata = MetaData()
     for table in Base.metadata.sorted_tables:
@@ -28,22 +36,30 @@ def returns_engine(monkeypatch):
             if isinstance(constraint, CheckConstraint):
                 copy.constraints.remove(constraint)
     metadata.create_all(engine)
+    return engine
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def returns_engine(request, monkeypatch):
+    if request.param == "postgres":
+        # The migrated throwaway Postgres from conftest; skipped when none is configured.
+        engine = request.getfixturevalue("engine")
+    else:
+        engine = _sqlite_engine(monkeypatch)
     with Session(engine) as session:
-        session.add_all(
-            [
-                Portfolio(id=1, name="Invented", base_currency="NZD"),
-                Portfolio(id=2, name="Separate", base_currency="NZD"),
-                Instrument(
-                    id=1, exchange="NASDAQ", code="IMAGINARY", name="Imaginary", currency="USD"
-                ),
-            ]
+        invented = Portfolio(name="Invented", base_currency="NZD")
+        separate = Portfolio(name="Separate", base_currency="NZD")
+        imaginary = Instrument(
+            exchange="NASDAQ", code="IMAGINARY", name="Imaginary", currency="USD"
         )
+        session.add_all([invented, separate, imaginary])
         session.flush()
+        one, two, instrument = invented.id, separate.id, imaginary.id
         session.add_all(
             [
                 Trade(
-                    portfolio_id=1,
-                    instrument_id=1,
+                    portfolio_id=one,
+                    instrument_id=instrument,
                     trade_date=date(2026, 10, 1),
                     trade_type="buy",
                     quantity=D(10),
@@ -54,8 +70,8 @@ def returns_engine(monkeypatch):
                     external_ref="buy",
                 ),
                 Trade(
-                    portfolio_id=1,
-                    instrument_id=1,
+                    portfolio_id=one,
+                    instrument_id=instrument,
                     trade_date=date(2026, 10, 15),
                     trade_type="sell",
                     quantity=D(10),
@@ -67,8 +83,8 @@ def returns_engine(monkeypatch):
                     external_ref="sell",
                 ),
                 Trade(
-                    portfolio_id=2,
-                    instrument_id=1,
+                    portfolio_id=two,
+                    instrument_id=instrument,
                     trade_date=date(2026, 10, 1),
                     trade_type="buy",
                     quantity=D(999),
@@ -80,8 +96,8 @@ def returns_engine(monkeypatch):
                 ),
                 # Must not leak future trades or use a future quote/FX for opening.
                 Trade(
-                    portfolio_id=1,
-                    instrument_id=1,
+                    portfolio_id=one,
+                    instrument_id=instrument,
                     trade_date=date(2026, 11, 1),
                     trade_type="buy",
                     quantity=D(500),
@@ -92,10 +108,16 @@ def returns_engine(monkeypatch):
                     external_ref="future",
                 ),
                 Price(
-                    instrument_id=1, price_date=date(2026, 10, 12), close=D(10), source="made_up"
+                    instrument_id=instrument,
+                    price_date=date(2026, 10, 12),
+                    close=D(10),
+                    source="made_up",
                 ),
                 Price(
-                    instrument_id=1, price_date=date(2026, 11, 1), close=D(900), source="made_up"
+                    instrument_id=instrument,
+                    price_date=date(2026, 11, 1),
+                    close=D(900),
+                    source="made_up",
                 ),
                 FxRate(
                     rate_date=date(2026, 10, 12),
@@ -112,8 +134,8 @@ def returns_engine(monkeypatch):
                     source="made_up",
                 ),
                 Income(
-                    portfolio_id=1,
-                    instrument_id=1,
+                    portfolio_id=one,
+                    instrument_id=instrument,
                     paid_date=date(2026, 10, 19),
                     kind="dividend",
                     currency="NZD",
@@ -123,8 +145,8 @@ def returns_engine(monkeypatch):
                     external_ref="div",
                 ),
                 Income(
-                    portfolio_id=1,
-                    instrument_id=1,
+                    portfolio_id=one,
+                    instrument_id=instrument,
                     paid_date=date(2026, 10, 19),
                     kind="interest",
                     currency="NZD",
@@ -137,8 +159,9 @@ def returns_engine(monkeypatch):
         )
         session.commit()
     yield engine
-    engine.dispose()
-    get_settings.cache_clear()
+    if request.param == "sqlite":
+        engine.dispose()
+        get_settings.cache_clear()
 
 
 def test_loader_keeps_sold_holding_scopes_portfolio_and_uses_gross_income(returns_engine):
@@ -211,7 +234,7 @@ def test_cli_escapes_control_characters_in_labels_flags_and_errors(
 ):
     monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: returns_engine)
     with Session(returns_engine) as session:
-        session.get(Instrument, 1).code = "FERN\x1b[2J"
+        session.scalar(select(Instrument)).code = "FERN\x1b[2J"
         session.commit()
     args = ["returns", "--portfolio", "Separate", "--period", "2026-10-12:2026-10-19"]
     assert main(args) == 0
@@ -222,7 +245,7 @@ def test_cli_escapes_control_characters_in_labels_flags_and_errors(
 
     with Session(returns_engine) as session:
         # Force an oversell error which includes the untrusted instrument code.
-        sale = session.get(Trade, 2)
+        sale = session.scalar(select(Trade).where(Trade.external_ref == "sell"))
         sale.quantity = D(11)
         session.commit()
     args[2] = "Invented"
@@ -230,3 +253,60 @@ def test_cli_escapes_control_characters_in_labels_flags_and_errors(
     error = capsys.readouterr().err
     assert "\x1b" not in error
     assert "FERN\\x1b[2J" in error and "exceeds" in error
+
+
+def test_loader_applies_splits_and_non_cash_adjustments_and_drops_old_sales(returns_engine):
+    with Session(returns_engine) as session:
+        portfolio = Portfolio(name="Actions", base_currency="NZD")
+        kauri = Instrument(exchange="NZX", code="KAURI", name="Kauri", currency="NZD")
+        gone = Instrument(exchange="NZX", code="GONE", name="Gone", currency="NZD")
+        session.add_all([portfolio, kauri, gone])
+        session.flush()
+
+        def row(instrument, day, kind, quantity, price, ref):
+            return Trade(
+                portfolio_id=portfolio.id,
+                instrument_id=instrument.id,
+                trade_date=day,
+                trade_type=kind,
+                quantity=D(quantity),
+                price=D(price),
+                currency="NZD",
+                fees=D(0),
+                source="made_up",
+                external_ref=ref,
+            )
+
+        session.add_all(
+            [
+                row(kauri, date(2026, 1, 5), "buy", "10", "10", "k-buy"),
+                # Pre-period transfer out counts towards the opening quantity.
+                row(kauri, date(2026, 3, 2), "adjustment", "-2", "9", "k-out"),
+                # 8 units split 2-for-1 into 16, then a non-cash DRP of 1 unit at 6.
+                row(kauri, date(2026, 10, 14), "adjustment", "8", "0", "k-split"),
+                row(kauri, date(2026, 10, 15), "adjustment", "1", "6", "k-drp"),
+                row(gone, date(2026, 1, 5), "buy", "5", "1", "g-buy"),
+                row(gone, date(2026, 2, 5), "sell", "5", "1", "g-sell"),
+                Split(
+                    instrument_id=kauri.id,
+                    split_date=date(2026, 10, 14),
+                    shares_before=D(1),
+                    shares_after=D(2),
+                    source="made_up",
+                ),
+                Price(
+                    instrument_id=kauri.id, price_date=date(2026, 10, 12), close=D(12), source="x"
+                ),
+                Price(
+                    instrument_id=kauri.id, price_date=date(2026, 10, 19), close=D(7), source="x"
+                ),
+            ]
+        )
+        session.commit()
+        r = load_returns(session, "Actions", "2026-10-12:2026-10-19")
+    assert [h.label for h in r.holdings] == ["NZX:KAURI"]
+    # Opening 8 x 12 = 96. Closing 17 x 7 = 119. DRP brought in 6 of value.
+    assert (r.total.opening, r.total.closing, r.total.adjustments) == (D(96), D(119), D(6))
+    # Split units: 16 x (7 - 6) = 16. DRP unit: 7 - 6 = 1.
+    assert r.total.amounts.capital == 17 and r.total.flags == ()
+    assert r.total.percentages.total.quantize(D(".01")) == D("17.71")

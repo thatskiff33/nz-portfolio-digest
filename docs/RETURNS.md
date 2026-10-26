@@ -19,16 +19,19 @@ before the first purchase to include that purchase's execution return.
 - `all`: the day before the first trade to today, including purchase fees.
 - `YYYY-MM-DD:YYYY-MM-DD`: explicit opening and closing dates.
 
-Today uses the configured `TIMEZONE` (Pacific/Auckland by default). Empty portfolios return zero amounts and
-undefined percentages. A zero-length range reports no change. All holdings with
-trades through the end or dividend income in the range are included, including
-fully sold holdings. Quantities come from trades; valuation is quantity × local
-close × FX. FX is base currency per local currency unit. The engine accepts other
+Today uses the configured `TIMEZONE` (Pacific/Auckland by default). Empty portfolios
+return zero amounts and undefined percentages. A zero-length range reports no
+change. Holdings with opening units, trades in the range or dividend income in
+the range are included. Holdings fully sold during the range remain; those sold before it
+are omitted unless they receive income in the range. Quantities come from trades;
+valuation is quantity × local close × FX. FX is base currency per local currency unit. The engine accepts other
 portfolio base currencies too.
 
-The latest observation **on or before** a valuation date is used. A previous date,
-or an observation marked stale by its provider, produces a flag on the holding,
-market and portfolio. FX uses the same rule. Future observations are never used.
+The latest observation **on or before** a valuation date is used. An observation
+marked stale by its provider, or a missing trading day since the observation, produces a flag on the holding, market and portfolio. Prices
+use the exchange calendar, so weekends and exchange holidays alone do not cause
+a flag. FX uses its weekday calendar, including weekdays when the exchange is
+closed. Future observations are never used.
 A missing price or FX with no prior observation stops the report with a clear
 error rather than treating the holding as worthless. A genuine zero price is
 valid. Fully sold holdings need no closing price. Broker-supplied transaction FX
@@ -57,7 +60,10 @@ Opening units form a parcel at the opening price and FX, resetting historic cost
 for the requested period. Each purchase creates a new parcel at its execution
 price and FX. Sales realise the oldest parcel first (FIFO); a partial sale splits
 that parcel. Surviving parcels are valued at the closing price and FX. Same-day
-trades retain input order; the loader orders by trade date then database ID.
+trades apply a matching split first, then additions before removals, since trade
+rows have no execution times. Ties retain input order; the loader orders them by
+database ID. This defines FIFO among same-day additions deterministically and
+avoids a false oversell when a sale was entered before its same-day purchase.
 Buy and sell fees, expressed in trade currency, reduce capital gain at transaction
 FX. Buy outlays include fees; sale proceeds exclude fees. Opening balances act
 as purchases at their recorded price and FX when inside the period.
@@ -65,7 +71,8 @@ as purchases at their recorded price and FX when inside the period.
 The independent accounting identity is:
 
 ```text
-total = closing value + net sale proceeds - opening value - purchase outlays + dividends
+total = closing value + net sale proceeds - opening value - purchase outlays
+        - net non-cash adjustments + dividends
 net investment cash flow = purchase outlays - net sale proceeds
 ```
 
@@ -99,10 +106,25 @@ Decimal context is never modified. Display precision also accommodates large tot
 Transactions retain dates and cash flows, leaving room for a separate
 money-weighted return strategy later without changing simple-return attribution.
 
-Adjustments and short positions are rejected with an error. The schema's signed
-adjustment is ambiguous (split, transfer or correction), so assigning it an
-invented cash flow would silently distort performance. A corporate-action model
-is needed to support these safely. A trade currency different from its instrument
+Signed ADJUSTMENT trades before or on the opening date count towards opening
+quantity. Inside the period, an adjustment matching a stored Split row rescales
+parcel units, preserving each parcel's total local cost and entry FX. Match once
+per split date against units held before that day's trades, using the exact
+cross-product `quantity_change × shares_before = held × (shares_after - shares_before)`.
+The Split row alone never changes quantity. Zero-fee splits need no transaction-date
+FX because no value is converted. A rounded quantity change that does not match
+exactly follows the non-split rule below, rather than guessing cash in lieu.
+
+Other positive adjustments add a parcel at the recorded trade price and FX;
+negative ones remove units FIFO at that price and FX, realising the removed
+parcel's price and currency movement. A recorded zero price is valid. These
+transfers, gifts, DRPs and corrections are non-cash: signed value moved in or out
+is retained as `Result.adjustments`, summed in subtotals and excluded from the
+purchase-based denominator. Adjustment fees reduce capital and count as cash
+outlays. Income rows alone never add units. This follows issue #19's recorded
+choice and keeps the accounting identity above intact.
+
+Short positions are rejected. A trade currency different from its instrument
 currency is also rejected until normalised, rather than mixing unlike units.
 
 ## Independently worked weekly example

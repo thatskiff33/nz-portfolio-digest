@@ -6,6 +6,8 @@ capital = q * (p1 - p0) * f0; currency = q * p1 * (f1 - f0).
 The cross-term belongs to currency. Their sum is q * (p1*f1 - p0*f0).
 Fees reduce capital. All percentages share opening value plus purchase outlays
 as denominator. Sales are withdrawals, not a reduction in capital put at risk.
+Non-split adjustments move units in or out at their recorded price without cash.
+A parcel keeps its local cost (q * p0), so a split rescales units exactly.
 See docs/RETURNS.md for boundaries, income and missing-data conventions.
 """
 
@@ -14,7 +16,10 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from functools import wraps
+from itertools import groupby
 from typing import ParamSpec, TypeVar
+
+from portfolio_digest.prices.calendars import FX, TradingCalendar, for_exchange
 
 ZERO = Decimal(0)
 HUNDRED = Decimal(100)
@@ -62,11 +67,32 @@ class Transaction:
         for value in (self.quantity, self.price, self.fees):
             if not isinstance(value, Decimal) or not value.is_finite():
                 raise ReturnError("Transactions require finite Decimals.")
-        if self.quantity <= ZERO or self.price < ZERO or self.fees < ZERO:
-            raise ReturnError("Quantity must be positive; price and fees non-negative.")
-        if self.kind not in {"buy", "sell", "opening_balance"}:
-            raise ReturnError("Adjustments need explicit corporate-action handling before returns.")
+        if self.kind not in {"buy", "sell", "opening_balance", "adjustment"}:
+            raise ReturnError(f"Unknown trade type {self.kind!r}.")
+        if self.quantity == ZERO or (self.quantity < ZERO and self.kind != "adjustment"):
+            raise ReturnError("Quantity must be positive, or non-zero for an adjustment.")
+        if self.price < ZERO or self.fees < ZERO:
+            raise ReturnError("Price and fees must be non-negative.")
         _validate_fx(self.fx)
+
+    @property
+    def delta(self) -> Decimal:
+        """Signed change in units held."""
+        return -self.quantity if self.kind == "sell" else self.quantity
+
+
+@dataclass(frozen=True)
+class SplitEvent:
+    """`before` old units became `after` new units on `day`."""
+
+    day: date
+    before: Decimal
+    after: Decimal
+
+    def __post_init__(self) -> None:
+        for value in (self.before, self.after):
+            if not isinstance(value, Decimal) or not value.is_finite() or value <= ZERO:
+                raise ReturnError("Split ratios must be finite positive Decimals.")
 
 
 def _validate_fx(value: Decimal | None) -> None:
@@ -101,6 +127,7 @@ class Holding:
     trades: tuple[Transaction, ...] = ()
     prices: tuple[Observation, ...] = ()
     income: tuple[Payment, ...] = ()
+    splits: tuple[SplitEvent, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -125,6 +152,8 @@ class Result:
     amounts: Components
     flags: tuple[str, ...] = ()
     exchange: str | None = None
+    # Net non-cash value moved in (positive) or out by adjustments, at recorded prices.
+    adjustments: Decimal = ZERO
 
     @property
     @_financial_math
@@ -178,13 +207,85 @@ def period_range(period: str, today: date, first_trade: date | None = None) -> t
     return start, end
 
 
-def _lookup(points: tuple[Observation, ...], day: date, label: str, flags: set[str]) -> Decimal:
+def _skips_trading_day(calendar: TradingCalendar, source: date, day: date) -> bool:
+    """True when the market traded after `source` and on or before `day`."""
+    current = source + timedelta(days=1)
+    while current <= day:
+        if calendar.is_trading_day(current):
+            return True
+        current += timedelta(days=1)
+    return False
+
+
+def _lookup(
+    points: tuple[Observation, ...],
+    day: date,
+    label: str,
+    flags: set[str],
+    calendar: TradingCalendar,
+) -> Decimal:
+    """Latest observation on or before `day`.
+
+    Flagged when stored as stale, or when a trading day passed without a fresh one.
+    Using Friday's close on a weekend or a market holiday is normal and not flagged.
+    """
     point = max((p for p in points if p.day <= day), key=lambda p: p.day, default=None)
     if point is None:
         raise ReturnError(f"Missing {label} on or before {day}.")
-    if point.stale or point.day < day:
+    if point.stale or _skips_trading_day(calendar, point.day, day):
         flags.add(f"Carried forward {label} for {day} (source {point.day})")
     return point.value
+
+
+def _ordered_trades(holding: Holding, end: date) -> list[Transaction]:
+    """Split once against day-opening units, then additions before removals.
+
+    Dates have no execution times. Ties keep input order (database ID in the
+    loader), defining FIFO among same-day additions deterministically.
+    """
+    splits = {s.day: s for s in holding.splits}
+    ordered = []
+    held = ZERO
+    for day, group in groupby(
+        sorted((t for t in holding.trades if t.day <= end), key=lambda t: t.day),
+        key=lambda t: t.day,
+    ):
+        daily = list(group)
+        split = splits.get(day)
+        matching = next(
+            (
+                i
+                for i, trade in enumerate(daily)
+                if trade.kind == "adjustment"
+                and split is not None
+                and _matches_split(held, trade.quantity, split)
+            ),
+            None,
+        )
+        held += sum((t.delta for t in daily), ZERO)
+        if matching is not None:
+            ordered.append(daily.pop(matching))
+        ordered.extend(sorted(daily, key=lambda t: t.delta < ZERO))
+    return ordered
+
+
+def _opening_quantity(holding: Holding, trades: list[Transaction], start: date) -> Decimal:
+    """Units held at the opening close; every trade type, adjustments included, counts."""
+    quantity = ZERO
+    for trade in trades:
+        if trade.day > start:
+            break
+        quantity += trade.delta
+        if quantity < ZERO:
+            raise ReturnError(f"{holding.code}: sale exceeds held quantity.")
+    return quantity
+
+
+def _matches_split(held: Decimal, change: Decimal, split: SplitEvent) -> bool:
+    """Match the recorded ratio exactly, without rounding a transfer into a split."""
+    if held <= ZERO:
+        return False
+    return change * split.before == held * (split.after - split.before)
 
 
 @_financial_math
@@ -199,6 +300,8 @@ def holding_return(
         raise ReturnError("Period start must not be after its end.")
     flags: set[str] = set()
 
+    calendar = for_exchange(holding.exchange)
+
     def fx(currency: str, day: date, explicit: Decimal | None = None) -> Decimal:
         if currency == base_currency:
             if explicit is not None and explicit != Decimal(1):
@@ -207,66 +310,94 @@ def holding_return(
         value = (
             explicit
             if explicit is not None
-            else _lookup(rates.get(currency, ()), day, f"{currency}/{base_currency} FX", flags)
+            else _lookup(rates.get(currency, ()), day, f"{currency}/{base_currency} FX", flags, FX)
         )
         if value <= ZERO:
             raise ReturnError("FX must be positive.")
         return value
 
-    trades = sorted((t for t in holding.trades if t.day <= end), key=lambda t: t.day)
-    quantity = ZERO
-    for trade in trades:
-        if trade.day > start:
-            break
-        quantity += -trade.quantity if trade.kind == "sell" else trade.quantity
-        if quantity < ZERO:
-            raise ReturnError(f"{holding.code}: sale exceeds held quantity.")
-    # A parcel is [quantity, local entry price, entry FX]. Reset history at opening close.
+    def price_on(day: date) -> Decimal:
+        return _lookup(holding.prices, day, f"{holding.code} price", flags, calendar)
+
+    trades = _ordered_trades(holding, end)
+    quantity = _opening_quantity(holding, trades, start)
+    splits = {s.day: s for s in holding.splits}
+    # A parcel is [units, local cost, entry FX]. Reset history at opening close.
     parcels: list[list[Decimal]] = []
     opening = ZERO
     if quantity:
-        price = _lookup(holding.prices, start, f"{holding.code} price", flags)
+        price = price_on(start)
         rate = fx(holding.currency, start)
-        parcels.append([quantity, price, rate])
+        parcels.append([quantity, quantity * price, rate])
         opening = quantity * price * rate
-    capital = currency_gain = purchases = sales = ZERO
+    capital = currency_gain = purchases = sales = adjustments = ZERO
 
-    def realise(q: Decimal, p0: Decimal, f0: Decimal, p1: Decimal, f1: Decimal) -> None:
+    def remove(units: Decimal, p1: Decimal, f1: Decimal) -> None:
+        """Realise `units` from the oldest parcels at local price p1 and FX f1."""
         nonlocal capital, currency_gain
-        capital += q * (p1 - p0) * f0
-        currency_gain += q * p1 * (f1 - f0)
+        if units > quantity:
+            raise ReturnError(f"{holding.code}: sale exceeds held quantity.")
+        while units:
+            parcel = parcels[0]
+            taken = min(units, parcel[0])
+            cost = parcel[1] if taken == parcel[0] else parcel[1] * taken / parcel[0]
+            capital += (taken * p1 - cost) * parcel[2]
+            currency_gain += taken * p1 * (f1 - parcel[2])
+            parcel[0] -= taken
+            parcel[1] -= cost
+            units -= taken
+            if not parcel[0]:
+                parcels.pop(0)
 
+    seen_days: set[date] = set()
     for trade in trades:
         if trade.day <= start:
+            continue
+        split = splits.get(trade.day)
+        first_on_day = trade.day not in seen_days
+        seen_days.add(trade.day)
+        if (
+            trade.kind == "adjustment"
+            and split is not None
+            and first_on_day
+            and _matches_split(quantity, trade.quantity, split)
+        ):
+            # Preserve local cost and entry FX. A zero-fee split needs no FX quote.
+            if trade.fees:
+                fee = trade.fees * fx(holding.currency, trade.day, trade.fx)
+                capital -= fee
+                purchases += fee
+            new = quantity + trade.quantity
+            for parcel in parcels[:-1]:
+                parcel[0] = parcel[0] * new / quantity
+            parcels[-1][0] = new - sum((p[0] for p in parcels[:-1]), ZERO)
+            quantity = new
             continue
         rate = fx(holding.currency, trade.day, trade.fx)
         fee = trade.fees * rate
         capital -= fee
-        if trade.kind != "sell":
-            purchases += trade.quantity * trade.price * rate + fee
-            parcels.append([trade.quantity, trade.price, rate])
-            quantity += trade.quantity
-        else:
-            if trade.quantity > quantity:
-                raise ReturnError(f"{holding.code}: sale exceeds held quantity.")
+        if trade.kind == "sell":
+            remove(trade.quantity, trade.price, rate)
             sales += trade.quantity * trade.price * rate - fee
-            remaining = trade.quantity
-            while remaining:
-                parcel = parcels[0]
-                taken = min(remaining, parcel[0])
-                realise(taken, parcel[1], parcel[2], trade.price, rate)
-                parcel[0] -= taken
-                remaining -= taken
-                if not parcel[0]:
-                    parcels.pop(0)
-            quantity -= trade.quantity
+        elif trade.kind != "adjustment":
+            purchases += trade.quantity * trade.price * rate + fee
+            parcels.append([trade.quantity, trade.quantity * trade.price, rate])
+        else:
+            # Adjustment fees are cash paid, so they count as an outlay.
+            purchases += fee
+            if trade.quantity > ZERO:
+                adjustments += trade.quantity * trade.price * rate
+                parcels.append([trade.quantity, trade.quantity * trade.price, rate])
+            else:
+                remove(-trade.quantity, trade.price, rate)
+                adjustments += trade.quantity * trade.price * rate
+        quantity += trade.delta
     closing = ZERO
     if quantity:
-        price = _lookup(holding.prices, end, f"{holding.code} price", flags)
+        price = price_on(end)
         rate = fx(holding.currency, end)
         closing = quantity * price * rate
-        for q, p0, f0 in parcels:
-            realise(q, p0, f0, price, rate)
+        remove(quantity, price, rate)
     dividends = sum(
         (p.amount * fx(p.currency, p.day, p.fx) for p in holding.income if start < p.day <= end),
         ZERO,
@@ -280,6 +411,7 @@ def holding_return(
         Components(capital, dividends, currency_gain),
         tuple(sorted(flags)),
         holding.exchange,
+        adjustments,
     )
 
 
@@ -297,6 +429,16 @@ def subtotal(label: str, rows: tuple[Result, ...]) -> Result:
             sum((r.amounts.currency for r in rows), ZERO),
         ),
         tuple(sorted({flag for r in rows for flag in r.flags})),
+        adjustments=sum((r.adjustments for r in rows), ZERO),
+    )
+
+
+def _active(holding: Holding, start: date, end: date) -> bool:
+    """Held at the opening close, traded in the period, or paid income in it."""
+    return (
+        any(start < t.day <= end for t in holding.trades)
+        or any(start < p.day <= end for p in holding.income)
+        or _opening_quantity(holding, _ordered_trades(holding, start), start) != ZERO
     )
 
 
@@ -310,7 +452,10 @@ def calculate_returns(
 ) -> Report:
     if start > end:
         raise ReturnError("Period start must not be after its end.")
-    ordered = sorted(holdings, key=lambda h: (h.exchange, h.code))
+    # Holdings sold before the period have nothing to report, so they are left out.
+    ordered = sorted(
+        (h for h in holdings if _active(h, start, end)), key=lambda h: (h.exchange, h.code)
+    )
     rows = tuple(holding_return(h, start, end, rates, base_currency) for h in ordered)
     markets = tuple(
         subtotal(

@@ -1,4 +1,4 @@
-"""Pure period performance, with exact Decimal arithmetic and no database access.
+"""Exact Decimal period performance and compatible lifetime ledger helpers.
 
 Each opening or purchased FIFO parcel has quantity q, local entry price p0 and
 entry FX f0 (base currency per local unit). On sale or closing valuation p1, f1:
@@ -19,6 +19,11 @@ from functools import wraps
 from itertools import groupby
 from typing import ParamSpec, TypeVar
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from portfolio_digest.importing import ImportFailure
+from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.calendars import FX, TradingCalendar, for_exchange
 
 ZERO = Decimal(0)
@@ -88,6 +93,7 @@ class SplitEvent:
     day: date
     before: Decimal
     after: Decimal
+    automatic: bool = False
 
     def __post_init__(self) -> None:
         for value in (self.before, self.after):
@@ -108,6 +114,9 @@ class Payment:
     amount: Decimal
     currency: str
     fx: Decimal | None = None
+    gross: Decimal | None = None
+    withholding_tax: Decimal = ZERO
+    imputation_credits: Decimal = ZERO
 
     def __post_init__(self) -> None:
         if (
@@ -116,6 +125,11 @@ class Payment:
             or self.amount < ZERO
         ):
             raise ReturnError("Income must be a finite non-negative Decimal.")
+        for value in (self.gross, self.withholding_tax, self.imputation_credits):
+            if value is not None and (
+                not isinstance(value, Decimal) or not value.is_finite() or value < ZERO
+            ):
+                raise ReturnError("Income tax fields must be finite non-negative Decimals.")
         _validate_fx(self.fx)
 
 
@@ -135,11 +149,12 @@ class Components:
     capital: Decimal = ZERO
     dividends: Decimal = ZERO
     currency: Decimal = ZERO
+    imputation: Decimal = ZERO
 
     @property
     @_financial_math
     def total(self) -> Decimal:
-        return self.capital + self.dividends + self.currency
+        return self.capital + self.dividends + self.currency + self.imputation
 
 
 @dataclass(frozen=True)
@@ -154,6 +169,9 @@ class Result:
     exchange: str | None = None
     # Net non-cash value moved in (positive) or out by adjustments, at recorded prices.
     adjustments: Decimal = ZERO
+    gross_dividends: Decimal = ZERO
+    withholding_tax: Decimal = ZERO
+    imputation_gross_up: Decimal = ZERO
 
     @property
     @_financial_math
@@ -170,6 +188,7 @@ class Result:
             self.amounts.capital * factor,
             self.amounts.dividends * factor,
             self.amounts.currency * factor,
+            self.amounts.imputation * factor,
         )
 
 
@@ -246,12 +265,24 @@ def _ordered_trades(holding: Holding, end: date) -> list[Transaction]:
     splits = {s.day: s for s in holding.splits}
     ordered = []
     held = ZERO
-    for day, group in groupby(
-        sorted((t for t in holding.trades if t.day <= end), key=lambda t: t.day),
-        key=lambda t: t.day,
-    ):
-        daily = list(group)
+    daily_trades = {
+        day: list(group)
+        for day, group in groupby(
+            sorted((t for t in holding.trades if t.day <= end), key=lambda t: t.day),
+            key=lambda t: t.day,
+        )
+    }
+    days = set(daily_trades)
+    days.update(s.day for s in holding.splits if s.automatic and s.day <= end)
+    for day in sorted(days):
+        daily = daily_trades.get(day, [])
         split = splits.get(day)
+        if split is not None and split.automatic and held:
+            change = held * (split.after - split.before) / split.before
+            if not any(
+                t.kind == "adjustment" and _matches_split(held, t.quantity, split) for t in daily
+            ):
+                daily.insert(0, Transaction(day, "adjustment", change, ZERO))
         matching = next(
             (
                 i
@@ -295,6 +326,8 @@ def holding_return(
     end: date,
     rates: dict[str, tuple[Observation, ...]],
     base_currency: str = "NZD",
+    *,
+    gross_up: bool = False,
 ) -> Result:
     if start > end:
         raise ReturnError("Period start must not be after its end.")
@@ -317,7 +350,12 @@ def holding_return(
         return value
 
     def price_on(day: date) -> Decimal:
-        return _lookup(holding.prices, day, f"{holding.code} price", flags, calendar)
+        close = _lookup(holding.prices, day, f"{holding.code} price", flags, calendar)
+        source = max(p.day for p in holding.prices if p.day <= day)
+        for split in holding.splits:
+            if split.automatic and source < split.day <= day:
+                close *= split.before / split.after
+        return close
 
     trades = _ordered_trades(holding, end)
     quantity = _opening_quantity(holding, trades, start)
@@ -398,20 +436,28 @@ def holding_return(
         rate = fx(holding.currency, end)
         closing = quantity * price * rate
         remove(quantity, price, rate)
-    dividends = sum(
-        (p.amount * fx(p.currency, p.day, p.fx) for p in holding.income if start < p.day <= end),
-        ZERO,
-    )
+    dividends = gross = tax = credits = ZERO
+    for payment in holding.income:
+        if start < payment.day <= end:
+            rate = fx(payment.currency, payment.day, payment.fx)
+            dividends += payment.amount * rate
+            gross += (payment.gross if payment.gross is not None else payment.amount) * rate
+            tax += payment.withholding_tax * rate
+            credits += payment.imputation_credits * rate
+
     return Result(
         f"{holding.exchange}:{holding.code}",
         opening,
         closing,
         purchases,
         sales,
-        Components(capital, dividends, currency_gain),
+        Components(capital, dividends, currency_gain, credits if gross_up else ZERO),
         tuple(sorted(flags)),
         holding.exchange,
         adjustments,
+        gross,
+        tax,
+        credits,
     )
 
 
@@ -427,9 +473,13 @@ def subtotal(label: str, rows: tuple[Result, ...]) -> Result:
             sum((r.amounts.capital for r in rows), ZERO),
             sum((r.amounts.dividends for r in rows), ZERO),
             sum((r.amounts.currency for r in rows), ZERO),
+            sum((r.amounts.imputation for r in rows), ZERO),
         ),
         tuple(sorted({flag for r in rows for flag in r.flags})),
         adjustments=sum((r.adjustments for r in rows), ZERO),
+        gross_dividends=sum((r.gross_dividends for r in rows), ZERO),
+        withholding_tax=sum((r.withholding_tax for r in rows), ZERO),
+        imputation_gross_up=sum((r.imputation_gross_up for r in rows), ZERO),
     )
 
 
@@ -449,6 +499,8 @@ def calculate_returns(
     end: date,
     rates: dict[str, tuple[Observation, ...]],
     base_currency: str = "NZD",
+    *,
+    gross_up: bool = False,
 ) -> Report:
     if start > end:
         raise ReturnError("Period start must not be after its end.")
@@ -456,7 +508,9 @@ def calculate_returns(
     ordered = sorted(
         (h for h in holdings if _active(h, start, end)), key=lambda h: (h.exchange, h.code)
     )
-    rows = tuple(holding_return(h, start, end, rates, base_currency) for h in ordered)
+    rows = tuple(
+        holding_return(h, start, end, rates, base_currency, gross_up=gross_up) for h in ordered
+    )
     markets = tuple(
         subtotal(
             market, tuple(r for h, r in zip(ordered, rows, strict=True) if h.exchange == market)
@@ -464,3 +518,259 @@ def calculate_returns(
         for market in sorted({h.exchange for h in ordered})
     )
     return Report(start, end, base_currency, rows, markets, subtotal("Portfolio", rows))
+
+
+@dataclass
+class Position:
+    units: Decimal = ZERO
+    cost_base: Decimal = ZERO
+    purchases: Decimal = ZERO
+    proceeds: Decimal = ZERO
+
+
+def _ledger_events(trades, splits, end):
+    split_rows = list(splits)
+    transactions = []
+    originals = {}
+    for trade in trades:
+        transaction = Transaction(
+            trade.trade_date, trade.trade_type, trade.quantity, trade.price, trade.fees
+        )
+        transactions.append(transaction)
+        originals[id(transaction)] = trade
+    holding = Holding(
+        "",
+        "",
+        "",
+        tuple(transactions),
+        splits=tuple(
+            SplitEvent(
+                s.split_date,
+                s.shares_before,
+                s.shares_after,
+                getattr(s, "source", "registry") == "registry",
+            )
+            for s in split_rows
+        ),
+    )
+    return _ordered_trades(holding, end), {s.day: s for s in holding.splits}, originals
+
+
+@_financial_math
+def units_at(trades, splits, end: date) -> Decimal:
+    """Quantity ledger shared by reconciliation, fetching and dividend suggestions."""
+    ordered, _, _ = _ledger_events(trades, splits, end)
+    return sum((trade.delta for trade in ordered), ZERO)
+
+
+@_financial_math
+def position(trades, splits, end: date, *, before_trades: bool = False) -> Position:
+    """Replay dated trades and registry actions without counting splits twice."""
+    trades = list(trades)
+    if before_trades:
+        trades = [t for t in trades if t.trade_date < end]
+    ordered, split_days, originals = _ledger_events(trades, splits, end)
+    result = Position()
+    seen_days = set()
+    for row in ordered:
+        split = split_days.get(row.day)
+        first = row.day not in seen_days
+        seen_days.add(row.day)
+        if (
+            first
+            and row.kind == "adjustment"
+            and split is not None
+            and _matches_split(result.units, row.quantity, split)
+        ):
+            result.units += row.quantity
+            result.cost_base += row.fees
+            result.purchases += row.fees
+            continue
+        original = originals.get(id(row))
+        amount = (
+            original.consideration
+            if original is not None and original.consideration is not None
+            else row.quantity * row.price
+        )
+        if row.kind == "sell" or row.quantity < 0:
+            removed = abs(row.quantity)
+            if removed > result.units:
+                raise ImportFailure(
+                    "Units removed exceed holdings; check trades and corporate actions."
+                )
+            result.cost_base -= result.cost_base * removed / result.units
+            result.units -= removed
+            result.proceeds += amount - row.fees if row.kind == "sell" else ZERO
+        else:
+            result.units += row.quantity
+            result.cost_base += amount + row.fees
+            result.purchases += amount + row.fees
+    return result
+
+
+def instrument_position(
+    session: Session,
+    portfolio_id: int,
+    instrument_id: int,
+    end: date,
+    *,
+    before_trades: bool = False,
+) -> Position:
+    return position(
+        session.scalars(
+            select(Trade)
+            .where(Trade.portfolio_id == portfolio_id, Trade.instrument_id == instrument_id)
+            .order_by(Trade.trade_date, Trade.id)
+        ),
+        session.scalars(select(Split).where(Split.instrument_id == instrument_id)),
+        end,
+        before_trades=before_trades,
+    )
+
+
+def fx(session, currency, base, day, broker_rate=None):
+    if currency == base:
+        return Decimal(1)
+    if broker_rate is not None:
+        return broker_rate
+    rate = session.scalar(
+        select(FxRate.rate)
+        .where(
+            FxRate.currency == currency,
+            FxRate.base_currency == base,
+            FxRate.rate_date <= day,
+        )
+        .order_by(FxRate.rate_date.desc())
+        .limit(1)
+    )
+    if rate is None:
+        raise ImportFailure(f"Missing {currency}/{base} exchange rate on or before {day}.")
+    return rate
+
+
+@dataclass(frozen=True)
+class ReturnRow:
+    instrument: str
+    currency: str
+    units: Decimal
+    cost_base: Decimal
+    market_value: Decimal
+    dividends: Decimal
+    gross_dividends: Decimal
+    withholding_tax: Decimal
+    imputation_gross_up: Decimal
+    total_return: Decimal
+
+
+@_financial_math
+def report(
+    session: Session, portfolio: Portfolio, end: date, *, gross_up: bool = False
+) -> list[ReturnRow]:
+    """Base-currency lifetime gain: value + sale proceeds + income - purchases.
+
+    No percentage is implied where the timing of contributions is unknown. Cost base
+    is a weighted-average accounting cost in base currency, not a tax calculation.
+    """
+    ids = set(
+        session.scalars(
+            select(Trade.instrument_id).where(
+                Trade.portfolio_id == portfolio.id, Trade.trade_date <= end
+            )
+        )
+    )
+    ids.update(
+        session.scalars(
+            select(Income.instrument_id).where(
+                Income.portfolio_id == portfolio.id, Income.paid_date <= end
+            )
+        )
+    )
+    rows = []
+    for instrument_id in sorted(ids):
+        instrument = session.get(Instrument, instrument_id)
+        trades = list(
+            session.scalars(
+                select(Trade)
+                .where(
+                    Trade.portfolio_id == portfolio.id,
+                    Trade.instrument_id == instrument_id,
+                    Trade.trade_date <= end,
+                )
+                .order_by(Trade.trade_date, Trade.id)
+            )
+        )
+        # Convert cash flows at their own dates before replaying the cost ledger.
+        from types import SimpleNamespace
+
+        converted = []
+        for trade in trades:
+            rate = fx(
+                session, trade.currency, portfolio.base_currency, trade.trade_date, trade.fx_rate
+            )
+            converted.append(
+                SimpleNamespace(
+                    trade_date=trade.trade_date,
+                    trade_type=trade.trade_type,
+                    quantity=trade.quantity,
+                    price=trade.price * rate,
+                    fees=trade.fees * rate,
+                    consideration=trade.consideration * rate
+                    if trade.consideration is not None
+                    else None,
+                )
+            )
+        splits = list(session.scalars(select(Split).where(Split.instrument_id == instrument_id)))
+        holding = position(converted, splits, end)
+        value = ZERO
+        if holding.units:
+            latest = session.scalar(
+                select(Price)
+                .where(Price.instrument_id == instrument_id, Price.price_date <= end)
+                .order_by(Price.price_date.desc())
+                .limit(1)
+            )
+            if latest is None:
+                raise ImportFailure(f"Missing price for {instrument.code} on or before {end}.")
+            close = latest.close
+            for split in splits:
+                if split.source == "registry" and latest.price_date < split.split_date <= end:
+                    close *= split.shares_before / split.shares_after
+            value = (
+                holding.units
+                * close
+                * fx(session, instrument.currency, portfolio.base_currency, end)
+            )
+        net = gross = tax = credits = ZERO
+        for income in session.scalars(
+            select(Income).where(
+                Income.portfolio_id == portfolio.id,
+                Income.instrument_id == instrument_id,
+                Income.paid_date <= end,
+            )
+        ):
+            rate = fx(
+                session, income.currency, portfolio.base_currency, income.paid_date, income.fx_rate
+            )
+            net += income.net_amount * rate
+            gross += income.gross_amount * rate
+            tax += income.withholding_tax * rate
+            credits += income.imputation_credits * rate
+        rows.append(
+            ReturnRow(
+                f"{instrument.exchange}:{instrument.code}",
+                portfolio.base_currency,
+                holding.units,
+                holding.cost_base,
+                value,
+                net,
+                gross,
+                tax,
+                credits,
+                value
+                + holding.proceeds
+                + net
+                - holding.purchases
+                + (credits if gross_up else ZERO),
+            )
+        )
+    return rows

@@ -119,6 +119,33 @@ class YahooSource:
                 f"Yahoo sent price data for {symbol} in an unexpected shape."
             ) from None
 
+    def dividends(self, symbol: str, start: date, end: date, currency: str) -> dict[date, Decimal]:
+        data = self.fetcher.get(
+            YAHOO_CHART_URL.format(symbol=quote(symbol, safe="")),
+            {
+                "period1": _unix(start - timedelta(days=2)),
+                "period2": _unix(end + timedelta(days=2)),
+                "interval": "1d",
+                "events": "div",
+            },
+        )
+        try:
+            chart = data["chart"]["result"][0]
+            if chart["meta"]["currency"] != currency:
+                raise SourceError("Yahoo dividend currency does not match the instrument.")
+            tz = _zone(chart["meta"].get("exchangeTimezoneName"))
+            events = {}
+            for event in (chart.get("events", {}).get("dividends", {}) or {}).values():
+                day = datetime.fromtimestamp(event["date"], tz).date()
+                amount = Decimal(event["amount"])
+                if not _fits_numeric(amount, 6, positive=True):
+                    raise SourceError("Yahoo sent an impossible dividend amount.")
+                if start <= day <= end:
+                    events[day] = amount
+            return events
+        except (KeyError, IndexError, TypeError, ValueError, ArithmeticError, OSError):
+            raise SourceError("Yahoo sent dividend data in an unexpected shape.") from None
+
     def rates(self, currency: str, base: str, start: date, end: date) -> dict[date, Decimal]:
         # USDNZD=X is NZ$ per US$, which is exactly how rates are stored.
         rates = self.history(f"{currency}{base}=X", start, end, currency=base).closes

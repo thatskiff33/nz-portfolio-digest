@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.db import make_engine
@@ -19,7 +19,7 @@ from portfolio_digest.manual import add_trade, prepare_trade
 from portfolio_digest.models import ImportRun, Income, Instrument, Portfolio, Price, Trade
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
 from portfolio_digest.web.security import COOKIE, LIFETIME, Security
-from portfolio_digest.web.viewmodel import Valuations, period_dates
+from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
 ROOT = Path(__file__).parent
 
@@ -149,15 +149,17 @@ def create_app(
         with Session(engine) as session:
             p = portfolio(session, pid)
             today = datetime.now(ZoneInfo(timezone)).date()
-            values = Valuations(session, p, today)
-            first = values.trades[0].trade_date if values.trades else today
+            first = (
+                session.scalar(select(func.min(Trade.trade_date)).where(Trade.portfolio_id == pid))
+                or today
+            )
             try:
                 begin, finish = period_dates(period, today, first, start, end)
             except ValueError:
                 raise HTTPException(
                     400, "Choose a valid period and dates ending no later than today."
                 ) from None
-            snapshot = values.at(finish)
+            values = Dashboard(session, p, begin, finish)
             if sort not in {"code", "name", "quantity", "price", "value"} or direction not in {
                 "asc",
                 "desc",
@@ -172,14 +174,11 @@ def create_app(
                 )
                 return value is None, value if value is not None else 0
 
-            rows = sorted(snapshot.holdings, key=key, reverse=direction == "desc")
+            rows = sorted(values.holdings, key=key, reverse=direction == "desc")
             markets = {}
             for row in rows:
                 markets.setdefault(row.instrument.exchange, []).append(row)
-            subtotals = {
-                market: None if any(r.value is None for r in group) else sum(r.value for r in group)
-                for market, group in markets.items()
-            }
+            subtotals = {r.label: r for r in values.report.markets} if values.report else {}
             return render(
                 request,
                 session,
@@ -188,13 +187,13 @@ def create_app(
                 period=period,
                 start=begin,
                 end=finish,
-                snapshot=snapshot,
+                dashboard=values,
+                report=values.report,
                 markets=dict(sorted(markets.items())),
                 subtotals=subtotals,
                 series=values.series(begin, finish),
                 sort=sort,
                 direction=direction,
-                opening=values.at(begin).value,
             )
 
     @app.get("/p/{pid}/holding/{iid}", response_class=HTMLResponse)

@@ -20,37 +20,38 @@ from portfolio_digest.models import (
     Price,
     Trade,
 )
+from portfolio_digest.returns import ReturnError
+from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.web.app import create_app
 from portfolio_digest.web.binding import private_host
-from portfolio_digest.web.viewmodel import Valuations, period_dates
+from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
 PASSWORD = "fictional-test-password-only"  # noqa: S105
 DAY = date(2026, 10, 20)
 
 
-def sample_engine():
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
-    # Production constraints use PostgreSQL regex operators. Only this disposable schema
-    # removes CHECKs; page tests exercise real SQLAlchemy persistence, not mocked queries.
-    metadata = MetaData()
-    for table in Base.metadata.sorted_tables:
-        copy = table.to_metadata(metadata)
-        for constraint in list(copy.constraints):
-            if isinstance(constraint, CheckConstraint):
-                copy.constraints.remove(constraint)
-    metadata.create_all(engine)
+def sample_engine(engine=None):
+    if engine is None:
+        engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+        )
+        # Only the portable schema removes PostgreSQL-specific CHECK expressions.
+        metadata = MetaData()
+        for table in Base.metadata.sorted_tables:
+            copy = table.to_metadata(metadata)
+            for constraint in list(copy.constraints):
+                if isinstance(constraint, CheckConstraint):
+                    copy.constraints.remove(constraint)
+        metadata.create_all(engine)
     with Session(engine) as session:
-        p = Portfolio(id=1, name="Kōwhai Fund")
-        q = Portfolio(id=2, name="Harbour Fund")
-        nz = Instrument(id=1, exchange="NZX", code="KOW", name="Kōwhai Industries", currency="NZD")
-        us = Instrument(id=2, exchange="NYSE", code="FERN", name="Fern Labs", currency="USD")
+        p = Portfolio(name="Kōwhai Fund")
+        q = Portfolio(name="Harbour Fund")
+        nz = Instrument(exchange="NZX", code="KOW", name="Kōwhai Industries", currency="NZD")
+        us = Instrument(exchange="NYSE", code="FERN", name="Fern Labs", currency="USD")
         session.add_all([p, q, nz, us])
         session.flush()
         session.add(
             ImportRun(
-                id=1,
                 portfolio_id=1,
                 source="test",
                 status="succeeded",
@@ -62,7 +63,6 @@ def sample_engine():
         session.add_all(
             [
                 Trade(
-                    id=1,
                     portfolio_id=1,
                     instrument_id=1,
                     trade_date=DAY - timedelta(days=10),
@@ -76,16 +76,35 @@ def sample_engine():
                     import_run_id=1,
                 ),
                 Trade(
-                    id=2,
                     portfolio_id=1,
                     instrument_id=2,
                     trade_date=DAY - timedelta(days=5),
                     trade_type="buy",
                     quantity=Decimal("10"),
                     price=Decimal("20"),
+                    fx_rate=Decimal("1.5"),
                     currency="USD",
                     source="test",
                     external_ref="fake-2",
+                ),
+                Price(
+                    instrument_id=1,
+                    price_date=DAY - timedelta(days=10),
+                    close=Decimal("4"),
+                    source="test",
+                ),
+                Price(
+                    instrument_id=2,
+                    price_date=DAY - timedelta(days=5),
+                    close=Decimal("20"),
+                    source="test",
+                ),
+                FxRate(
+                    rate_date=DAY - timedelta(days=5),
+                    currency="USD",
+                    base_currency="NZD",
+                    rate=Decimal("1.5"),
+                    source="test",
                 ),
                 Price(instrument_id=1, price_date=DAY, close=Decimal("5.25"), source="test"),
                 Price(instrument_id=2, price_date=DAY, close=Decimal("22.5"), source="test"),
@@ -113,9 +132,11 @@ def sample_engine():
     return engine
 
 
-@pytest.fixture
-def engine_web():
-    engine = sample_engine()
+@pytest.fixture(params=["sqlite", "postgres"])
+def engine_web(request):
+    engine = sample_engine(
+        request.getfixturevalue("engine") if request.param == "postgres" else None
+    )
     yield engine
     engine.dispose()
 
@@ -163,36 +184,90 @@ def test_read_pages(client, path, text):
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_decimal_valuation_and_missing_data(engine_web):
+@pytest.mark.parametrize(
+    "period", ["week", "month", "ytd", "all", "2026-10-15:2026-10-20", "2026-10-20:2026-10-20"]
+)
+def test_dashboard_equals_returns_engine(engine_web, period):
     with Session(engine_web) as session:
         p = session.get(Portfolio, 1)
-        model = Valuations(session, p, DAY)
-        assert model.at(DAY).value == Decimal("100.125") * Decimal("5.25") + Decimal(
-            "10"
-        ) * Decimal("22.5") * Decimal("1.6")
-        assert model.at(DAY - timedelta(days=1)).value is None
-        assert model.at(DAY - timedelta(days=11)).value == 0
-        assert model.series(DAY, DAY) == [(DAY, Decimal("885.65625"))]
-        # A sale reduces units; adjustments are the only source of split units.
+        expected = load_returns(session, p.name, period, DAY)
+        dashboard = Dashboard(session, p, expected.start, expected.end)
+        assert dashboard.report == expected
+        assert dashboard.error is None
+        assert {r.result.label: r.value for r in dashboard.holdings} == {
+            r.label: r.closing for r in expected.holdings
+        }
+        for day, value in dashboard.series(expected.start, expected.end):
+            try:
+                point = load_returns(session, p.name, f"{day}:{day}", DAY)
+            except ReturnError:
+                assert value is None
+            else:
+                assert value == point.total.closing
+        with TestClient(create_app(engine_web, PASSWORD)) as client:
+            response = client.get(f"/p/1?period=custom&start={expected.start}&end={expected.end}")
+        assert response.status_code == 200
+        context = response.context
+        assert context["report"] == expected
+        assert context["subtotals"] == {r.label: r for r in expected.markets}
+        for result in (*expected.holdings, *expected.markets, expected.total):
+            for field in ("capital", "dividends", "currency", "total"):
+                assert f"{getattr(result.amounts, field):,.2f}" in response.text
+                if result.percentages:
+                    assert f"{getattr(result.percentages, field):,.2f}%" in response.text
+        assert "Returns engine has not landed" not in response.text
+
+
+def test_missing_inputs_are_explained(engine_web):
+    with Session(engine_web) as session:
+        session.delete(session.get(FxRate, (DAY, "USD", "NZD")))
+        session.delete(session.get(FxRate, (DAY - timedelta(days=5), "USD", "NZD")))
+        session.commit()
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        response = client.get(f"/p/1?period=custom&start={DAY}&end={DAY}")
+    assert response.status_code == 200
+    assert response.context["report"] is None
+    assert "Missing USD/NZD FX" in response.text
+    assert "Figures unavailable" in response.text
+
+
+def test_loader_error_does_not_fabricate_zero_chart(engine_web):
+    with Session(engine_web) as session:
+        session.get(Trade, 2).currency = "NZD"
+        session.commit()
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        response = client.get(f"/p/1?period=custom&start={DAY}&end={DAY}")
+    assert response.status_code == 200
+    assert "Trade currency differs" in response.text
+    assert response.context["report"] is None
+    assert response.context["series"] == [(DAY, None)]
+
+
+def test_sold_holding_keeps_realised_returns(engine_web):
+    with Session(engine_web) as session:
         session.add(
             Trade(
                 portfolio_id=1,
-                instrument_id=1,
+                instrument_id=2,
                 trade_date=DAY,
                 trade_type="sell",
                 quantity=Decimal("10"),
-                price=Decimal("5"),
-                currency="NZD",
-                source="manual",
-                external_ref="fake-sell",
+                price=Decimal("22.5"),
+                currency="USD",
+                fx_rate=Decimal("1.6"),
+                fees=Decimal("1"),
+                source="test",
+                external_ref="fake-sale",
             )
         )
-        session.flush()
-        assert Valuations(session, p, DAY).at(DAY).value == Decimal("833.15625")
-        fx = session.get(FxRate, (DAY, "USD", "NZD"))
-        session.delete(fx)
-        session.flush()
-        assert Valuations(session, p, DAY).at(DAY).value is None
+        session.commit()
+        expected = load_returns(session, "Kōwhai Fund", "all", DAY)
+        dashboard = Dashboard(session, session.get(Portfolio, 1), expected.start, expected.end)
+        assert dashboard.report == expected
+        sold = next(row for row in dashboard.holdings if row.instrument.code == "FERN")
+        assert sold.quantity == Decimal(0)
+        assert sold.value == Decimal(0)
+        assert sold.result.amounts.total == Decimal("58.4")
 
 
 @pytest.mark.parametrize("path", ["/p/1/trade", "/p/1/imports/1/undo", "/p/1/reconcile"])
@@ -307,9 +382,9 @@ def test_invalid_trade_and_snapshot(client, engine_web):
 
 def test_periods():
     assert period_dates("week", DAY, DAY)[0] == DAY - timedelta(days=7)
-    assert period_dates("month", DAY, DAY)[0] == DAY - timedelta(days=30)
-    assert period_dates("ytd", DAY, DAY)[0] == date(2026, 1, 1)
-    assert period_dates("all", DAY, date(2020, 1, 1))[0] == date(2020, 1, 1)
+    assert period_dates("month", DAY, DAY)[0] == date(2026, 9, 20)
+    assert period_dates("ytd", DAY, DAY)[0] == date(2025, 12, 31)
+    assert period_dates("all", DAY, date(2020, 1, 1))[0] == date(2019, 12, 31)
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "100.100.20.30", "fd7a:115c:a1e0::1234"])

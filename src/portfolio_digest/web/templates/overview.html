@@ -1,3 +1,10 @@
+{% macro returns(result) %}
+    {% for field in ['capital', 'dividends', 'currency', 'total'] %}
+        <td>{{ (result.amounts|attr(field) if result else none)|money }}
+            <small>{{ (result.percentages|attr(field))|money ~ '%' if result and result.percentages else 'n/a' }}</small>
+        </td>
+    {% endfor %}
+{% endmacro %}
 {% extends "base.html" %}
 {% block title %}
     {{ portfolio.name }} · Portfolio digest
@@ -30,22 +37,26 @@
     <div class="stats">
         <section class="stat primary">
             <p>Portfolio value</p>
-            <strong>{{ snapshot.value|money }}</strong>
-            <span>{{ portfolio.base_currency }} · {{ snapshot.holdings|length }} holdings</span>
+            <strong>{{ (report.total.closing if report else none)|money }}</strong>
+            <span>{{ portfolio.base_currency }} · {{ dashboard.holdings|length }} holdings</span>
         </section>
         <section class="stat">
             <p>Opening value</p>
-            <strong>{{ opening|money }}</strong>
+            <strong>{{ (report.total.opening if report else none)|money }}</strong>
             <span>{{ start.strftime("%d %b %Y") }}</span>
         </section>
         <section class="stat">
             <p>Investment return</p>
-            <strong class="pending">Unavailable</strong>
-            <span>Returns engine has not landed yet</span>
+            <strong>{{ (report.total.amounts.total if report else none)|money }}</strong>
+            <span>{{ (report.total.percentages.total|money ~ '%') if report and report.total.percentages else 'n/a' }} · Selected period</span>
         </section>
     </div>
-    {% if snapshot.holdings|selectattr("stale")|list %}
-        <p class="notice">Some prices or FX rates are carried forward or missing. Check quote dates below. Missing data makes the affected totals unavailable.</p>
+    {% if dashboard.error %}
+        <p class="notice">Figures unavailable: {{ dashboard.error }}</p>
+    {% elif report.total.flags %}
+        <div class="notice"><p>Some observations are stale or carried forward:</p>
+            <ul>{% for flag in report.total.flags %}<li>{{ flag }}</li>{% endfor %}</ul>
+        </div>
     {% endif %}
     <section class="panel">
         <div class="section-heading">
@@ -99,7 +110,7 @@
                             <th scope="col">Price</th>
                             <th scope="col">Value</th>
                             <th scope="col">Capital gain</th>
-                            <th scope="col">Income return</th>
+                            <th scope="col">Dividend return</th>
                             <th scope="col">Currency gain</th>
                             <th scope="col">Total return</th>
                         </tr>
@@ -115,30 +126,34 @@
                                 <td>{{ row.quantity|quantity }}</td>
                                 <td>
                                     {{ row.price|money }} <small>{{ row.quote_date or 'No quote' }}
-                                    {% if row.stale %}
+                                    {% if row.result and row.result.flags %}
                                         · Check data
                                     {% endif %}
                                     </small>
                                 </td>
                                 <td>{{ row.value|money }}</td>
-                                {% for n in range(4) %}
-                                    <td class="muted">Unavailable</td>
-                                {% endfor %}
+                                {{ returns(row.result) }}
                             </tr>
                         {% endfor %}
                     </tbody>
                     <tfoot>
                         <tr>
                             <th scope="row" colspan="3">{{ market }} subtotal</th>
-                            <td>{{ subtotals[market]|money }}</td>
-                            <td colspan="4"></td>
+                            <td>{{ (subtotals[market].closing if market in subtotals else none)|money }}</td>
+                            {{ returns(subtotals.get(market)) }}
                         </tr>
                     </tfoot>
                 </table>
             </div>
         {% else %}
-            <p>No holdings for this period. Import your trades or sign in to add one.</p>
+            <p>{{ 'Holdings performance cannot be displayed until the data issue is resolved.' if dashboard.error else 'No holdings for this period. Import your trades or sign in to add one.' }}</p>
         {% endfor %}
-        <p class="footnote">Capital, income, currency and total returns will be available when the returns engine (#4) lands. They are not inferred from changes in value.</p>
+        <div class="table-scroll" role="region" aria-label="Portfolio returns" tabindex="0">
+        <table><thead><tr><th scope="col">Total</th><th scope="col">Capital gain</th>
+            <th scope="col">Dividend return</th><th scope="col">Currency gain</th><th scope="col">Total return</th>
+        </tr></thead><tbody><tr>
+            <th scope="row">Portfolio total</th>
+            {{ returns(report.total if report else none) }}
+        </tr></tbody></table></div>
     </section>
 {% endblock %}

@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from http.client import HTTPException
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import SecretStr
@@ -129,8 +129,14 @@ def push_success(url: SecretStr) -> None:
             raise AkahuError("UPTIME_KUMA_PUSH_URL must be an HTTP(S) URL.")
         if parts.fragment:
             raise AkahuError("UPTIME_KUMA_PUSH_URL must not contain a fragment.")
-        separator = "&" if parts.query else "?"
-        with build_opener(NoRedirect()).open(raw + separator + "status=up", timeout=15) as response:
+        query = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key != "status"
+        ]
+        query.append(("status", "up"))
+        push_url = urlunsplit(parts._replace(query=urlencode(query)))
+        with build_opener(NoRedirect()).open(push_url, timeout=15) as response:
             payload = json.loads(response.read())
         if not isinstance(payload, dict) or payload.get("ok") is not True:
             raise AkahuError("Kuma success push was not accepted.")

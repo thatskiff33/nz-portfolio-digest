@@ -392,11 +392,12 @@ def test_inactive_investment_account_fails(local_engine):
         sync(local_engine, "Fictional", client, [])
 
 
-def test_kuma_success_push_is_read_only_and_preserves_query(monkeypatch):
+@pytest.mark.parametrize("status_query", ["", "&status=up", "&status=down&status=down"])
+def test_kuma_success_push_is_read_only_and_preserves_query(monkeypatch, status_query):
     opener = Mock()
     opener.open.return_value = BytesIO(b'{"ok":true}')
     monkeypatch.setattr("portfolio_digest.akahu.build_opener", lambda *args: opener)
-    push_success(SecretStr("https://kuma.invalid/push/fake?msg=OK"))
+    push_success(SecretStr("https://kuma.invalid/push/fake?msg=OK&ping=" + status_query))
     opener.open.assert_called_once_with(
-        "https://kuma.invalid/push/fake?msg=OK&status=up", timeout=15
+        "https://kuma.invalid/push/fake?msg=OK&ping=&status=up", timeout=15
     )

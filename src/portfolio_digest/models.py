@@ -234,6 +234,19 @@ class Trade(Base):
     instrument: Mapped[Instrument] = relationship()
 
 
+class ImportTradeMatch(Base):
+    """A later run that independently supplied an already stored trade."""
+
+    __tablename__ = "import_trade_matches"
+
+    import_run_id: Mapped[int] = mapped_column(
+        ForeignKey("import_runs.id", ondelete="RESTRICT"), primary_key=True
+    )
+    trade_id: Mapped[int] = mapped_column(
+        ForeignKey("trades.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
 class Income(Base):
     """Cash paid to the holder: dividends, fund distributions, interest."""
 
@@ -329,4 +342,28 @@ class FxRate(Base):
     rate: Mapped[Decimal] = mapped_column(Rate)
     source: Mapped[str] = mapped_column(String(32))  # e.g. yahoo, frankfurter
     is_stale: Mapped[bool] = mapped_column(default=False, server_default="false")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Split(Base):
+    """A share split or consolidation: `shares_before` old shares became `shares_after` new ones.
+
+    A 4-for-1 split is 1 before and 4 after; a 1-for-10 consolidation is 10 before and 1 after.
+    Recorded from the price source so a big price move on that day is not flagged as bad data.
+    """
+
+    __tablename__ = "splits"
+    __table_args__ = (
+        CheckConstraint("shares_before > 0", name="shares_before_positive"),
+        CheckConstraint("shares_after > 0", name="shares_after_positive"),
+        *_not_nan("shares_before", "shares_after"),
+    )
+
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.id", ondelete="CASCADE"), primary_key=True
+    )
+    split_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    shares_before: Mapped[Decimal] = mapped_column(Quantity)
+    shares_after: Mapped[Decimal] = mapped_column(Quantity)
+    source: Mapped[str] = mapped_column(String(32))
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

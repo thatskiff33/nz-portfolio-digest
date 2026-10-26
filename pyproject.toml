@@ -13,6 +13,10 @@ dependencies = [
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.4",
+    # Price and exchange rate downloads.
+    "httpx>=0.27",
+    # Exchange trading calendars (NZX, ASX, NYSE, NASDAQ), so holidays are not missing days.
+    "holidays>=0.100",
     # Timezone data for zoneinfo; slim Docker images have none of their own.
     "tzdata>=2024.1",
 ]

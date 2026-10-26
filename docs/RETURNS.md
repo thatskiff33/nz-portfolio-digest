@@ -34,9 +34,9 @@ error rather than treating the holding as worthless. A genuine zero price is
 valid. Fully sold holdings need no closing price. Broker-supplied transaction FX
 is used when available; otherwise the same carry-forward lookup applies.
 
-This checkout contains the price/FX schema but no service module from issue #3.
-The loader therefore reads the existing tables directly and the pure engine
-performs the carry-forward lookup, including the stored `is_stale` flag.
+`portfolio-digest prices fetch` populates the stored price and FX tables. The
+returns loader reads these tables directly without fetching remote data, and the
+pure engine performs the carry-forward lookup, including the stored `is_stale` flag.
 
 ## Return attribution
 

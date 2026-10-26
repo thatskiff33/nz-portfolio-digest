@@ -19,7 +19,14 @@ def test_settings_are_read_from_a_dotenv_file(no_settings_file, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("name", "value"), [("BASE_CURRENCY", "dollars"), ("TIMEZONE", "Middle/Earth")]
+    ("name", "value"),
+    [
+        ("BASE_CURRENCY", "dollars"),
+        ("TIMEZONE", "Middle/Earth"),
+        ("PRICE_SOURCE", "paid-but-not-installed"),
+        ("FX_SOURCES", "yahoo,unknown"),
+        ("FX_SOURCES", ""),
+    ],
 )
 def test_invalid_settings_are_reported_without_their_value(
     no_settings_file, monkeypatch, name, value
@@ -28,8 +35,17 @@ def test_invalid_settings_are_reported_without_their_value(
     monkeypatch.setenv(name, value)
     with pytest.raises(ConfigError, match=name) as exc:
         get_settings()
-    assert value not in str(exc.value)
+    assert not value or value not in str(exc.value)
     assert "s3cret-pass" not in str(exc.value)
+
+
+def test_market_data_source_names_are_normalised(no_settings_file, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", URL)
+    monkeypatch.setenv("PRICE_SOURCE", " YAHOO ")
+    monkeypatch.setenv("FX_SOURCES", " FRANKFURTER, YAHOO ")
+    settings = get_settings()
+    assert settings.price_source == "yahoo"
+    assert settings.fx_source_names == ["frankfurter", "yahoo"]
 
 
 @pytest.mark.parametrize(

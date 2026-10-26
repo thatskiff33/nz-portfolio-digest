@@ -333,3 +333,72 @@ def test_raw_carry_forward_changes_units_on_split_date():
         Decimal("40"),
         splits=splits,
     ) == {next_day: Decimal("11")}
+
+
+def test_withdrawn_split_refreshes_history_and_does_not_scale_stale_prices(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from portfolio_digest.prices import fetch
+
+    first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
+    holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
+    source = FakePriceSource({recent: Decimal("40")})
+    session = MagicMock()
+    session.scalar.side_effect = [recent, first, None]
+    session.execute.side_effect = [
+        [(split_day, Decimal("1"), Decimal("4"))],
+        MagicMock(all=lambda: [(recent, Decimal("40"))]),
+    ]
+    saved, scans = [], []
+    monkeypatch.setattr(fetch, "_save_prices", lambda *args, **kwargs: saved.append((args, kwargs)))
+    monkeypatch.setattr(fetch, "_save_splits", lambda *args: scans.append(args))
+    result = fetch._update_instrument(
+        session, source, holding, datetime(2026, 10, 3, 12, tzinfo=UTC), False, None
+    )
+    assert result.error is None
+    assert [call[1] for call in source.calls] == [date(2026, 9, 1), first]
+    assert scans[0][2] == {}
+    assert scans[0][4] == first
+    assert saved[-1][0][2][split_day] == Decimal("40")
+
+
+def test_split_scan_removes_withdrawn_or_moved_rows(engine):
+    from portfolio_digest.prices.fetch import _save_splits
+
+    instrument_id = _seed_trade(engine)
+    first, old_day, moved_day = date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5)
+    ratio = (Decimal("1"), Decimal("4"))
+    with session_scope(engine) as session:
+        _save_splits(session, instrument_id, {old_day: ratio}, "yahoo", first)
+        _save_splits(session, instrument_id, {moved_day: ratio}, "yahoo", first)
+        rows = session.scalars(select(Split).where(Split.instrument_id == instrument_id)).all()
+        assert [(row.split_date, row.shares_after) for row in rows] == [(moved_day, Decimal("4"))]
+        _save_splits(session, instrument_id, {}, "yahoo", first)
+        assert session.scalars(select(Split)).all() == []
+
+
+def test_failed_split_refresh_preserves_recorded_events(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from portfolio_digest.prices import fetch
+
+    first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
+    holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
+    source = MagicMock(name="yahoo")
+    source.history.side_effect = [PriceHistory(), SourceError("refresh failed")]
+    session = MagicMock()
+    session.scalar.side_effect = [recent, first, None]
+    session.execute.side_effect = [
+        [(split_day, Decimal("1"), Decimal("4"))],
+        MagicMock(all=lambda: [(recent, Decimal("40"))]),
+    ]
+    save_splits = MagicMock()
+    saved = []
+    monkeypatch.setattr(fetch, "_save_splits", save_splits)
+    monkeypatch.setattr(fetch, "_save_prices", lambda *args, **kwargs: saved.append((args, kwargs)))
+    result = fetch._update_instrument(
+        session, source, holding, datetime(2026, 10, 3, 12, tzinfo=UTC), False, None
+    )
+    assert result.error == "refresh failed"
+    save_splits.assert_not_called()
+    assert saved[-1][0][2][split_day] == Decimal("10")

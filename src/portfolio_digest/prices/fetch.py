@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import Engine, case, func, select
+from sqlalchemy import Engine, case, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -307,22 +307,25 @@ def _update_instrument(
         )
         full_start = min(h.first_trade, first_stored or h.first_trade, begin)
         history = source.history(symbol, begin, end, currency=h.currency, split_start=full_start)
-        if begin > full_start and any(
-            recorded_splits.get(day) != ratio for day, ratio in history.splits.items()
-        ):
-            # Do not save a new or corrected event until the full refresh succeeds.
+        if begin > full_start and {
+            day: ratio for day, ratio in recorded_splits.items() if day >= full_start
+        } != {day: ratio for day, ratio in history.splits.items() if day >= full_start}:
+            # Do not reconcile events until the full refresh succeeds.
             history = source.history(
                 symbol, full_start, end, currency=h.currency, split_start=full_start
             )
             begin = full_start
         closes = {d: c for d, c in history.closes.items() if begin <= d <= end}
         splits = history.splits
+        _save_splits(session, h.instrument_id, splits, source.name, full_start)
+        recorded_splits = {
+            day: ratio for day, ratio in recorded_splits.items() if day < full_start
+        } | splits
     except (SourceError, UnknownSymbol) as exc:
         outcome.error = str(exc)
         log.warning("%s: %s", h.label, exc)
 
     _save_prices(session, h.instrument_id, closes, source.name, stale=False)
-    _save_splits(session, h.instrument_id, splits, source.name)
 
     existing = dict(
         session.execute(
@@ -492,7 +495,16 @@ def _save_splits(
     instrument_id: int,
     splits: Mapping[date, tuple[Decimal, Decimal]],
     source: str,
+    split_start: date,
 ) -> None:
+    # A successful full-range scan is authoritative, including an empty result.
+    session.execute(
+        delete(Split).where(
+            Split.instrument_id == instrument_id,
+            Split.split_date >= split_start,
+            Split.split_date.not_in(splits),
+        )
+    )
     if not splits:
         return
     stmt = insert(Split).values(

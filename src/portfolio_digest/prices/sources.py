@@ -7,7 +7,7 @@ FX_SOURCES in the settings. Nothing else needs to know which source is in use.
 
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Context, Decimal
+from decimal import ROUND_HALF_UP, Context, Decimal
 from typing import Any, Protocol
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -122,7 +122,7 @@ class YahooSource:
     def rates(self, currency: str, base: str, start: date, end: date) -> dict[date, Decimal]:
         # USDNZD=X is NZ$ per US$, which is exactly how rates are stored.
         rates = self.history(f"{currency}{base}=X", start, end, currency=base).closes
-        if any(rate <= 0 for rate in rates.values()):
+        if any(not _fits_numeric(rate, 10, positive=True) for rate in rates.values()):
             raise SourceError(f"Yahoo sent an impossible {currency}/{base} rate.")
         return rates
 
@@ -169,8 +169,24 @@ def _parse_chart(data: Any, start: date, end: date, currency: str | None = None)
         for split_day, (before, after) in sorted(history.splits.items()):
             if day < split_day:
                 value = value * after / before
-        history.closes[day] = _YAHOO_PRECISION.plus(value)
+        value = _YAHOO_PRECISION.plus(value)
+        if not _fits_numeric(value, 6):
+            raise SourceError(f"Yahoo sent an out-of-range price for {day}.")
+        history.closes[day] = value
     return history
+
+
+def _fits_numeric(value: Decimal, scale: int, *, positive: bool = False) -> bool:
+    """Check Numeric(20, scale) after PostgreSQL's rounding, without changing the value."""
+    if not value.is_finite():
+        return False
+    try:
+        rounded = Context(prec=21, rounding=ROUND_HALF_UP).quantize(
+            value, Decimal(1).scaleb(-scale)
+        )
+    except ArithmeticError:
+        return False
+    return (rounded > 0 if positive else rounded >= 0) and rounded < Decimal(10) ** (20 - scale)
 
 
 def _zone(name: str | None) -> ZoneInfo:
@@ -200,7 +216,7 @@ class FrankfurterSource:
             raise SourceError(
                 f"Frankfurter sent {currency}/{base} rates in an unexpected shape."
             ) from None
-        if any(not r.is_finite() or r <= 0 for r in rates.values()):
+        if any(not _fits_numeric(r, 10, positive=True) for r in rates.values()):
             raise SourceError(f"Frankfurter sent an impossible {currency}/{base} rate.")
         # Frankfurter includes the working day before `start` when `start` is a holiday.
         return {day: rate for day, rate in rates.items() if start <= day <= end}

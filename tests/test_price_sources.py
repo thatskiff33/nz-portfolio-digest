@@ -294,3 +294,45 @@ def test_yahoo_rounds_only_after_restoring_raw_price_precision():
     )
     history = source.history("TEST", first, split_day, currency="USD")
     assert history.closes == {first: Decimal("40.00000"), split_day: Decimal("13.33333")}
+
+
+@pytest.mark.parametrize("close", ["1e30", "1e14", "99999999999999.999999"])
+def test_yahoo_rejects_prices_outside_database_precision(close):
+    day = date(2026, 10, 1)
+    source = YahooSource(StubFetcher(_chart({day: Decimal(close)})))
+    with pytest.raises(SourceError, match="out-of-range price"):
+        source.history("TEST", day, day, currency="USD")
+
+
+@pytest.mark.parametrize("rate", ["1e-11", "0.000000000049", "1e10", "1e30"])
+@pytest.mark.parametrize("provider", ["yahoo", "frankfurter"])
+def test_fx_sources_reject_rates_outside_database_precision(provider, rate):
+    day = date(2026, 10, 1)
+    if provider == "yahoo":
+        source = YahooSource(StubFetcher(_chart({day: Decimal(rate)}, currency="NZD")))
+    else:
+        source = FrankfurterSource(
+            StubFetcher({"rates": {day.isoformat(): {"NZD": Decimal(rate)}}})
+        )
+    with pytest.raises(SourceError):
+        source.rates("USD", "NZD", day, day)
+
+
+def test_frankfurter_rejects_rate_that_rounds_up_past_database_limit():
+    day = date(2026, 10, 1)
+    source = FrankfurterSource(
+        StubFetcher({"rates": {day.isoformat(): {"NZD": Decimal("9999999999.99999999995")}}})
+    )
+    with pytest.raises(SourceError, match="impossible USD/NZD rate"):
+        source.rates("USD", "NZD", day, day)
+
+
+@pytest.mark.parametrize("provider", ["yahoo", "frankfurter"])
+def test_fx_sources_accept_smallest_rate_that_rounds_positive(provider):
+    day = date(2026, 10, 1)
+    rate = Decimal("0.00000000005")
+    if provider == "yahoo":
+        source = YahooSource(StubFetcher(_chart({day: rate}, currency="NZD")))
+    else:
+        source = FrankfurterSource(StubFetcher({"rates": {day.isoformat(): {"NZD": rate}}}))
+    assert source.rates("USD", "NZD", day, day) == {day: rate}

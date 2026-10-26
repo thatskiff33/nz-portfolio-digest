@@ -63,14 +63,17 @@ adapters.
 Closes are raw, unadjusted prices in the instrument's major currency units. Yahoo's
 `quote.close` is retrospectively split-adjusted, so the adapter reverses all later split
 ratios before storing it. Split events are fetched from the earliest stored price or first
-trade through the present, even for sold holdings. A new or changed split triggers a full
-re-read of that instrument, including rows outside the normal 31-day refresh window.
+trade through the present, even for sold holdings. A new, changed or withdrawn split
+triggers a full re-read of that instrument, including rows outside the normal 31-day
+refresh window.
+After a successful scan, stored split rows absent from the source are removed.
 Yahoo currently returns the full chart for this event scan on each run.
 
 A 4-for-1 split therefore stores a pre-split close of $40 and a post-split close of $10.
-The returns engine must use the recorded split's shares-before/shares-after ratio to
-change quantities on its effective date (1 share becomes 4), and must not split-adjust
-these closes again. Closes are not dividend-adjusted; account for distributions separately.
+ADJUSTMENT trades are the single source of quantity changes for the returns engine (#4),
+including split units (1 share becomes 4). Split rows are used only for price un-adjustment
+and quality checks. Do not apply split rows to quantities or split-adjust these closes
+again. Closes are not dividend-adjusted; account for distributions separately.
 
 Yahoo metadata currencies `GBp`, `ZAc` and `ILA` are converted to `GBP`, `ZAR` and
 `ILS` by dividing by 100. Missing or mismatched quote currencies fail that source request

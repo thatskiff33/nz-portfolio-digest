@@ -34,7 +34,8 @@ portfolio-digest import sharesies imports/transactions.csv --portfolio "Personal
 ```
 
 The importer handles NZX, ASX and US trades, including Smart ETFs and fractional units.
-It imports buys and sells and reports non-trade rows as skipped. Share transfers are also
+It imports buys, sells, dividends and distributions. See [dividend imports](dividends.md)
+for the required income and tax columns. Other cash rows are skipped. Share transfers are also
 skipped because their original trades should come from the other broker's history.
 Sharesies exchange rates are based on NZD, so these reports can only be imported into an
 NZD-base portfolio.

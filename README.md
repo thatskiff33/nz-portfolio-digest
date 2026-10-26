@@ -43,9 +43,15 @@ NZX and ASX codes map automatically to Yahoo's `.NZ` and `.AX` symbols. NASDAQ a
 codes are used as-is. Set an exception for a right, renamed or delisted security with
 `portfolio-digest prices symbol NZX:AIRRG AIRRG.NZ`. See the deployment guide for the
 twice-daily schedule and recovery commands. Stored closes are raw, unadjusted prices in
-major currency units. ADJUSTMENT trades are the single source of quantity changes for the
-returns engine (#4). Split rows are used only for price un-adjustment and quality checks;
-do not apply them to quantities or split-adjust these closes again.
+major currency units. Recorded splits and consolidations adjust holdings without changing
+total cost. Do not also enter an ADJUSTMENT for a recorded split.
+
+Dividends and ETF distributions import from Sharesies CSV and ASB dividend advice. Yahoo
+can suggest missing dividends, which stay outside returns until explicitly confirmed.
+`portfolio-digest returns --portfolio Personal` reports net dividends, gross income, tax
+and a separate imputation column; `--gross-up` includes NZ imputation in totals. See
+[dividends and corporate actions](docs/dividends.md) for tax fields, DRP, suggestions,
+rights issues and instrument history.
 
 The app also reads ASB Securities contract notes from one Gmail label with read-only
 access, and supports manual corrections, gifted shares and opening balances. See

@@ -12,6 +12,7 @@ from portfolio_digest import migrate
 from portfolio_digest.db import session_scope
 from portfolio_digest.models import (
     Base,
+    DividendSuggestion,
     FxRate,
     ImportRun,
     Income,
@@ -31,6 +32,9 @@ EXPECTED_TABLES = {
     "prices",
     "fx_rates",
     "splits",
+    "corporate_actions",
+    "dividend_suggestions",
+    "import_income_matches",
 }
 
 
@@ -290,6 +294,14 @@ def test_nan_is_refused_by_the_database(engine, table, column):
         portfolio, instrument = _seed(session)
         session.add(_trade(portfolio, instrument))
         session.add(_income(portfolio, instrument))
+        session.add(
+            DividendSuggestion(
+                portfolio_id=portfolio.id,
+                instrument_id=instrument.id,
+                ex_date=date(2026, 10, 1),
+                gross_amount=Decimal(1),
+            )
+        )
         session.add(_fx_rate())
         session.execute(
             text(

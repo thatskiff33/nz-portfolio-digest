@@ -19,10 +19,14 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, DecimalException, InvalidOperation
+from typing import TYPE_CHECKING
 
 from portfolio_digest import markets
 from portfolio_digest.models import TradeType
 from portfolio_digest.validation import InvalidInput, contains_control_characters
+
+if TYPE_CHECKING:
+    from portfolio_digest.income import ParsedIncome
 
 # Matches the database columns: Quantity is Numeric(24, 8), Money is Numeric(20, 6) and
 # Rate is Numeric(20, 10).
@@ -70,6 +74,7 @@ class ParsedTrade:
 
 @dataclass
 class ParseResult:
+    incomes: list["ParsedIncome"] = field(default_factory=list)
     trades: list[ParsedTrade] = field(default_factory=list)
     errors: list[RowError] = field(default_factory=list)
     skipped: list[RowError] = field(default_factory=list)

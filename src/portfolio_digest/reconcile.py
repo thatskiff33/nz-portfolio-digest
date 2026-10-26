@@ -1,9 +1,10 @@
 """Compare stored holding units with a broker or registry snapshot CSV."""
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import case, func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.importers.base import (
@@ -14,7 +15,8 @@ from portfolio_digest.importers.base import (
     parse_decimal,
     read_csv,
 )
-from portfolio_digest.models import Instrument, Trade, TradeType
+from portfolio_digest.models import Instrument, Split, Trade
+from portfolio_digest.returns import units_at
 
 COLUMNS = {
     "exchange": ("Exchange", "Market", "Market Code"),
@@ -56,14 +58,22 @@ def parse_snapshot(content: bytes) -> dict[tuple[str, str], Decimal]:
 
 
 def stored_units(session: Session, portfolio_id: int) -> dict[tuple[str, str], Decimal]:
-    signed = case((Trade.trade_type == TradeType.SELL.value, -Trade.quantity), else_=Trade.quantity)
-    rows = session.execute(
-        select(Instrument.exchange, Instrument.code, func.sum(signed))
-        .join(Trade, Trade.instrument_id == Instrument.id)
-        .where(Trade.portfolio_id == portfolio_id)
-        .group_by(Instrument.exchange, Instrument.code)
+    ids = set(
+        session.scalars(select(Trade.instrument_id).where(Trade.portfolio_id == portfolio_id))
     )
-    return {(exchange, code): units for exchange, code, units in rows}
+    result = {}
+    for instrument_id in ids:
+        instrument = session.get(Instrument, instrument_id)
+        result[instrument.exchange, instrument.code] = units_at(
+            session.scalars(
+                select(Trade).where(
+                    Trade.portfolio_id == portfolio_id, Trade.instrument_id == instrument_id
+                )
+            ),
+            session.scalars(select(Split).where(Split.instrument_id == instrument_id)),
+            date.max,
+        )
+    return result
 
 
 def compare(

@@ -29,19 +29,19 @@ def load_returns(
 ) -> Report:
     today = today or datetime.now(ZoneInfo(get_settings().timezone)).date()
     # Validate syntax before querying; 'all' is resolved after loading trades.
-    period_range(period, today)
+    start, end = period_range(period, today)
     portfolio = session.scalar(
         select(Portfolio).where(func.lower(Portfolio.name) == portfolio_name(name).lower())
     )
     if portfolio is None:
         raise ReturnError("Portfolio not found.")
-    report_end = period_range(period, today)[1]
     trades = session.scalars(
         select(Trade)
-        .where(Trade.portfolio_id == portfolio.id, Trade.trade_date <= report_end)
+        .where(Trade.portfolio_id == portfolio.id, Trade.trade_date <= end)
         .order_by(Trade.trade_date, Trade.id)
     ).all()
-    start, end = period_range(period, today, min((t.trade_date for t in trades), default=None))
+    if period == "all":
+        start, end = period_range(period, today, min((t.trade_date for t in trades), default=None))
     income = session.scalars(
         select(Income).where(
             Income.portfolio_id == portfolio.id,

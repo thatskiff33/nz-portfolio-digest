@@ -6,7 +6,7 @@ from portfolio_digest.returns import Report, Result
 from portfolio_digest.terminal import terminal_text
 
 
-def _number(value: Decimal) -> str:
+def format_number(value: Decimal) -> str:
     with localcontext() as context:
         # Integer digits, two fractional places and a possible rounding carry.
         context.prec = max(context.prec, value.adjusted() + 4)
@@ -31,13 +31,13 @@ def render_table(report: Report) -> str:
         percentages = result.percentages
         values = [
             terminal_text(result.label) + (" *" if result.flags else ""),
-            _number(result.closing),
+            format_number(result.closing),
         ]
         for field in ("capital", "dividends", "currency", "total"):
-            percent = f"{_number(getattr(percentages, field))}%" if percentages else "n/a"
-            values.append(f"{_number(getattr(result.amounts, field))} ({percent})")
+            percent = f"{format_number(getattr(percentages, field))}%" if percentages else "n/a"
+            values.append(f"{format_number(getattr(result.amounts, field))} ({percent})")
         values.extend(
-            _number(v)
+            format_number(v)
             for v in (result.gross_dividends, result.withholding_tax, result.imputation_gross_up)
         )
         return values

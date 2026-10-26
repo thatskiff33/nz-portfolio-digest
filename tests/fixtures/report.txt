@@ -1,0 +1,26 @@
+Portfolio digest | 05 Oct 2026 to 11 Oct 2026
+Portfolio value NZ$ 1,421.00
+Change in value NZ$ 30.00
+Total return NZ$ 39.00
+
+All gains and values are NZ dollars. Price is in the holding's currency. Change in value includes purchases and sales; total return excludes those flows. Dividends are net cash received. Holdings are combined across portfolios by listing. Sold holdings with period activity are included. Stale flags cover prices and FX.
+
+Stale prices or FX: flagged values may be out of date.
+2026-10-04: NZ$ 1,391.00
+2026-10-11: NZ$ 1,421.00
+Top mover: NZX:ALP NZ$ 41.00
+Bottom mover: ASX:DEMO NZ$ -2.00
+
+ASX
+Holding | Price | Value NZ$ | Capital gain | Dividends | Currency gain | Total return | Gross dividends | Withholding tax | Imputation gross-up
+Demo & Co (20 units)
+DEMO (stale) | 8.50 AUD | 187.00 | -5.00 | 2.00 | 1.00 | -2.00 | 3.00 | 1.00 | 0.50
+Subtotal |  | 187.00 | -5.00 | 2.00 | 1.00 | -2.00 | 3.00 | 1.00 | 0.50
+
+NZX
+Holding | Price | Value NZ$ | Capital gain | Dividends | Currency gain | Total return | Gross dividends | Withholding tax | Imputation gross-up
+Alpine Example (100 units)
+ALP | 12.34 NZD | 1,234.00 | 34.00 | 7.00 | 0.00 | 41.00 | 10.00 | 3.00 | 2.00
+Subtotal |  | 1,234.00 | 34.00 | 7.00 | 0.00 | 41.00 | 10.00 | 3.00 | 2.00
+
+Portfolio total |  | 1,421.00 | 29.00 | 9.00 | 1.00 | 39.00 | 13.00 | 4.00 | 2.50

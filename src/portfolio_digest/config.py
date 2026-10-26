@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES
 from portfolio_digest.validation import currency_code
 
 
@@ -26,8 +27,14 @@ class Settings(BaseSettings):
     # Every value is reported in this currency, and new portfolios use it by default.
     base_currency: str = "NZD"
 
-    # Timezone used for schedules and "today".
+    # Timezone used for "today".
     timezone: str = "Pacific/Auckland"
+
+    # Where daily prices come from. Only "yahoo" for now; a paid source slots in later.
+    price_source: str = "yahoo"
+
+    # Where exchange rates come from, tried in order until one works.
+    fx_sources: str = "yahoo,frankfurter"
 
     @field_validator("base_currency")
     @classmethod
@@ -42,6 +49,26 @@ class Settings(BaseSettings):
         except (ZoneInfoNotFoundError, ValueError):
             raise ValueError("not a known timezone such as Pacific/Auckland") from None
         return value
+
+    @field_validator("price_source")
+    @classmethod
+    def _check_price_source(cls, value: str) -> str:
+        name = value.strip().lower()
+        if name not in PRICE_SOURCES:
+            raise ValueError(f"must be one of {', '.join(PRICE_SOURCES)}")
+        return name
+
+    @field_validator("fx_sources")
+    @classmethod
+    def _check_fx_sources(cls, value: str) -> str:
+        names = [name.strip().lower() for name in value.split(",") if name.strip()]
+        if not names or any(name not in FX_SOURCES for name in names):
+            raise ValueError(f"must list one or more of {', '.join(FX_SOURCES)}")
+        return ",".join(names)
+
+    @property
+    def fx_source_names(self) -> list[str]:
+        return self.fx_sources.split(",")
 
 
 @lru_cache

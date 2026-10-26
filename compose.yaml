@@ -1,0 +1,54 @@
+# Runs on hartleysmithubuntu. Nothing here publishes a port: the database is only reachable
+# from the other services on this compose network. Secrets come from `.env` (see .env.example).
+
+name: portfolio-digest
+
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?set POSTGRES_ADMIN_PASSWORD in .env}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./scripts/db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d portfolio"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: brings the schema up to date, then exits. Also used for other commands:
+  #   docker compose run --rm migrate health
+  migrate:
+    build: .
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD}@db:5432/portfolio
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Nightly compressed dump of the portfolio database, pruned after BACKUP_KEEP_DAYS.
+  backup:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/scripts/backup.sh"]
+    environment:
+      PGHOST: db
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      PGDATABASE: portfolio
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./scripts/backup.sh:/scripts/backup.sh:ro
+      - ${BACKUP_DIR:-./backups}:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

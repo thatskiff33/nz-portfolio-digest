@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 # Yahoo turns away requests that do not look like they come from a browser.
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) portfolio-digest"
 TIMEOUT = httpx.Timeout(30.0)
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 _MAX_RETRY_AFTER = 60.0
@@ -28,7 +29,7 @@ class NotFound(SourceError):
 
 
 def make_client() -> httpx.Client:
-    return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT, follow_redirects=True)
+    return httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
 
 
 class JsonFetcher:
@@ -43,31 +44,36 @@ class JsonFetcher:
         *,
         attempts: int = 4,
         backoff: float = 2.0,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.client = client
         self.attempts = attempts
         self.backoff = backoff
+        self.max_response_bytes = max_response_bytes
         self.sleep = sleep
 
     def get(self, url: str, params: Mapping[str, str | int] | None = None) -> Any:
         for attempt in range(1, self.attempts + 1):
             wait = self.backoff * 2 ** (attempt - 1)
             try:
-                response = self.client.get(url, params=params)
+                with self.client.stream("GET", url, params=params) as response:
+                    if response.status_code == 404:
+                        raise NotFound(f"{_host(url)} has no data for this request (HTTP 404).")
+                    if response.is_redirect:
+                        raise SourceError(
+                            f"{_host(url)} redirected the request; refusing to follow."
+                        )
+                    if response.status_code not in _RETRY_STATUSES:
+                        if response.is_error:
+                            raise SourceError(
+                                f"{_host(url)} refused the request ({_status(response)})."
+                            )
+                        return _decode(response, url, self.max_response_bytes)
+                    problem = f"{_status(response)} from {_host(url)}"
+                    wait = max(wait, _retry_after(response))
             except httpx.TransportError as exc:
                 problem = f"{type(exc).__name__} from {_host(url)}"
-            else:
-                if response.status_code == 404:
-                    raise NotFound(f"{_host(url)} has no data for this request (HTTP 404).")
-                if response.status_code not in _RETRY_STATUSES:
-                    if response.is_error:
-                        raise SourceError(
-                            f"{_host(url)} refused the request ({_status(response)})."
-                        )
-                    return _decode(response, url)
-                problem = f"{_status(response)} from {_host(url)}"
-                wait = max(wait, _retry_after(response))
             if attempt == self.attempts:
                 raise SourceError(f"{problem}, gave up after {self.attempts} attempts.")
             log.warning("%s; trying again in %.0f seconds.", problem, wait)
@@ -75,9 +81,16 @@ class JsonFetcher:
         raise AssertionError("unreachable")  # pragma: no cover
 
 
-def _decode(response: httpx.Response, url: str) -> Any:
+def _decode(response: httpx.Response, url: str, max_bytes: int) -> Any:
+    chunks: list[bytes] = []
+    size = 0
     try:
-        return json.loads(response.text, parse_float=Decimal)
+        for chunk in response.iter_bytes():
+            size += len(chunk)
+            if size > max_bytes:
+                raise SourceError(f"{_host(url)} exceeded the response-size limit.")
+            chunks.append(chunk)
+        return json.loads(b"".join(chunks), parse_float=Decimal)
     except ValueError:
         raise SourceError(f"{_host(url)} sent something that is not JSON.") from None
 

@@ -70,6 +70,28 @@ def test_json_fetcher_stops_after_its_attempt_limit():
         )
 
 
+def test_json_fetcher_refuses_redirects_to_other_services():
+    def handler(request):
+        return httpx.Response(302, headers={"Location": "http://db:5432/"}, request=request)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceError, match="redirected.*refusing to follow"),
+    ):
+        JsonFetcher(client).get("https://example.test/prices")
+
+
+def test_json_fetcher_limits_response_size_before_decoding():
+    def handler(request):
+        return httpx.Response(200, content=b"12345", request=request)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(SourceError, match="response-size limit"),
+    ):
+        JsonFetcher(client, max_response_bytes=4).get("https://example.test/prices")
+
+
 class StubFetcher:
     def __init__(self, value):
         self.value = value

@@ -49,6 +49,10 @@ from portfolio_digest.prices.quality import check_data
 from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES
 from portfolio_digest.prices.symbols import clean_symbol
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
+from portfolio_digest.returns import ReturnError, period_range
+from portfolio_digest.returns_loader import load_returns
+from portfolio_digest.returns_table import render_table
+from portfolio_digest.terminal import terminal_text
 
 
 def _fail(message: str) -> None:
@@ -121,6 +125,19 @@ def cmd_portfolio_list(_: argparse.Namespace) -> int:
         for p in portfolios:
             print(f"{p.id}\t{p.name}\t{p.base_currency}")
     return 0
+
+
+def cmd_returns(args: argparse.Namespace) -> int:
+    try:
+        validation.portfolio_name(args.portfolio)
+        period_range(args.period, date.today())
+        with session_scope(make_engine()) as session:
+            report = load_returns(session, args.portfolio, args.period)
+        print(render_table(report))
+        return 0
+    except (ReturnError, validation.InvalidInput) as exc:
+        _fail(terminal_text(str(exc)))
+        return 2
 
 
 def _date(value: str) -> date:
@@ -351,6 +368,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("health", help="Check the database is reachable and migrated").set_defaults(
         func=cmd_health
     )
+
+    returns = sub.add_parser("returns", help="Report capital, dividend and currency returns")
+    returns.add_argument("--portfolio", required=True)
+    returns.add_argument("--period", required=True, help="week|month|ytd|all|YYYY-MM-DD:YYYY-MM-DD")
+    returns.set_defaults(func=cmd_returns)
 
     portfolio = sub.add_parser("portfolio", help="Manage portfolios")
     psub = portfolio.add_subparsers(dest="portfolio_command", required=True)

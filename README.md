@@ -37,19 +37,32 @@ portfolio-digest reconcile sharesies holdings.csv --portfolio "Personal"
 
 portfolio-digest import list
 portfolio-digest import undo 12
+portfolio-digest returns --portfolio "Personal" --period week
+portfolio-digest returns --portfolio "Personal" --period 2026-10-01:2026-10-26
 ```
 
 NZX and ASX codes map automatically to Yahoo's `.NZ` and `.AX` symbols. NASDAQ and NYSE
 codes are used as-is. Set an exception for a right, renamed or delisted security with
 `portfolio-digest prices symbol NZX:AIRRG AIRRG.NZ`. See the deployment guide for the
 twice-daily schedule and recovery commands. Stored closes are raw, unadjusted prices in
-major currency units. ADJUSTMENT trades are the single source of quantity changes for the
-returns engine (#4). Split rows are used only for price un-adjustment and quality checks;
-do not apply them to quantities or split-adjust these closes again.
+major currency units. ADJUSTMENT trades record quantity changes. The returns engine
+rescales parcels when an adjustment matches a stored Split row. Other adjustments
+move units at their recorded price without cash, per issue #19. Split rows alone
+never change quantities; do not split-adjust these closes again.
 
 The app also reads ASB Securities contract notes from one Gmail label with read-only
 access, and supports manual corrections, gifted shares and opening balances. See
 [docs/IMPORTING.md](docs/IMPORTING.md) for file layouts, Gmail setup and the full workflow.
+
+Returns include capital gain, dividends, currency gain and total return as base-currency
+amounts and simple period percentages, per holding, market and portfolio. Use `week`,
+`month`, `ytd`, `all` (since first purchase), or an explicit date range. Holdings
+sold during the period remain in the report; those sold earlier are omitted unless paid income. Missing
+trading days and stored stale flags are reported; normal weekends and exchange
+holidays do not make a price stale. Missing history stops the report rather than
+producing a misleading zero. The command reads stored data;
+it does not fetch prices. See [the calculation conventions and invented weekly example](docs/RETURNS.md)
+for boundaries, FIFO attribution, dividend treatment and percentage denominators.
 
 ## Development
 

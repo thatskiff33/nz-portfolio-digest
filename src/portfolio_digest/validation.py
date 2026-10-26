@@ -5,6 +5,7 @@ here first means people get a clear message instead of a database error.
 """
 
 import re
+import unicodedata
 
 PORTFOLIO_NAME_MAX = 120
 
@@ -28,8 +29,10 @@ def portfolio_name(value: str) -> str:
     name = " ".join(value.split())
     if not name:
         raise InvalidInput("Portfolio name cannot be blank.")
-    if not name.isprintable():
-        raise InvalidInput("Portfolio name cannot contain control characters.")
+    # Control characters (Cc) and lone surrogates (Cs, from bytes that are not valid
+    # UTF-8). Invisible joiners such as the one inside 👨‍👩‍👧 are fine.
+    if any(unicodedata.category(ch) in ("Cc", "Cs") for ch in name):
+        raise InvalidInput("Portfolio name cannot contain control characters or invalid text.")
     if len(name) > PORTFOLIO_NAME_MAX:
         raise InvalidInput(f"Portfolio name must be {PORTFOLIO_NAME_MAX} characters or fewer.")
     return name

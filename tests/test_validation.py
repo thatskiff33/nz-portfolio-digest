@@ -25,13 +25,28 @@ def test_currency_code_rejects_non_iso_values(raw):
         ("  Family Trust ", "Family Trust"),
         ("Family   Trust", "Family Trust"),
         ("Family\tTrust\n", "Family Trust"),
+        (
+            "Kids \U0001f468\u200d\U0001f469\u200d\U0001f467",
+            "Kids \U0001f468\u200d\U0001f469\u200d\U0001f467",
+        ),
     ],
 )
 def test_portfolio_name_whitespace_is_tidied(raw, expected):
     assert portfolio_name(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["", "   ", "\t\n", "Bad\x00name", "x" * (PORTFOLIO_NAME_MAX + 1)])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "\t\n",
+        "Bad\x00name",
+        "Bad\x1bname",
+        "Bad\udcffname",
+        "x" * (PORTFOLIO_NAME_MAX + 1),
+    ],
+)
 def test_portfolio_name_rejects_unusable_names(raw):
     with pytest.raises(InvalidInput):
         portfolio_name(raw)

@@ -101,6 +101,7 @@ def test_portfolio_add_rejects_duplicate_names_ignoring_case(engine, capsys, dup
     [
         ["   "],
         ["x" * (PORTFOLIO_NAME_MAX + 1)],
+        ["Other", "--base-currency", ""],
         ["Other", "--base-currency", "nz"],
         ["Other", "--base-currency", "dollars"],
     ],

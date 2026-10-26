@@ -59,11 +59,13 @@ docker compose logs backup      # one line per dump, and the reason for any fail
 ## Restoring
 
 Restore into the running database. `--single-transaction` means a restore that fails
-part-way changes nothing.
+part-way changes nothing. The restore runs as the `portfolio` role, which owns everything in
+the dump, rather than the superuser, so nothing in a backup can run with more rights than
+the app already has.
 
 ```sh
 docker compose stop backup
-docker compose exec -T db pg_restore -U postgres --clean --if-exists --single-transaction \
+docker compose exec -T db pg_restore -U portfolio --clean --if-exists --single-transaction \
   -d portfolio < backups/portfolio-YYYYMMDDTHHMMSSZ.dump
 docker compose run --rm migrate health
 docker compose start backup
@@ -75,7 +77,7 @@ from `migrate`:
 
 ```sh
 docker compose up -d --wait db                   # waits until the database is ready
-docker compose exec -T db pg_restore -U postgres --clean --if-exists --single-transaction \
+docker compose exec -T db pg_restore -U portfolio --clean --if-exists --single-transaction \
   -d portfolio < backups/portfolio-YYYYMMDDTHHMMSSZ.dump
 docker compose up -d backup
 docker compose run --rm --build migrate

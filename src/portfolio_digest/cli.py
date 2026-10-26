@@ -54,7 +54,10 @@ def cmd_health(_: argparse.Namespace) -> int:
 def cmd_portfolio_add(args: argparse.Namespace) -> int:
     try:
         name = validation.portfolio_name(args.name)
-        currency = validation.currency_code(args.base_currency or get_settings().base_currency)
+        currency = args.base_currency
+        if currency is None:
+            currency = get_settings().base_currency
+        currency = validation.currency_code(currency)
     except validation.InvalidInput as exc:
         _fail(str(exc))
         return 2

@@ -28,6 +28,10 @@ services:
     command: ["migrate"]
     environment:
       DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
+      AKAHU_APP_TOKEN: ${AKAHU_APP_TOKEN:-}
+      AKAHU_USER_TOKEN: ${AKAHU_USER_TOKEN:-}
+      AKAHU_ACCOUNT_IDS: ${AKAHU_ACCOUNT_IDS:-[]}
+      UPTIME_KUMA_PUSH_URL: ${UPTIME_KUMA_PUSH_URL:-}
     depends_on:
       db:
         condition: service_healthy

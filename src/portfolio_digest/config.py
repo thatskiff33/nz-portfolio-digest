@@ -7,7 +7,7 @@ from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import SecretStr, ValidationError, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, SettingsError
 
 from portfolio_digest.validation import currency_code
 
@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     # Full SQLAlchemy URL, e.g. postgresql+psycopg://user:pass@db:5432/portfolio.
     # Kept as a secret so it is never printed in logs or error messages.
     database_url: SecretStr
+
+    akahu_app_token: SecretStr | None = None
+    akahu_user_token: SecretStr | None = None
+    # Optional JSON array of account IDs. Empty selects all investment accounts.
+    akahu_account_ids: list[str] = []
+    uptime_kuma_push_url: SecretStr | None = None
 
     # Every value is reported in this currency, and new portfolios use it by default.
     base_currency: str = "NZD"
@@ -48,6 +54,10 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     try:
         return Settings()  # type: ignore[call-arg]
+    except SettingsError:
+        raise ConfigError(
+            "Invalid settings encoding. Check AKAHU_ACCOUNT_IDS JSON in env/.env."
+        ) from None
     except ValidationError as exc:
         # pydantic's own message echoes the values it was given, which can include secrets.
         names = sorted({str(error["loc"][0]).upper() for error in exc.errors() if error["loc"]})

@@ -149,7 +149,9 @@ def read_csv(
         for cells in reader:
             if not any(cell.strip() for cell in cells):
                 continue
-            row = {ours: cells[i].strip() if i < len(cells) else "" for ours, i in positions.items()}
+            row = {
+                ours: cells[i].strip() if i < len(cells) else "" for ours, i in positions.items()
+            }
             yield reader.line_num, row
     except csv.Error as exc:
         raise FileProblem(f"Line {reader.line_num} is not valid CSV ({exc}).") from None

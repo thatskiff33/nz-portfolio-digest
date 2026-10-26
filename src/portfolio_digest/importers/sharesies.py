@@ -16,6 +16,7 @@ fractional shares. The columns we read:
 """
 
 from portfolio_digest.importers.base import (
+    FileProblem,
     Fingerprinter,
     Importer,
     ParseContext,
@@ -57,6 +58,11 @@ class SharesiesImporter(Importer):
     summary = "Sharesies Transaction Report CSV (Account > Generate Reports)"
 
     def parse(self, content: bytes, context: ParseContext) -> ParseResult:
+        if context.base_currency != "NZD":
+            raise FileProblem(
+                "Sharesies reports exchange rates against NZD, so it can only be imported "
+                "into an NZD portfolio."
+            )
         result = ParseResult()
         refs = Fingerprinter()
         for line, row in read_csv(content, COLUMNS, REQUIRED):

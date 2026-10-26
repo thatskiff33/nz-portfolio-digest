@@ -12,6 +12,7 @@ the port over SSH).
 """
 
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -25,7 +26,7 @@ from urllib.request import Request, urlopen
 
 from portfolio_digest.config import GmailSettings
 from portfolio_digest.importers.asb import TRADE_SOURCE, NotAContractNote, parse_contract_note
-from portfolio_digest.importers.base import ParseResult, RowError, RowProblem
+from portfolio_digest.importers.base import FileProblem, ParseResult, RowError, RowProblem
 
 SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -59,10 +60,14 @@ def urllib_http(method: str, url: str, headers: dict[str, str], body: bytes | No
         with urlopen(request, timeout=30) as response:  # noqa: S310 - https only
             return json.load(response)
     except HTTPError as exc:
-        raise GmailError(f"Google refused the request ({exc.code} {_google_reason(exc)}).") from None
+        raise GmailError(
+            f"Google refused the request ({exc.code} {_google_reason(exc)})."
+        ) from None
     except (URLError, TimeoutError) as exc:
         reason = getattr(exc, "reason", exc)
         raise GmailError(f"Cannot reach Google ({reason}).") from None
+    except ValueError:
+        raise GmailError("Google returned a response the app could not read.") from None
 
 
 def _check_scope(token: dict) -> None:
@@ -93,7 +98,9 @@ class GmailClient:
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
             token = self._http("POST", TOKEN_URL, headers, urlencode(form).encode())
             _check_scope(token)
-            self._access_token = token["access_token"]
+            self._access_token = token.get("access_token")
+            if not self._access_token:
+                raise GmailError("Google did not return an access token. Sign in again.")
         return self._access_token
 
     def _get(self, path: str, **params: str) -> dict:
@@ -105,7 +112,10 @@ class GmailClient:
     def label_id(self, name: str) -> str:
         for label in self._get("labels").get("labels", []):
             if label.get("name", "").casefold() == name.casefold():
-                return label["id"]
+                label_id = label.get("id")
+                if not label_id:
+                    raise GmailError("Gmail returned the configured label without an ID.")
+                return label_id
         raise GmailError(f"There is no Gmail label called {name!r}. Check GMAIL_LABEL.")
 
     def message_ids(self, label_id: str) -> Iterator[str]:
@@ -113,14 +123,22 @@ class GmailClient:
         while True:
             page = self._get("messages", **params)
             for message in page.get("messages", []):
-                yield message["id"]
+                message_id = message.get("id")
+                if not message_id:
+                    raise GmailError("Gmail returned a message without an ID.")
+                yield message_id
             if not page.get("nextPageToken"):
                 return
             params["pageToken"] = page["nextPageToken"]
 
     def raw_message(self, message_id: str) -> bytes:
-        raw = self._get(f"messages/{message_id}", format="raw")["raw"]
-        return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        raw = self._get(f"messages/{message_id}", format="raw").get("raw")
+        if not raw:
+            raise GmailError(f"Gmail did not return the contents of message {message_id}.")
+        try:
+            return base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True)
+        except (binascii.Error, ValueError):
+            raise GmailError(f"Gmail returned damaged contents for message {message_id}.") from None
 
 
 class AsbGmailImporter:
@@ -148,6 +166,8 @@ class AsbGmailImporter:
                 result.trades.append(parse_contract_note(raw, where))
             except NotAContractNote:
                 result.skipped.append(RowError(where, "not an ASB contract note"))
+            except FileProblem as exc:
+                result.errors.append(RowError(where, str(exc)))
             except RowProblem as exc:
                 result.errors.append(RowError(where, str(exc)))
         return result

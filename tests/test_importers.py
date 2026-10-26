@@ -1,0 +1,149 @@
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from portfolio_digest.importers.asb import AsbEmailImporter, AsbStatementImporter
+from portfolio_digest.importers.base import FileProblem, ParseContext
+from portfolio_digest.importers.sharesies import SharesiesImporter
+from portfolio_digest.importers.sharesight_csv import SharesightCsvImporter
+from portfolio_digest.models import TradeType
+from portfolio_digest.reconcile import compare, parse_snapshot
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def fixture(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
+
+
+def test_sharesies_reads_all_markets_smart_etf_and_fractional_units():
+    result = SharesiesImporter().parse(fixture("sharesies-transactions.csv"), ParseContext())
+
+    assert result.errors == []
+    assert len(result.trades) == 5
+    assert len(result.skipped) == 1
+    assert [(trade.exchange, trade.code, trade.currency) for trade in result.trades] == [
+        ("NZX", "AIR", "NZD"),
+        ("NZX", "USF", "NZD"),
+        ("ASX", "BHP", "AUD"),
+        ("NASDAQ", "MSFT", "USD"),
+        ("NZX", "AIR", "NZD"),
+    ]
+    assert result.trades[0].quantity == Decimal("12.34567890")
+    assert result.trades[3].price == Decimal("410.123457")
+    assert result.trades[3].fx_rate == Decimal("1.6393442623")
+
+
+def test_sharesies_reports_bad_rows_without_losing_good_ones():
+    content = fixture("sharesies-transactions.csv") + (
+        b"bad,31/02/2024,AIR,NZX,one,7,BUY,,0,NZD,7,Order\n"
+    )
+    result = SharesiesImporter().parse(content, ParseContext())
+
+    assert len(result.trades) == 5
+    assert len(result.errors) == 1
+    assert "line 8" in str(result.errors[0])
+
+
+def test_sharesies_refuses_non_nzd_portfolio_because_its_fx_rate_is_nzd_based():
+    with pytest.raises(FileProblem, match="only be imported into an NZD portfolio"):
+        SharesiesImporter().parse(fixture("sharesies-transactions.csv"), ParseContext("AUD"))
+
+
+def test_sharesies_rejects_currency_that_disagrees_with_exchange():
+    content = (
+        fixture("sharesies-transactions.csv")
+        .replace(b",BHP,ASX,", b",BHP,ASX,")
+        .replace(b",AUD,115.00", b",USD,115.00")
+    )
+    result = SharesiesImporter().parse(content, ParseContext())
+    assert "trades in AUD, but the row says USD" in str(result.errors[0])
+
+
+def test_sharesight_format_maps_exchange_rate_and_base_currency_fee():
+    result = SharesightCsvImporter().parse(fixture("sharesight-trades.csv"), ParseContext("NZD"))
+
+    assert result.errors == []
+    assert len(result.trades) == 3
+    first = result.trades[0]
+    assert (first.exchange, first.currency) == ("NYSEARCA", "USD")
+    assert first.fx_rate == Decimal("1.6326530612")
+    assert first.fees == Decimal("3.062500")
+    assert result.trades[1].exchange == "NZX"
+
+
+def test_sharesight_fingerprint_is_stable_across_number_formatting():
+    importer = SharesightCsvImporter()
+    first = importer.parse(fixture("sharesight-trades.csv"), ParseContext()).trades[1]
+    reformatted = fixture("sharesight-trades.csv").replace(b",10,29.25,", b",10.0,29.2500,")
+    second = importer.parse(reformatted, ParseContext()).trades[1]
+    assert first.external_ref == second.external_ref
+
+
+def test_sharesight_reports_a_malformed_row():
+    content = fixture("sharesight-trades.csv") + (
+        b"not-a-date,AIR,NZX,1,7,BUY,,0,NZD,Broken made-up row\n"
+    )
+    result = SharesightCsvImporter().parse(content, ParseContext())
+    assert len(result.trades) == 3
+    assert "not a date" in str(result.errors[0])
+
+
+def test_asb_contract_note_extracts_a_trade_and_exact_fees():
+    result = AsbEmailImporter().parse(fixture("asb-contract-note.eml"), ParseContext())
+    trade = result.trades[0]
+
+    assert result.errors == []
+    assert trade.external_ref == "contract:40012345"
+    assert trade.trade_type == TradeType.BUY
+    assert trade.fees == Decimal("34.50")
+    assert trade.name == "Example Healthcare Limited"
+
+
+def test_asb_contract_note_reports_a_missing_required_field():
+    content = fixture("asb-contract-note.eml").replace(b"Quantity: 100\n", b"")
+    result = AsbEmailImporter().parse(content, ParseContext())
+    assert result.trades == []
+    assert "missing: quantity" in str(result.errors[0])
+
+
+def test_asb_statement_reads_history_and_identifies_an_unreadable_trade_row():
+    content = fixture("asb-statement.txt") + b"01/01/2019 this row is damaged\n"
+    result = AsbStatementImporter().parse(content, ParseContext())
+
+    assert len(result.trades) == 3
+    assert result.trades[1].currency == "AUD"
+    assert len(result.errors) == 1
+    assert "cannot read this trade row" in str(result.errors[0])
+
+
+def test_asb_statement_refuses_a_pdf_instead_of_guessing():
+    with pytest.raises(FileProblem, match="Extract its text first"):
+        AsbStatementImporter().parse(b"%PDF-1.7 not really a PDF", ParseContext())
+
+
+def test_reconcile_parser_and_comparison_show_both_missing_sides():
+    snapshot = parse_snapshot(fixture("reconcile-match.csv"))
+    actual = {
+        ("NZX", "AIR"): Decimal("10.34567890"),
+        ("NZX", "USF"): Decimal("3"),
+        ("NZX", "FPH"): Decimal("2"),
+        ("NASDAQ", "MSFT"): Decimal("0.125"),
+    }
+    differences = compare(actual, snapshot)
+
+    assert [(item.exchange, item.code) for item in differences] == [
+        ("ASX", "BHP"),
+        ("NZX", "FPH"),
+        ("NZX", "USF"),
+    ]
+    assert differences[-1].variance == Decimal("-1")
+
+
+def test_reconcile_rejects_duplicate_and_malformed_snapshot_rows():
+    bad = b"Exchange,Code,Units\nNZX,AIR,1\nNZX,AIR,2\nASX,BHP,nope\n"
+    with pytest.raises(FileProblem) as exc:
+        parse_snapshot(bad)
+    assert "line 3" in str(exc.value)
+    assert "line 4" in str(exc.value)

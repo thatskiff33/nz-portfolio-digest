@@ -31,6 +31,9 @@ Trade statement text, one trade per line under a header:
 
     Trade Date  Contract No  Type  Code  Market  Quantity  Price  Brokerage  Consideration
     14/03/2016  30001234     Buy   FPH   NZX     100       9.8500   30.00      985.00
+
+An optional GST column may appear between Brokerage and Consideration. Fees are the sum
+of Brokerage and GST; without a separate GST column, Brokerage must be the total fee.
 """
 
 import email
@@ -86,7 +89,11 @@ def _check_consideration(quantity: Decimal, price_text: str, consideration: Deci
 
 
 def _ref(contract: str) -> str:
-    return "contract:" + "".join(contract.split()).upper()
+    contract = contract.strip()
+    # Leave room for the "contract:" prefix in Trade.external_ref (128 characters).
+    if not re.fullmatch(r"[0-9]{1,119}", contract):
+        raise RowProblem("contract number must contain 1 to 119 digits.")
+    return "contract:" + contract
 
 
 # Contract-note emails ---------------------------------------------------------------------
@@ -259,6 +266,7 @@ _STATEMENT_ROW = re.compile(
     rf"(?P<quantity>{_NUMBER})\s+"
     rf"(?P<price>{_NUMBER})\s+"
     rf"(?P<brokerage>{_NUMBER})\s+"
+    rf"(?:(?P<gst>{_NUMBER})\s+)?"
     rf"(?P<consideration>{_NUMBER})\s*$",
     re.IGNORECASE,
 )
@@ -311,6 +319,9 @@ class AsbStatementImporter(Importer):
             quantity=quantity,
             price=price,
             currency=currency,
-            fees=parse_money(row["brokerage"], "Brokerage", currency=currency),
+            fees=(
+                parse_money(row["brokerage"], "Brokerage", currency=currency)
+                + parse_money(row["gst"] or "", "GST", currency=currency)
+            ),
             external_ref=_ref(row["contract"]),
         )

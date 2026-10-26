@@ -191,3 +191,56 @@ def test_sharesies_accepts_matching_price_and_fee_prefixes():
     assert result.errors == []
     assert result.trades[0].price == Decimal("7.250000")
     assert result.trades[0].fees == Decimal("1.25")
+
+
+@pytest.mark.parametrize("value", ["1e30", "1e14", "99999999999999.9999999", "1e999999999"])
+def test_price_outside_database_range_is_a_row_problem(value):
+    from portfolio_digest.importers.base import RowProblem, parse_price
+
+    with pytest.raises(RowProblem, match="supported price range"):
+        parse_price(value)
+
+
+@pytest.mark.parametrize("value", ["1e-25", "1e-10", "1e30", "1e-999999999"])
+def test_inverse_rate_outside_database_range_is_a_row_problem(value):
+    from portfolio_digest.importers.base import RowProblem, invert_rate
+
+    with pytest.raises(RowProblem, match="supported exchange rate range"):
+        invert_rate(value)
+
+
+def test_email_huge_price_is_a_row_error():
+    content = fixture("asb-contract-note.eml").replace(b"27.5000", b"1e30")
+    result = AsbEmailImporter().parse(content, ParseContext())
+    assert not result.trades
+    assert "email: Price is outside the supported price range" in str(result.errors[0])
+
+
+@pytest.mark.parametrize("contract", ["9" * 120, "123/456", "ABC123", "123 456"])
+@pytest.mark.parametrize("source", ["email", "statement"])
+def test_asb_invalid_contract_number_is_a_located_row_error(contract, source):
+    if source == "email":
+        content = fixture("asb-contract-note.eml").replace(b"40012345", contract.encode())
+        result = AsbEmailImporter().parse(content, ParseContext())
+    else:
+        content = f"14/03/2024 {contract} Buy FPH NZX 100 27.5000 34.50 2750.00\n".encode()
+        result = AsbStatementImporter().parse(content, ParseContext())
+    assert not result.trades
+    assert len(result.errors) == 1
+    assert result.errors[0].where == ("email" if source == "email" else "line 1")
+    assert "contract number" in str(result.errors[0]) or "cannot read this trade row" in str(
+        result.errors[0]
+    )
+
+
+def test_asb_contract_reference_fits_at_maximum_length():
+    content = fixture("asb-contract-note.eml").replace(b"40012345", b"9" * 119)
+    result = AsbEmailImporter().parse(content, ParseContext())
+    assert not result.errors
+    assert len(result.trades[0].external_ref) == 128
+
+
+def test_broker_negative_cash_fees_still_parse_as_positive():
+    from portfolio_digest.importers.base import parse_money
+
+    assert parse_money("-5", "Brokerage") == Decimal("5")

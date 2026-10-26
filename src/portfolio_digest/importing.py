@@ -15,6 +15,7 @@ from portfolio_digest.importers.base import (
     FileProblem,
     Importer,
     ParseContext,
+    ParsedTrade,
     ParseResult,
     RowError,
 )
@@ -51,6 +52,7 @@ class ImportOutcome:
     imported: int
     duplicates: int
     skipped: int
+    notices: tuple[RowError, ...] = ()
 
 
 def portfolio_named(session: Session, name: str, *, lock: bool = False) -> Portfolio:
@@ -100,11 +102,11 @@ def _fail_run(session: Session, run: ImportRun, notes: str) -> None:
     session.commit()
 
 
-def _mark_storage_failed(session: Session, run_id: int) -> None:
+def _mark_run_failed(session: Session, run_id: int) -> None:
     session.rollback()
     run = session.get(ImportRun, run_id)
     if run is not None and run.status == ImportStatus.RUNNING.value:
-        _fail_run(session, run, "Parsed trades could not be stored; no trades imported.")
+        _fail_run(session, run, "Import could not be completed; no trades imported.")
 
 
 def find_or_create_instrument(
@@ -136,6 +138,8 @@ def _store_result(
     run: ImportRun,
     trade_source: str,
     result: ParseResult,
+    *,
+    skip_conflicts: bool = False,
 ) -> ImportOutcome:
     references = [trade.external_ref for trade in result.trades]
     existing = (
@@ -154,17 +158,35 @@ def _store_result(
         if references
         else {}
     )
-    seen: dict[str, str] = {}
+
+    def fields(parsed: ParsedTrade) -> tuple:
+        return (
+            parsed.trade_date,
+            parsed.trade_type.value,
+            parsed.exchange,
+            parsed.code,
+            parsed.quantity,
+            parsed.price,
+            parsed.currency,
+            parsed.fees,
+            parsed.fx_rate,
+        )
+
+    seen: dict[str, ParsedTrade] = {}
+    accepted: list[ParsedTrade] = []
+    duplicates = 0
     for parsed in result.trades:
-        if parsed.external_ref in seen:
-            result.errors.append(
-                RowError(
-                    parsed.where,
-                    f"Reference {parsed.external_ref!r} is repeated (first at "
-                    f"{seen[parsed.external_ref]}). Each row must have a unique reference.",
-                )
+        previous = seen.get(parsed.external_ref)
+        conflict = None
+        if previous is not None:
+            if fields(previous) == fields(parsed):
+                duplicates += 1
+                continue
+            conflict = RowError(
+                parsed.where,
+                f"Reference {parsed.external_ref!r} is repeated (first at "
+                f"{previous.where}) with different trade fields.",
             )
-        seen.setdefault(parsed.external_ref, parsed.where)
         match = existing.get(parsed.external_ref)
         if match is not None:
             trade, instrument = match
@@ -179,25 +201,20 @@ def _store_result(
                 trade.fees,
                 trade.fx_rate,
             )
-            incoming = (
-                parsed.trade_date,
-                parsed.trade_type.value,
-                parsed.exchange,
-                parsed.code,
-                parsed.quantity,
-                parsed.price,
-                parsed.currency,
-                parsed.fees,
-                parsed.fx_rate,
-            )
-            if stored != incoming:
-                result.errors.append(
-                    RowError(
-                        parsed.where,
-                        f"Reference {parsed.external_ref!r} already exists "
-                        "with different trade fields.",
-                    )
+            if stored != fields(parsed):
+                conflict = RowError(
+                    parsed.where,
+                    f"Reference {parsed.external_ref!r} already exists "
+                    "with different trade fields.",
                 )
+        if conflict is not None:
+            if skip_conflicts:
+                result.skipped.append(conflict)
+            else:
+                result.errors.append(conflict)
+            continue
+        seen[parsed.external_ref] = parsed
+        accepted.append(parsed)
 
     if result.errors:
         _fail_run(
@@ -213,7 +230,7 @@ def _store_result(
 
     instruments: dict[tuple[str, str], Instrument] = {}
     imported = 0
-    for parsed in result.trades:
+    for parsed in accepted:
         if parsed.external_ref in existing:
             trade, _ = existing[parsed.external_ref]
             session.add(ImportTradeMatch(import_run_id=run.id, trade_id=trade.id))
@@ -251,10 +268,10 @@ def _store_result(
     run.status = ImportStatus.SUCCEEDED.value
     run.rows_imported = imported
     run.finished_at = datetime.now(UTC)
-    duplicates = len(result.trades) - imported
-    run.notes = f"{duplicates} duplicate(s), {len(result.skipped)} non-trade row(s) skipped."
+    duplicates += len(accepted) - imported
+    run.notes = f"{duplicates} duplicate(s), {len(result.skipped)} row(s) skipped."
     session.commit()
-    return ImportOutcome(run.id, imported, duplicates, len(result.skipped))
+    return ImportOutcome(run.id, imported, duplicates, len(result.skipped), tuple(result.skipped))
 
 
 def import_file(session: Session, source: str, path: Path, portfolio_name: str) -> ImportOutcome:
@@ -276,19 +293,24 @@ def import_file(session: Session, source: str, path: Path, portfolio_name: str) 
         path.name[:255],
         hashlib.sha256(content).hexdigest(),
     )
-    try:
-        result = importer.parse(content, ParseContext(portfolio.base_currency))
-    except FileProblem as exc:
-        _fail_run(session, run, "File could not be parsed; no trades imported.")
-        raise ImportFailure(f"Import run {run.id} failed. {exc}") from None
-    portfolio = session.get(Portfolio, portfolio.id, with_for_update=True)
-    assert portfolio is not None  # protected from deletion by the import run foreign key
     run_id = run.id
     try:
+        try:
+            result = importer.parse(content, ParseContext(portfolio.base_currency))
+        except FileProblem as exc:
+            _fail_run(session, run, "File could not be parsed; no trades imported.")
+            raise ImportFailure(f"Import run {run_id} failed. {exc}") from None
+        portfolio = session.get(Portfolio, portfolio.id, with_for_update=True)
+        assert portfolio is not None  # protected by the import run foreign key
         return _store_result(session, portfolio, run, importer.trade_source, result)
-    except (ImportFailure, SQLAlchemyError):
-        _mark_storage_failed(session, run_id)
-        raise
+    except Exception as exc:
+        _mark_run_failed(session, run_id)
+        if isinstance(exc, (ImportFailure, SQLAlchemyError)):
+            raise
+        # Unexpected exception messages may contain private source data or credentials.
+        raise ImportFailure(
+            f"Import run {run_id} failed unexpectedly; no trades imported."
+        ) from None
 
 
 def import_gmail(
@@ -296,19 +318,21 @@ def import_gmail(
 ) -> ImportOutcome:
     portfolio = portfolio_named(session, portfolio_name, lock=True)
     run = _new_run(session, portfolio, importer.name, None, None)
-    try:
-        result = importer.fetch()
-    except GmailError:
-        _fail_run(session, run, "Gmail could not be read; no trades imported.")
-        raise
-    portfolio = session.get(Portfolio, portfolio.id, with_for_update=True)
-    assert portfolio is not None
     run_id = run.id
     try:
-        return _store_result(session, portfolio, run, importer.trade_source, result)
-    except (ImportFailure, SQLAlchemyError):
-        _mark_storage_failed(session, run_id)
-        raise
+        result = importer.fetch()
+        portfolio = session.get(Portfolio, portfolio.id, with_for_update=True)
+        assert portfolio is not None
+        return _store_result(
+            session, portfolio, run, importer.trade_source, result, skip_conflicts=True
+        )
+    except Exception as exc:
+        _mark_run_failed(session, run_id)
+        if isinstance(exc, (ImportFailure, SQLAlchemyError, GmailError)):
+            raise
+        raise ImportFailure(
+            f"Import run {run_id} failed unexpectedly; no trades imported."
+        ) from None
 
 
 def undo_import(session: Session, run_id: int) -> int:

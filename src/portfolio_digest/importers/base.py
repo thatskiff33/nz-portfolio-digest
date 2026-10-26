@@ -18,7 +18,7 @@ from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, DecimalException, InvalidOperation
 
 from portfolio_digest import markets
 from portfolio_digest.models import TradeType
@@ -223,15 +223,25 @@ def parse_price(value: str, what: str = "price", *, currency: str | None = None)
     number = parse_decimal(value, what, currency=currency)
     if number < 0:
         raise RowProblem(f"{what} cannot be negative ({value!r}).")
-    return number.quantize(Decimal(1).scaleb(-MONEY_PLACES), rounding=ROUND_HALF_EVEN)
+    try:
+        rounded = number.quantize(Decimal(1).scaleb(-MONEY_PLACES), rounding=ROUND_HALF_EVEN)
+    except DecimalException:
+        raise RowProblem(f"{what} is outside the supported price range.") from None
+    if rounded >= Decimal("1e14"):
+        raise RowProblem(f"{what} is outside the supported price range.")
+    return rounded
 
 
-def parse_money(value: str, what: str, *, currency: str | None = None) -> Decimal:
+def parse_money(
+    value: str, what: str, *, currency: str | None = None, allow_negative: bool = True
+) -> Decimal:
     """A cash amount such as a fee. Blank means zero."""
     if not value.strip():
         return Decimal(0)
     number = parse_decimal(value, what, currency=currency)
     if number < 0:
+        if not allow_negative:
+            raise RowProblem(f"{what} cannot be negative ({value!r}).")
         # Some brokers show fees as negative cash. The sign carries no meaning for a fee.
         number = -number
     if _places(number) > MONEY_PLACES:
@@ -244,7 +254,13 @@ def invert_rate(value: str, what: str = "exchange rate") -> Decimal:
     rate = parse_decimal(value, what)
     if rate <= 0:
         raise RowProblem(f"{what} must be more than zero, not {value!r}.")
-    return (Decimal(1) / rate).quantize(Decimal(1).scaleb(-RATE_PLACES), ROUND_HALF_EVEN)
+    try:
+        inverted = (Decimal(1) / rate).quantize(Decimal(1).scaleb(-RATE_PLACES), ROUND_HALF_EVEN)
+    except DecimalException:
+        raise RowProblem(f"{what} is outside the supported exchange rate range.") from None
+    if not Decimal(0) < inverted < Decimal("1e10"):
+        raise RowProblem(f"{what} is outside the supported exchange rate range.")
+    return inverted
 
 
 def listing(exchange: str, code: str, currency: str | None = None) -> tuple[str, str, str]:

@@ -121,6 +121,9 @@ def _show_outcome(outcome) -> None:
         f"duplicates {outcome.duplicates}, skipped {outcome.skipped}."
     )
 
+    for notice in outcome.notices:
+        print(f"Skipped {notice}")
+
 
 def cmd_import(args: argparse.Namespace) -> int:
     try:
@@ -192,7 +195,7 @@ def cmd_trade_add(args: argparse.Namespace) -> int:
         trade_date = parse_date(args.date, "Trade date")
         quantity = _manual_quantity(args.quantity, kind)
         price = parse_price(args.price, "Price", currency=currency)
-        fees = parse_money(args.fees, "Fees", currency=currency)
+        fees = parse_money(args.fees, "Fees", currency=currency, allow_negative=False)
     except (RowProblem, ValueError) as exc:
         _fail(str(exc))
         return 2

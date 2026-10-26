@@ -11,8 +11,12 @@ Use `portfolio-digest import list` to see the audit trail and `portfolio-digest 
 ID` to remove the rows written by one successful run. Undo does not remove instruments or
 touch trades from another run. If another successful run supplied the same trade, undo
 retains it and reassigns it to that run. Undo those runs too to remove their shared trades.
-A repeated reference within one input is a row error. A stored reference is only a
-duplicate when its trade fields match; a conflicting reference fails the whole run.
+Identical repeated references within one input collapse to one trade. A stored reference
+is only a duplicate when its trade fields match. Conflicting references fail file imports.
+For Gmail, a conflicting message is skipped with its message ID and reference in the CLI
+output, allowing the rest of the label to import. The stored trade is retained; review the
+amendment and correct the history explicitly rather than overwriting it automatically.
+The first accepted version of a new reference in a Gmail batch is retained.
 Currency prefixes on prices and fees must agree with their declared currency.
 
 Broker exports contain private financial information. Keep them outside the repository,
@@ -45,6 +49,11 @@ machine, then import the text. The PDF itself is deliberately refused.
 pdftotext -layout trade-statement.pdf imports/asb-history.txt
 portfolio-digest import asb-statement imports/asb-history.txt --portfolio "Personal"
 ```
+
+Statement fees include brokerage plus GST when a separate GST column appears between
+Brokerage and Consideration. Without that column, Brokerage must contain the total fee
+including any GST, as email fees include both amounts. No tax amount is inferred.
+Contract numbers must be 1 to 119 digits.
 
 Each unreadable row is named by line number and the whole run fails, so a damaged row can
 never silently leave the holding short. A saved contract-note email can also be tested or
@@ -99,7 +108,8 @@ portfolio-digest trade add --portfolio "Personal" --date 2024-06-30 \
 ```
 
 Types are `buy`, `sell`, `opening_balance` and `adjustment`. Buy, sell and opening-balance
-quantities must be positive. Adjustments may be positive or negative.
+quantities must be positive. Adjustments may be positive or negative. Manual fees cannot
+be negative.
 
 ## Reconciliation
 

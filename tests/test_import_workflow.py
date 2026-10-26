@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.cli import main
-from portfolio_digest.models import ImportRun, ImportStatus, Trade
+from portfolio_digest.models import ImportRun, ImportStatus, Instrument, Trade
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -126,7 +126,6 @@ def test_gmail_cli_builds_importer_and_imports_with_fake_client(engine, monkeypa
     "second_row",
     [
         b"15/03/2016 30001234 Sell AIR NZX 10 1.0000 1.00 10.00\n",
-        b"14/03/2016 30001234 Buy FPH NZX 100 9.8500 30.00 985.00\n",
     ],
 )
 def test_repeated_contract_reference_in_one_file_is_a_row_error(
@@ -212,3 +211,179 @@ def test_stored_reference_requires_matching_trade_fields(engine, tmp_path, capsy
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(Trade)) == 1
         assert session.get(ImportRun, 2).status == "failed"
+
+
+def test_identical_repeated_references_collapse_and_undo(engine, tmp_path, capsys):
+    assert main(["portfolio", "add", "Personal"]) == 0
+    path = tmp_path / "made-up-repeated.txt"
+    path.write_text("14/03/2016 30001234 Buy FPH NZX 100 9.8500 30.00 985.00\n" * 2)
+    args = ["import", "asb-statement", str(path), "--portfolio", "Personal"]
+    for expected in ("imported 1, duplicates 1", "imported 0, duplicates 2"):
+        assert main(args) == 0
+        assert expected in capsys.readouterr().out
+    assert main(["import", "undo", "1"]) == 0
+    with Session(engine) as session:
+        assert session.scalars(select(Trade.import_run_id)).one() == 2
+    assert main(["import", "undo", "2"]) == 0
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(Trade)) == 0
+
+
+@pytest.mark.parametrize("stored_first", [False, True])
+def test_gmail_resends_and_amendments_do_not_block_other_trades(
+    engine, monkeypatch, capsys, stored_first
+):
+    from portfolio_digest import cli
+    from portfolio_digest.config import GmailSettings
+
+    original = (FIXTURES / "asb-contract-note.eml").read_bytes()
+    messages = {
+        "original": original,
+        "resent": original,
+        "amended": original.replace(b"Quantity: 100", b"Quantity: 200").replace(
+            b"2,750.00", b"5,500.00"
+        ),
+        "new": original.replace(b"40012345", b"40012346"),
+    }
+
+    class FakeClient:
+        def __init__(self, settings):
+            pass
+
+        def label_id(self, label):
+            return "made-up-label"
+
+        def message_ids(self, label_id):
+            return iter(messages)
+
+        def raw_message(self, message_id):
+            return messages[message_id]
+
+    monkeypatch.setattr(cli, "GmailClient", FakeClient)
+    monkeypatch.setattr(cli, "get_gmail_settings", lambda: GmailSettings(label="Made-up label"))
+    assert main(["portfolio", "add", "Personal"]) == 0
+    if stored_first:
+        assert (
+            main(
+                [
+                    "import",
+                    "asb-email",
+                    str(FIXTURES / "asb-contract-note.eml"),
+                    "--portfolio",
+                    "Personal",
+                ]
+            )
+            == 0
+        )
+    for imported, duplicates in ((1 if stored_first else 2, 2 if stored_first else 1), (0, 3)):
+        assert main(["import", "asb-gmail", "--portfolio", "Personal"]) == 0
+        output = capsys.readouterr().out
+        assert f"imported {imported}, duplicates {duplicates}, skipped 1" in output
+        assert "Skipped message amended: Reference 'contract:40012345'" in output
+        assert "different trade fields" in output
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(Trade)) == 2
+        assert all(trade.quantity == 100 for trade in session.scalars(select(Trade)))
+        assert all(run.status == "succeeded" for run in session.scalars(select(ImportRun)))
+
+
+@pytest.mark.parametrize("gst_column", [True, False])
+@pytest.mark.parametrize("email_first", [True, False])
+def test_asb_statement_and_email_share_fee_basis(engine, tmp_path, capsys, gst_column, email_first):
+    from decimal import Decimal
+
+    assert main(["portfolio", "add", "Personal"]) == 0
+    statement = tmp_path / "made-up-statement.txt"
+    fees = "30.00 4.50" if gst_column else "34.50"
+    statement.write_text(f"14/03/2024 40012345 Buy FPH NZX 100 27.5000 {fees} 2750.00\n")
+    inputs = [("asb-email", FIXTURES / "asb-contract-note.eml"), ("asb-statement", statement)]
+    if not email_first:
+        inputs.reverse()
+    for source, path in inputs:
+        assert main(["import", source, str(path), "--portfolio", "Personal"]) == 0
+    assert "imported 0, duplicates 1" in capsys.readouterr().out
+    with Session(engine) as session:
+        assert session.scalars(select(Trade)).one().fees == Decimal("34.50")
+
+
+@pytest.mark.parametrize("phase", ["file_parse", "gmail_fetch", "file_store", "gmail_store"])
+def test_unexpected_import_exception_marks_run_failed(engine, monkeypatch, capsys, phase):
+    from portfolio_digest import cli, importing
+    from portfolio_digest.config import GmailSettings
+
+    def broken(*args, **kwargs):
+        if phase.endswith("store"):
+            args[0].add(Instrument(exchange="NZX", code="AIR", name="Made-up", currency="NZD"))
+            args[0].flush()
+        raise RuntimeError("made-up private contents must not appear")
+
+    gmail = phase.startswith("gmail")
+    if phase.endswith("store"):
+        monkeypatch.setattr(importing, "_store_result", broken)
+    elif gmail:
+        monkeypatch.setattr(cli.AsbGmailImporter, "fetch", broken)
+    else:
+        monkeypatch.setattr(importing.FILE_IMPORTERS["sharesies"], "parse", broken)
+    if gmail:
+        monkeypatch.setattr(cli, "GmailClient", lambda settings: None)
+        monkeypatch.setattr(cli, "get_gmail_settings", lambda: GmailSettings(label="Made-up"))
+        if phase.endswith("store"):
+            from portfolio_digest.importers.base import ParseResult
+
+            monkeypatch.setattr(cli.AsbGmailImporter, "fetch", lambda self: ParseResult())
+    assert main(["portfolio", "add", "Personal"]) == 0
+    args = (
+        ["import", "asb-gmail"]
+        if gmail
+        else ["import", "sharesies", str(FIXTURES / "sharesies-transactions.csv")]
+    )
+    assert main([*args, "--portfolio", "Personal"]) == 2
+    error = capsys.readouterr().err
+    assert "failed unexpectedly" in error
+    assert "private contents" not in error
+    with Session(engine) as session:
+        run = session.scalars(select(ImportRun)).one()
+        assert run.status == "failed"
+        assert run.finished_at is not None
+        assert "private contents" not in run.notes
+        assert session.scalar(select(func.count()).select_from(Trade)) == 0
+        assert session.scalar(select(func.count()).select_from(Instrument)) == 0
+
+
+@pytest.mark.parametrize("old,new", [(b"260.50", b"1e30"), (b"0.6125", b"1e-25")])
+def test_out_of_range_decimal_is_a_logged_row_error(engine, tmp_path, capsys, old, new):
+    assert main(["portfolio", "add", "Personal"]) == 0
+    path = tmp_path / "made-up-range.csv"
+    path.write_bytes((FIXTURES / "sharesight-trades.csv").read_bytes().replace(old, new))
+    assert main(["import", "sharesight-csv", str(path), "--portfolio", "Personal"]) == 2
+    assert "line 2" in capsys.readouterr().err
+    with Session(engine) as session:
+        assert session.scalars(select(ImportRun)).one().status == "failed"
+        assert session.scalar(select(func.count()).select_from(Trade)) == 0
+
+
+def test_manual_negative_fees_are_refused(capsys):
+    assert (
+        main(
+            [
+                "trade",
+                "add",
+                "--portfolio",
+                "Made-up",
+                "--date",
+                "2024-01-01",
+                "--type",
+                "buy",
+                "--exchange",
+                "NZX",
+                "--code",
+                "AIR",
+                "--quantity",
+                "1",
+                "--fees",
+                "-5",
+            ]
+        )
+        == 2
+    )
+    assert "Fees cannot be negative" in capsys.readouterr().err

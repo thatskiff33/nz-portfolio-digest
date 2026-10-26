@@ -1,0 +1,16 @@
+schema = 1
+
+# Sekreton task sandbox: install the app with dev tools, then run the quick gates.
+# Database tests skip here (no TEST_DATABASE_URL); GitHub CI runs them against Postgres.
+[setup]
+run = '''
+python3 -m venv .venv &&
+.venv/bin/pip install -q --upgrade pip &&
+.venv/bin/pip install -q -e ".[dev]"
+'''
+
+[jobs.lint]
+run = ".venv/bin/ruff check . && .venv/bin/ruff format --check ."
+
+[jobs.test]
+run = ".venv/bin/pytest -q"

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+    <p class="eyebrow">{{ portfolio.name }}</p>
+    <h1>Add trade or correction</h1>
+    <p class="muted">
+        Corrections use a signed adjustment, preserving the original trade history.
+        For a reversal, enter the opposite quantity and explain it in the notes.
+    </p>
+    <form class="panel entry-form"
+          method="post"
+          action="/p/{{ portfolio.id }}/trade">
+        <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
+        <label>
+            Market
+            <select name="exchange" aria-label="Market">
+                <option>NZX</option>
+                <option>ASX</option>
+                <option>NYSE</option>
+                <option>NASDAQ</option>
+            </select>
+        </label>
+        <label>
+            Code
+            <input name="code" maxlength="32" required placeholder="e.g. KOW">
+        </label>
+        <label>
+            Trade date
+            <input type="date" name="trade_date" required>
+        </label>
+        <label>
+            Type
+            <select name="trade_type" aria-label="Type">
+                <option value="buy">Buy</option>
+                <option value="sell">Sell</option>
+                <option value="opening_balance">Opening balance</option>
+                <option value="adjustment">Adjustment / correction</option>
+            </select>
+        </label>
+        <label>
+            Quantity
+            <input name="quantity"
+                   inputmode="decimal"
+                   aria-label="Quantity"
+                   aria-describedby="quantity-help"
+                   required>
+            <small id="quantity-help">Negative quantities allowed for adjustments only.</small>
+        </label>
+        <label>
+            Unit price
+            <input name="price"
+                   inputmode="decimal"
+                   aria-label="Unit price"
+                   aria-describedby="price-help"
+                   required>
+            <small id="price-help">In the listing's currency.</small>
+        </label>
+        <label>
+            Fees
+            <input name="fees" inputmode="decimal" value="0" required>
+        </label>
+        <label>
+            Notes
+            <textarea name="notes" maxlength="4000" rows="3">
+</textarea>
+        </label>
+        <button>Save trade</button>
+    </form>
+{% endblock %}

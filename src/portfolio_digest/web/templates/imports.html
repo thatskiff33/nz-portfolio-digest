@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+    <p class="eyebrow">{{ portfolio.name }}</p>
+    <h1>Import history</h1>
+    <p class="muted">An audit trail of broker imports and their results.</p>
+    {% for run in runs %}
+        <section class="panel">
+            <div class="section-heading">
+                <h2>#{{ run.id }} · {{ run.source }}</h2>
+                <span class="date-pill">{{ run.status }}</span>
+            </div>
+            <p>{{ run.filename or 'Feed import' }} · {{ run.rows_imported }} rows imported · {{ run.started_at }}</p>
+            <p>{{ run.notes or 'No additional notices.' }}</p>
+            {% if run.status == "succeeded" %}
+                {% if request.state.browser.authenticated %}
+                    <form method="post"
+                          action="/p/{{ portfolio.id }}/imports/{{ run.id }}/undo">
+                        <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
+                        <label class="confirm">
+                            <input type="checkbox" required>
+                            I understand this removes records supplied only by this import.
+                        </label>
+                        <button class="danger">Undo import #{{ run.id }}</button>
+                    </form>
+                {% else %}
+                    <a href="/login">Sign in to undo this import</a>
+                {% endif %}
+            {% endif %}
+        </section>
+    {% else %}
+        <section class="panel">
+            <p>No imports yet. Import a broker file using the CLI.</p>
+        </section>
+    {% endfor %}
+{% endblock %}

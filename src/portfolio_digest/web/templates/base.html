@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en-NZ">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="htmx-config"
+              content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"historyCacheSize":0,"selfRequestsOnly":true}'>
+        <title>
+            {% block title %}
+                Portfolio digest
+            {% endblock %}
+        </title>
+        <link rel="stylesheet" href="/static/dashboard.css">
+        <script src="/static/htmx-2.0.4.min.js" defer></script>
+        <script src="/static/chart-4.4.8.umd.js" defer></script>
+        <script src="/static/dashboard.js" defer></script>
+    </head>
+    <body hx-boost="true" hx-target="body" hx-swap="outerHTML">
+        <a class="skip" href="#main">Skip to content</a>
+        <header>
+            <a class="brand" href="/">◈ <span>Portfolio digest</span>
+            </a>
+            <span class="private">Private workspace</span>
+            {% if request.state.browser.authenticated %}
+                <form action="/logout" method="post">
+                    <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
+                    <button class="quiet">Sign out</button>
+                </form>
+            {% else %}
+                <a href="/login">Sign in to edit</a>
+            {% endif %}
+        </header>
+        <div class="shell">
+            <aside aria-label="Portfolio navigation">
+                <p class="eyebrow">Your portfolios</p>
+                {% for p in portfolios|default([]) %}
+                    <a class="portfolio-link {% if portfolio is defined and p.id == portfolio.id %} selected {% endif %}"
+                       href="/p/{{ p.id }}">{{ p.name }} <span>↗</span>
+                    </a>
+                {% endfor %}
+                {% if portfolio is defined %}
+                    <nav>
+                        <a href="/p/{{ portfolio.id }}">Overview &amp; holdings</a>
+                        <a href="/p/{{ portfolio.id }}/imports">Import history</a>
+                        <a href="/p/{{ portfolio.id }}/reconcile">Reconciliation</a>
+                        {% if request.state.browser.authenticated %}
+                            <a href="/p/{{ portfolio.id }}/trade">Add trade or correction</a>
+                        {% endif %}
+                    </nav>
+                {% endif %}
+                <p class="aside-note">
+                    A clearer view between emails.
+                    <br>
+                    Stored prices. Exact amounts.
+                </p>
+            </aside>
+            <main id="main" tabindex="-1">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+        <footer>
+            Portfolio digest <span>Private access over Tailscale · Values exclude cash</span>
+        </footer>
+    </body>
+</html>

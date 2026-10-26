@@ -142,6 +142,7 @@ class Holding:
     prices: tuple[Observation, ...] = ()
     income: tuple[Payment, ...] = ()
     splits: tuple[SplitEvent, ...] = ()
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -172,6 +173,15 @@ class Result:
     gross_dividends: Decimal = ZERO
     withholding_tax: Decimal = ZERO
     imputation_gross_up: Decimal = ZERO
+    units: Decimal = ZERO
+    price: Decimal | None = None
+    currency: str = ""
+    name: str = ""
+
+    @property
+    @_financial_math
+    def change(self) -> Decimal:
+        return self.closing - self.opening
 
     @property
     @_financial_math
@@ -437,6 +447,7 @@ def holding_return(
                 adjustments += trade.quantity * trade.price * rate
         quantity += trade.delta
     closing = ZERO
+    price = None
     if quantity:
         price = price_on(end)
         rate = fx(holding.currency, end)
@@ -464,6 +475,10 @@ def holding_return(
         gross,
         tax,
         credits,
+        quantity,
+        price,
+        holding.currency,
+        holding.name,
     )
 
 
@@ -486,6 +501,7 @@ def subtotal(label: str, rows: tuple[Result, ...]) -> Result:
         gross_dividends=sum((r.gross_dividends for r in rows), ZERO),
         withholding_tax=sum((r.withholding_tax for r in rows), ZERO),
         imputation_gross_up=sum((r.imputation_gross_up for r in rows), ZERO),
+        units=sum((r.units for r in rows), ZERO),
     )
 
 

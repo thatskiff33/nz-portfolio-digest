@@ -1,6 +1,8 @@
 """Database boundary for the pure returns engine. No writes or remote price fetching."""
 
+from dataclasses import replace
 from datetime import date, datetime
+from decimal import localcontext
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
@@ -8,16 +10,20 @@ from sqlalchemy.orm import Session
 
 from portfolio_digest.config import get_settings
 from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
+from portfolio_digest.prices.calendars import FX
 from portfolio_digest.returns import (
     Holding,
     Observation,
     Payment,
     Report,
+    Result,
     ReturnError,
     SplitEvent,
     Transaction,
+    _lookup,
     calculate_returns,
     period_range,
+    subtotal,
 )
 from portfolio_digest.validation import portfolio_name
 
@@ -29,9 +35,10 @@ def load_returns(
     today: date | None = None,
     *,
     gross_up: bool = False,
+    base_currency: str | None = None,
 ) -> Report:
     today = today or datetime.now(ZoneInfo(get_settings().timezone)).date()
-    # Validate syntax before querying; 'all' is resolved after loading trades.
+    # Validate syntax before querying; 'all' is resolved from stored activity below.
     start, end = period_range(period, today)
     portfolio = session.scalar(
         select(Portfolio).where(func.lower(Portfolio.name) == portfolio_name(name).lower())
@@ -40,10 +47,18 @@ def load_returns(
         raise ReturnError("Portfolio not found.")
     if period == "all":
         start, end = period_range(period, today, first_activity_date(session, portfolio.id, end))
-    holdings, rates = load_inputs(session, portfolio, start, end)
-    return calculate_returns(
-        holdings, start, end, rates, portfolio.base_currency, gross_up=gross_up
+    target_currency = base_currency or portfolio.base_currency
+    holdings, rates, conversion_flags = _load_inputs(
+        session, portfolio, start, end, target_currency
     )
+    report = calculate_returns(holdings, start, end, rates, target_currency, gross_up=gross_up)
+    if conversion_flags:
+        rows = tuple(
+            replace(r, flags=tuple(sorted(set(r.flags) | conversion_flags)))
+            for r in report.holdings
+        )
+        return _combined_report(rows, start, end, target_currency)
+    return report
 
 
 def first_activity_date(session: Session, portfolio_id: int, end: date) -> date | None:
@@ -67,6 +82,13 @@ def load_inputs(
     session: Session, portfolio: Portfolio, start: date, end: date
 ) -> tuple[tuple[Holding, ...], dict[str, tuple[Observation, ...]]]:
     """Shared stored inputs for reports and sampled dashboard valuations."""
+    holdings, rates, _ = _load_inputs(session, portfolio, start, end, portfolio.base_currency)
+    return holdings, rates
+
+
+def _load_inputs(
+    session: Session, portfolio: Portfolio, start: date, end: date, target_currency: str
+) -> tuple[tuple[Holding, ...], dict[str, tuple[Observation, ...]], set[str]]:
     trades = session.scalars(
         select(Trade)
         .where(Trade.portfolio_id == portfolio.id, Trade.trade_date <= end)
@@ -93,7 +115,7 @@ def load_inputs(
     ).all()
     fx_rows = session.scalars(
         select(FxRate).where(
-            FxRate.base_currency == portfolio.base_currency,
+            FxRate.base_currency == target_currency,
             FxRate.rate_date <= end,
         )
     ).all()
@@ -102,6 +124,29 @@ def load_inputs(
         rates[currency] = tuple(
             Observation(r.rate_date, r.rate, r.is_stale) for r in fx_rows if r.currency == currency
         )
+    conversion_flags: set[str] = set()
+
+    def recorded_fx(value, day, currency):
+        if day <= start:
+            return None
+        if value is None or target_currency == portfolio.base_currency:
+            return value
+        if currency == target_currency:
+            # Native target-currency amounts need no conversion. Broker FX and
+            # market cross-rates need not be exact reciprocals.
+            return None
+        # Broker FX is relative to the portfolio base. Translate that base using
+        # the same dated lookup and stale-data rules as every other engine input.
+        with localcontext() as context:
+            context.prec = max(context.prec, 80)
+            return value * _lookup(
+                rates.get(portfolio.base_currency, ()),
+                day,
+                f"{portfolio.base_currency}/{target_currency} FX",
+                conversion_flags,
+                FX,
+            )
+
     holdings = []
     for instrument in instruments:
         instrument_trades = [t for t in trades if t.instrument_id == instrument.id]
@@ -121,7 +166,7 @@ def load_inputs(
                         t.quantity,
                         t.consideration / t.quantity if t.consideration is not None else t.price,
                         t.fees,
-                        t.fx_rate,
+                        recorded_fx(t.fx_rate, t.trade_date, t.currency),
                     )
                     for t in instrument_trades
                 ),
@@ -135,7 +180,7 @@ def load_inputs(
                         p.paid_date,
                         p.net_amount,
                         p.currency,
-                        p.fx_rate,
+                        recorded_fx(p.fx_rate, p.paid_date, p.currency),
                         p.gross_amount,
                         p.withholding_tax,
                         p.imputation_credits,
@@ -150,6 +195,38 @@ def load_inputs(
                     for s in split_rows
                     if s.instrument_id == instrument.id
                 ),
+                instrument.name,
             )
         )
-    return tuple(holdings), rates
+    return tuple(holdings), rates, conversion_flags
+
+
+def _combined_report(rows: tuple[Result, ...], start: date, end: date, currency: str) -> Report:
+    markets = tuple(
+        subtotal(m, tuple(r for r in rows if r.exchange == m))
+        for m in sorted({r.exchange for r in rows})
+    )
+    return Report(start, end, currency, rows, markets, subtotal("Portfolio", rows))
+
+
+def load_combined_returns(session: Session, start: date, end: date) -> Report:
+    """All portfolios in NZD, aggregated by listing using shared engine subtotals."""
+    reports = [
+        load_returns(session, p.name, f"{start}:{end}", base_currency="NZD")
+        for p in session.scalars(select(Portfolio).order_by(Portfolio.id))
+    ]
+    rows = [r for report in reports for r in report.holdings]
+    combined = []
+    for label in sorted({r.label for r in rows}):
+        group = tuple(r for r in rows if r.label == label)
+        first = group[0]
+        combined.append(
+            replace(
+                subtotal(label, group),
+                exchange=first.exchange,
+                price=next((r.price for r in group if r.price is not None), None),
+                currency=first.currency,
+                name=first.name,
+            )
+        )
+    return _combined_report(tuple(combined), start, end, "NZD")

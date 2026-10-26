@@ -514,3 +514,193 @@ def test_cli_keeps_corporate_action_command_after_dashboard_merge(monkeypatch, c
         trade = session.scalar(select(Trade).where(Trade.instrument_id == instrument.id))
         assert trade.quantity == D(10)
     engine.dispose()
+
+
+def test_email_engine_and_cli_figures_are_identical(returns_engine, monkeypatch, capsys):
+    from portfolio_digest.reports import build_report, render
+    from portfolio_digest.returns_table import render_table
+
+    # Keep one fictional portfolio so the all-portfolio email and scoped CLI agree.
+    with Session(returns_engine) as session:
+        separate = session.scalar(select(Portfolio).where(Portfolio.name == "Separate"))
+        for row in session.scalars(select(Trade).where(Trade.portfolio_id == separate.id)):
+            session.delete(row)
+        income = session.scalar(select(Income).where(Income.external_ref == "div"))
+        income.withholding_tax = D(1)
+        income.imputation_credits = D(".7")
+        session.commit()
+        shared = load_returns(session, "Invented", "2026-10-12:2026-10-19")
+        email = build_report(session, date(2026, 10, 13), date(2026, 10, 19))
+    assert email.returns.holdings == shared.holdings
+    assert email.returns.total == shared.total
+    for row, expected in zip(email.holdings, shared.holdings, strict=True):
+        assert (
+            row.amounts.capital,
+            row.amounts.dividends,
+            row.amounts.currency,
+            row.amounts.total,
+        ) == (
+            expected.amounts.capital,
+            expected.amounts.dividends,
+            expected.amounts.currency,
+            expected.amounts.total,
+        )
+    assert email.total_return == shared.total.amounts.total == D(46)
+    assert email.returns.total.gross_dividends == D(5)
+    assert email.returns.total.withholding_tax == D(1)
+    assert email.returns.total.imputation_gross_up == D(".7")
+    assert email.history[0].value == shared.total.opening
+    assert email.history[-1].value == shared.total.closing
+    assert email.history[0].day == shared.start
+    _, text = render(email)
+    assert "Gross dividends" in text and "Withholding tax" in text
+    monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: returns_engine)
+    assert main(["returns", "--portfolio", "Invented", "--period", "2026-10-12:2026-10-19"]) == 0
+    assert capsys.readouterr().out == render_table(email.returns) + "\n"
+
+
+def test_email_combines_listings_and_converts_foreign_portfolio_broker_fx(returns_engine):
+    from portfolio_digest.reports import build_report
+
+    with Session(returns_engine) as session:
+        separate = session.scalar(select(Portfolio).where(Portfolio.name == "Separate"))
+        separate.base_currency = "USD"
+        instrument = session.scalar(select(Instrument))
+        old = session.scalar(select(Trade).where(Trade.external_ref == "other"))
+        old.quantity = D(10)
+        old.fx_rate = D(1)
+        session.add_all(
+            [
+                Trade(
+                    portfolio_id=separate.id,
+                    instrument_id=instrument.id,
+                    trade_date=date(2026, 10, 15),
+                    trade_type="buy",
+                    quantity=D(2),
+                    price=D(12),
+                    fees=D(0),
+                    currency="USD",
+                    fx_rate=D(1),
+                    source="made_up",
+                    external_ref="foreign-buy",
+                ),
+                Income(
+                    portfolio_id=separate.id,
+                    instrument_id=instrument.id,
+                    paid_date=date(2026, 10, 15),
+                    kind="dividend",
+                    currency="USD",
+                    gross_amount=D(3),
+                    net_amount=D(2),
+                    withholding_tax=D(1),
+                    imputation_credits=D(".5"),
+                    fx_rate=D(1),
+                    source="made_up",
+                    external_ref="foreign-income",
+                ),
+            ]
+        )
+        session.commit()
+        email = build_report(session, date(2026, 10, 13), date(2026, 10, 19))
+    (row,) = email.holdings
+    # Invented realises 30 capital + 12 FX + 4 dividend. Separate buys two
+    # units at 12, closes at 10: -4 USD capital + 2 USD net dividend.
+    assert row.units == 12 and row.price == 10 and row.currency == "USD"
+    assert row.name == "Imaginary"
+    assert row.opening == 300 and row.closing == 180
+    assert row.amounts.capital == 24
+    assert row.amounts.currency == 12
+    assert row.amounts.dividends == 7
+    assert row.amounts.total == 43
+    assert row.gross_dividends == D("9.5")
+    assert row.withholding_tax == D("1.5")
+    assert row.imputation_gross_up == D(".75")
+    assert row.flags  # Includes stale conversion quotes.
+    assert email.returns.total.amounts == row.amounts
+
+
+def test_email_missing_history_fails_safely(returns_engine):
+    from portfolio_digest.reports import ReportError, build_report
+
+    with Session(returns_engine) as session:
+        for row in session.scalars(select(Price)):
+            session.delete(row)
+        session.commit()
+        with pytest.raises(ReportError, match="prices fetch --backfill") as error:
+            build_report(session, date(2026, 10, 13), date(2026, 10, 19))
+        assert "IMAGINARY" not in str(error.value)
+        with pytest.raises(ReportError, match="start"):
+            build_report(session, date(2026, 10, 20), date(2026, 10, 19))
+
+
+@pytest.mark.parametrize("broker_fx", [D(".61"), None])
+def test_email_keeps_nzd_trades_and_income_native_in_foreign_portfolio(returns_engine, broker_fx):
+    from portfolio_digest.reports import build_report
+
+    with Session(returns_engine) as session:
+        foreign = session.scalar(select(Portfolio).where(Portfolio.name == "Separate"))
+        foreign.base_currency = "USD"
+        for trade in session.scalars(select(Trade).where(Trade.portfolio_id == foreign.id)):
+            session.delete(trade)
+        instrument = Instrument(
+            exchange="NZX", code="NATIVE", name="Native Example", currency="NZD"
+        )
+        session.add(instrument)
+        session.flush()
+        session.add_all(
+            [
+                Trade(
+                    portfolio_id=foreign.id,
+                    instrument_id=instrument.id,
+                    trade_date=date(2026, 10, 15),
+                    trade_type="buy",
+                    quantity=D(10),
+                    price=D(10),
+                    fees=D(0),
+                    currency="NZD",
+                    fx_rate=broker_fx,
+                    source="made_up",
+                    external_ref="native-buy",
+                ),
+                Income(
+                    portfolio_id=foreign.id,
+                    instrument_id=instrument.id,
+                    paid_date=date(2026, 10, 15),
+                    kind="dividend",
+                    currency="NZD",
+                    gross_amount=D(5),
+                    net_amount=D(4),
+                    withholding_tax=D(1),
+                    imputation_credits=D(".5"),
+                    fx_rate=broker_fx,
+                    source="made_up",
+                    external_ref="native-income",
+                ),
+                Price(
+                    instrument_id=instrument.id,
+                    price_date=date(2026, 10, 15),
+                    close=D(12),
+                    source="made_up",
+                ),
+            ]
+        )
+        session.commit()
+        # The USD/NZD market rate is 1.5, so .61 broker FX is not its reciprocal.
+        # Neither rate should affect native NZD cash flows.
+        email = build_report(session, date(2026, 10, 15), date(2026, 10, 19))
+        row = next(r for r in email.holdings if r.label == "NZX:NATIVE")
+        assert row.closing == D(120)
+        assert row.amounts.capital == D(20)
+        assert row.amounts.dividends == D(4)
+        assert row.amounts.currency == D(0)
+        assert row.amounts.total == D(24)
+        assert row.gross_dividends == D(5)
+        assert row.withholding_tax == D(1)
+        assert row.imputation_gross_up == D(".5")
+
+        # Native NZD rows also work when no foreign market quote is available.
+        for quote in session.scalars(select(FxRate)):
+            session.delete(quote)
+        session.flush()
+        native = load_returns(session, "Separate", "2026-10-14:2026-10-19", base_currency="NZD")
+        assert native.holdings == (row,)

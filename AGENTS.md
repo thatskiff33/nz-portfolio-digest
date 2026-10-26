@@ -47,8 +47,10 @@ agent does the GitHub steps.
    - **Failed or stopped task:** `retry_task`.
    - **Merge conflict:** `retry_task`, which re-runs conflict resolution.
    - **Red CI on its PR:** `request_changes` with the log excerpt.
-   - **Last resort:** fix it yourself on the PR branch only when Sekreton can't take the
-     change.
+   - **Last resort:** fix it yourself only on an existing Sekreton PR branch when
+     Sekreton cannot take the change, for example a conflict it cannot resolve. Then use
+     `gh pr merge <n> --squash --delete-branch` so the squash is still credited to
+     sekreton[bot].
 6. **Land the PR Sekreton opens** (head branch `sekreton/.../nzp-<n>`).
    - Wait for CI to be green on the exact head.
    - Post a short plain-English **✅ Ready to merge** comment: what was built, Sekreton's
@@ -64,14 +66,18 @@ agent does the GitHub steps.
 
 ## Merging and privacy (public repo)
 
-- **Sekreton's PRs:** merge without `--author-email`. GitHub credits the squash to the PR's
-  author, sekreton[bot], at its no-reply address. It rejects an author email that isn't the
-  merging account's own.
-- **PRs you open yourself as `thatskiff33-agents`:** pass
-  `--author-email 318094810+thatskiff33-agents@users.noreply.github.com`, so no private
-  address is stamped on `main`.
-- **After every merge:** check that `git log origin/main -1 --format=%ae` is a
-  `users.noreply.github.com` address.
+- **Every change goes through a Sekreton task**, including docs and small fixes, so the
+  PR is authored by sekreton[bot]. Directing agents do not open PRs or push commits
+  themselves, except for a last-resort fix on an existing Sekreton PR branch when
+  Sekreton cannot take the change, as described in step 5.
+- **Sekreton's PRs:** merge with `gh pr merge <n> --squash --delete-branch` so GitHub
+  credits the squash to the PR's author, sekreton[bot], at its no-reply address.
+- **If someone ever has to open a PR as `thatskiff33-agents`:** first check that the
+  account's GitHub setting "Keep my email addresses private" is on. Do not merge it
+  otherwise; note it on the epic.
+- **After every merge:** check both `git log origin/main -1 --format=%ae` and
+  `git log origin/main -1 --format=%ce`. Each must be a `users.noreply.github.com`
+  address or GitHub's `noreply@github.com` address.
 - **Never:** push to `main` directly, force-push, or commit secrets, `.env` files, broker
   exports or real portfolio data.
 

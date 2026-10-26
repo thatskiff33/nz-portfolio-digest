@@ -31,6 +31,7 @@ The owner does not review PRs (owner decision, 26 Oct 2026). Work runs autonomou
 Issues are built by [Sekreton](https://sekreton.com) tasks in the project
 `nz-portfolio-digest` (task prefix `NZP`). One task per issue; its brief carries the
 issue's scope and recorded decisions, and `depends_on` keeps waves in order.
+All changes, including docs and small fixes, go through Sekreton tasks.
 
 - The task sandbox runs [`.sekreton/config.toml`](../.sekreton/config.toml): it installs the
   app with dev tools and runs `ruff` and `pytest`. Database tests skip there (no Postgres);

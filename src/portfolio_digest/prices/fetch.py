@@ -18,17 +18,18 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import Engine, case, delete, func, select
+from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from portfolio_digest.db import session_scope
-from portfolio_digest.models import FxRate, Instrument, Price, Split, Trade, TradeType
+from portfolio_digest.models import FxRate, Instrument, Price, Split, Trade
 from portfolio_digest.prices import calendars
 from portfolio_digest.prices.http import SourceError
 from portfolio_digest.prices.sources import FxSource, Listing, PriceSource, _fits_numeric
 from portfolio_digest.prices.symbols import UnknownSymbol
+from portfolio_digest.returns import units_at
 
 log = logging.getLogger(__name__)
 
@@ -128,13 +129,17 @@ class Sources:
 
 def held_instruments(session: Session, only: Iterable[str] | None = None) -> list[Holding]:
     """Every instrument with trades, optionally only those named as `EXCHANGE:CODE`."""
-    signed = case((Trade.trade_type == TradeType.SELL.value, -Trade.quantity), else_=Trade.quantity)
-    positions = session.execute(
-        select(Trade.instrument_id, Trade.portfolio_id, func.sum(signed)).group_by(
-            Trade.instrument_id, Trade.portfolio_id
-        )
-    ).all()
-    active = {instrument_id for instrument_id, _portfolio_id, units in positions if units}
+    trades_by_position = {}
+    for trade in session.scalars(select(Trade)):
+        trades_by_position.setdefault((trade.instrument_id, trade.portfolio_id), []).append(trade)
+    splits_by_instrument = {}
+    for split in session.scalars(select(Split)):
+        splits_by_instrument.setdefault(split.instrument_id, []).append(split)
+    active = {
+        instrument_id
+        for (instrument_id, _), trades in trades_by_position.items()
+        if units_at(trades, splits_by_instrument.get(instrument_id, []), date.max)
+    }
     stmt = (
         select(
             Instrument,
@@ -331,6 +336,12 @@ def _update_instrument(
             )
         )
     }
+    registry_splits = {
+        row.split_date: (row.shares_before, row.shares_after)
+        for row in session.scalars(
+            select(Split).where(Split.instrument_id == h.instrument_id, Split.source == "registry")
+        )
+    }
     closes: dict[date, Decimal] = {}
     splits: dict[date, tuple[Decimal, Decimal]] = {}
     try:
@@ -341,6 +352,11 @@ def _update_instrument(
         )
         full_start = min(h.first_trade, first_stored or h.first_trade, begin)
         history = source.history(symbol, begin, end, currency=h.currency, split_start=full_start)
+        if any(
+            day in history.splits and history.splits[day] != ratio
+            for day, ratio in registry_splits.items()
+        ):
+            raise SourceError("Yahoo split ratio conflicts with a recorded registry action.")
         if begin > full_start and {
             day: ratio for day, ratio in recorded_splits.items() if day >= full_start
         } != {day: ratio for day, ratio in history.splits.items() if day >= full_start}:
@@ -350,7 +366,7 @@ def _update_instrument(
             )
             begin = full_start
         closes = {d: c for d, c in history.closes.items() if begin <= d <= end}
-        splits = history.splits
+        splits = history.splits | registry_splits
         _save_splits(session, h.instrument_id, splits, source.name, full_start)
         recorded_splits = {
             day: ratio for day, ratio in recorded_splits.items() if day < full_start
@@ -561,6 +577,7 @@ def _save_splits(
             Split.instrument_id == instrument_id,
             Split.split_date >= split_start,
             Split.split_date.not_in(splits),
+            Split.source != "registry",
         )
     )
     if not splits:
@@ -585,5 +602,6 @@ def _save_splits(
             "source": stmt.excluded.source,
             "fetched_at": func.now(),
         },
+        where=Split.source != "registry",
     )
     session.execute(stmt)

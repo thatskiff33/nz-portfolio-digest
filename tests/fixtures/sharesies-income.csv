@@ -1,0 +1,5 @@
+Order ID,Trade date,Instrument code,Market code,Quantity,Price,Transaction type,Exchange rate,Transaction fee,Currency,Amount,Transaction method,Gross amount,Withholding tax,RWT,Foreign withholding tax,Imputation credits,Franking credits,DRP quantity,Ex date
+fictional-nz,2024-06-20,EXM,NZX,,,DIVIDEND,,,NZD,90,,100,10,10,,28,,,2024-06-01
+fictional-us,2024-06-20,EXUS,NASDAQ,,,DIVIDEND,0.625,,USD,85,,100,15,,15,,,,2024-06-01
+fictional-au,2024-06-20,EXAU,ASX,,,DIVIDEND,,,AUD,100,,100,0,,,,42.857143,,2024-06-01
+fictional-drp,2024-06-20,EXM,NZX,,,DISTRIBUTION,,,NZD,90,,100,10,10,,28,,3,2024-06-01

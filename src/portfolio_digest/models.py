@@ -201,7 +201,10 @@ class Trade(Base):
         CheckConstraint("price >= 0", name="price_nonnegative"),
         CheckConstraint("fees >= 0", name="fees_nonnegative"),
         CheckConstraint("fx_rate IS NULL OR fx_rate > 0", name="fx_rate_positive"),
-        *_not_nan("quantity", "price", "fees", "fx_rate"),
+        CheckConstraint(
+            "consideration IS NULL OR consideration >= 0", name="consideration_nonnegative"
+        ),
+        *_not_nan("quantity", "price", "fees", "fx_rate", "consideration"),
         Index("ix_trades_portfolio_instrument_date", "portfolio_id", "instrument_id", "trade_date"),
         # An import into another portfolio is refused. NULL means not imported.
         ForeignKeyConstraint(
@@ -229,6 +232,9 @@ class Trade(Base):
     import_run_id: Mapped[int | None] = mapped_column(index=True)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    income_id: Mapped[int | None] = mapped_column(ForeignKey("income.id", ondelete="RESTRICT"))
+    consideration: Mapped[Decimal | None] = mapped_column(Money)
 
     portfolio: Mapped[Portfolio] = relationship(back_populates="trades")
     instrument: Mapped[Instrument] = relationship()
@@ -263,7 +269,13 @@ class Income(Base):
         CheckConstraint("fx_rate IS NULL OR fx_rate > 0", name="fx_rate_positive"),
         CheckConstraint("net_amount <= gross_amount", name="net_not_above_gross"),
         CheckConstraint("withholding_tax <= gross_amount", name="withholding_not_above_gross"),
+        CheckConstraint("resident_withholding_tax >= 0", name="rwt_nonnegative"),
+        CheckConstraint("foreign_withholding_tax >= 0", name="foreign_tax_nonnegative"),
+        CheckConstraint("franking_credits >= 0", name="franking_nonnegative"),
         *_not_nan(
+            "resident_withholding_tax",
+            "foreign_withholding_tax",
+            "franking_credits",
             "gross_amount",
             "net_amount",
             "imputation_credits",
@@ -295,6 +307,13 @@ class Income(Base):
         Money, default=Decimal(0), server_default="0"
     )
     withholding_tax: Mapped[Decimal] = mapped_column(Money, default=Decimal(0), server_default="0")
+    resident_withholding_tax: Mapped[Decimal] = mapped_column(
+        Money, default=Decimal(0), server_default="0"
+    )
+    foreign_withholding_tax: Mapped[Decimal] = mapped_column(
+        Money, default=Decimal(0), server_default="0"
+    )
+    franking_credits: Mapped[Decimal] = mapped_column(Money, default=Decimal(0), server_default="0")
     # Units received instead of cash under a dividend reinvestment plan.
     drp_quantity: Mapped[Decimal | None] = mapped_column(Quantity)
     fx_rate: Mapped[Decimal | None] = mapped_column(Rate)
@@ -396,3 +415,58 @@ class Split(Base):
     shares_after: Mapped[Decimal] = mapped_column(Quantity)
     source: Mapped[str] = mapped_column(String(32))
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CorporateAction(Base):
+    """Immutable instrument history; details retain former codes and event terms."""
+
+    __tablename__ = "corporate_actions"
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "external_ref"),
+        CheckConstraint(
+            "kind IN ('split', 'consolidation', 'rights_entitlement', "
+            "'rights_take_up', 'rights_lapse', 'rename', 'delisting')",
+            name="kind_valid",
+        ),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id", ondelete="RESTRICT"))
+    portfolio_id: Mapped[int | None] = mapped_column(
+        ForeignKey("portfolios.id", ondelete="RESTRICT")
+    )
+    effective_date: Mapped[date] = mapped_column(Date)
+    kind: Mapped[str] = mapped_column(String(32))
+    external_ref: Mapped[str] = mapped_column(String(128))
+    details: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(64), default="registry")
+
+
+class DividendSuggestion(Base):
+    """Yahoo estimates remain outside income until explicitly confirmed."""
+
+    __tablename__ = "dividend_suggestions"
+    __table_args__ = (
+        UniqueConstraint("portfolio_id", "instrument_id", "ex_date"),
+        CheckConstraint("status IN ('pending', 'confirmed', 'rejected')", name="status_valid"),
+        CheckConstraint("gross_amount >= 0", name="gross_nonnegative"),
+        *_not_nan("gross_amount"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id", ondelete="RESTRICT"))
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id", ondelete="RESTRICT"))
+    ex_date: Mapped[date] = mapped_column(Date)
+    gross_amount: Mapped[Decimal] = mapped_column(Money)
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    income_id: Mapped[int | None] = mapped_column(ForeignKey("income.id", ondelete="RESTRICT"))
+
+
+class ImportIncomeMatch(Base):
+    """Retain independently imported income when an earlier import is undone."""
+
+    __tablename__ = "import_income_matches"
+    import_run_id: Mapped[int] = mapped_column(
+        ForeignKey("import_runs.id", ondelete="RESTRICT"), primary_key=True
+    )
+    income_id: Mapped[int] = mapped_column(
+        ForeignKey("income.id", ondelete="CASCADE"), primary_key=True, index=True
+    )

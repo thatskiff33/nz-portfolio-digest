@@ -12,7 +12,14 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from portfolio_digest import __version__, migrate, validation
-from portfolio_digest.config import ConfigError, get_gmail_settings, get_settings
+from portfolio_digest.akahu import AkahuClient, AkahuError, push_success
+from portfolio_digest.akahu_sync import sync
+from portfolio_digest.config import (
+    ConfigError,
+    akahu_account_ids,
+    get_gmail_settings,
+    get_settings,
+)
 from portfolio_digest.db import make_engine, session_scope
 from portfolio_digest.gmail import AsbGmailImporter, GmailClient, GmailError, authorise
 from portfolio_digest.importers.base import (
@@ -124,6 +131,32 @@ def cmd_portfolio_list(_: argparse.Namespace) -> int:
             print("No portfolios yet. Add one with `portfolio-digest portfolio add NAME`.")
         for p in portfolios:
             print(f"{p.id}\t{p.name}\t{p.base_currency}")
+    return 0
+
+
+def cmd_akahu_sync(args: argparse.Namespace) -> int:
+    settings = get_settings()
+    if not all(
+        token and token.get_secret_value().strip()
+        for token in (settings.akahu_app_token, settings.akahu_user_token)
+    ):
+        raise ConfigError("Set AKAHU_APP_TOKEN and AKAHU_USER_TOKEN in env/.env.")
+    account_ids = akahu_account_ids(settings.akahu_account_ids)
+    client = AkahuClient(settings.akahu_app_token, settings.akahu_user_token)
+    snapshot_id, mismatches, unmapped = sync(make_engine(), args.portfolio, client, account_ids)
+    print(f"Akahu snapshot {snapshot_id}. Cached data may be about a day old.")
+    for mismatch in mismatches:
+        print(
+            f"Instrument {mismatch.instrument_id}: ledger={mismatch.ledger} "
+            f"Akahu={mismatch.observed} difference={mismatch.difference}"
+        )
+    if unmapped:
+        print(f"Unmapped holdings: {unmapped}. See snapshot report and docs/AKAHU.md.")
+    if mismatches or unmapped:
+        return 1
+    print("Holdings match the ledger.")
+    if settings.uptime_kuma_push_url and settings.uptime_kuma_push_url.get_secret_value():
+        push_success(settings.uptime_kuma_push_url)
     return 0
 
 
@@ -384,6 +417,12 @@ def build_parser() -> argparse.ArgumentParser:
     add.set_defaults(func=cmd_portfolio_add)
     psub.add_parser("list", help="List portfolios").set_defaults(func=cmd_portfolio_list)
 
+    akahu = sub.add_parser("akahu", help="Confirm ledger holdings using Akahu")
+    asub = akahu.add_subparsers(dest="akahu_command", required=True)
+    sync_parser = asub.add_parser("sync", help="Store holdings and report unit drift")
+    sync_parser.add_argument("--portfolio", required=True)
+    sync_parser.set_defaults(func=cmd_akahu_sync)
+
     prices = sub.add_parser("prices", help="Fetch and check daily prices and exchange rates")
     price_sub = prices.add_subparsers(dest="prices_command", required=True)
 
@@ -468,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except ConfigError as exc:
+    except (ConfigError, AkahuError) as exc:
         _fail(str(exc))
     except validation.InvalidInput as exc:
         _fail(str(exc))

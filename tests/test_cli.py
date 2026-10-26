@@ -52,7 +52,14 @@ def test_missing_database_url_is_a_clear_error(no_settings_file, capsys, command
 
 
 @pytest.mark.parametrize(
-    "command", [["health"], ["migrate"], ["portfolio", "list"], ["portfolio", "add", "X"]]
+    "command",
+    [
+        ["health"],
+        ["migrate"],
+        ["portfolio", "list"],
+        ["portfolio", "add", "X"],
+        ["returns", "--portfolio", "Invented", "--period", "week"],
+    ],
 )
 def test_an_unreachable_database_does_not_leak_credentials(
     no_settings_file, monkeypatch, capsys, command

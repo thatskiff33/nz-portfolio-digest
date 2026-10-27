@@ -41,3 +41,18 @@ month = 4
 day = 1
 at = "09:00"
 period = "tax_year"
+
+# Alerts run after each scheduled price fetch, using the report recipients and MAILER.
+[alerts]
+enabled = true
+daily_percent = "10"
+portfolio_drop_percent = "5"
+period_days = 7
+stale_trading_days = 3
+# Without this, a rule must clear before it can send again.
+# cooldown_hours = 24
+
+# Partial overrides inherit the global holding thresholds.
+# [alerts.holdings."NZX:EXAMPLE"]
+# daily_percent = "15"
+# stale_trading_days = 5

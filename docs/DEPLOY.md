@@ -323,3 +323,70 @@ The script preserves the server's schedule configuration, fast-forwards `main`, 
 backup, builds the app, stops the scheduler while migrating, checks database health and
 starts the services. If a migration fails, the scheduler stays stopped for investigation.
 Deployment does not run automatically on merge.
+
+### Price and movement alerts
+
+Apply the database migration before starting the updated scheduler:
+
+```bash
+docker compose run --rm migrate migrate
+docker compose up -d --build scheduler
+docker compose run --rm migrate alerts check --dry-run
+```
+
+The existing scheduler checks alerts immediately after every scheduled price fetch,
+including partial fetches. Manual `prices fetch` does not send alerts. Use
+`alerts check` for an explicit check. No additional timer or scheduler is needed.
+The dry-run prints only alerts currently due and neither sends notifications nor changes
+suppression state. Its terminal output contains portfolio figures, so keep it private.
+
+Set these rules in the server's `schedules.toml`, then restart the scheduler:
+
+```toml
+[alerts]
+enabled = true
+daily_percent = "10"
+portfolio_drop_percent = "5"
+period_days = 7
+stale_trading_days = 3
+# Optional repeat interval while a rule remains triggered:
+# cooldown_hours = 24
+
+[alerts.holdings."NZX:EXAMPLE"]
+daily_percent = "15"
+# Other holding thresholds inherit the global values.
+```
+
+Threshold comparisons are strict: exactly 10% does not exceed a 10% rule. Daily
+movement compares fresh closes on adjacent completed trading days in the holding's
+listing currency, adjusted for splits. Fees, trades and currency movements do not
+change this price comparison. Missing closes leave its suppression state unchanged.
+Staleness counts completed exchange trading days, excluding weekends and exchange
+holidays. If no fresh price exists, it counts from the first trade. Sold holdings do
+not trigger holding alerts.
+
+Portfolio value uses the shared returns engine's opening and closing valuations in
+the portfolio's base currency across the configured calendar-day period. The period
+ends on the most recent date completed by all portfolio markets and, when needed,
+the FX market, so a close that is not yet due does not suppress the check. This is a
+value-drop rule: sales and withdrawals can reduce it, purchases can offset falls,
+and it is not a cash-flow-adjusted performance percentage. Incomplete or stale
+valuations suppress that evaluation rather than inventing figures.
+
+Emails list the triggering figures and a reminder to open the private dashboard over
+Tailscale. They reuse `MAILER`, sender and `recipients` (or `MAIL_OWNER` when empty).
+Delivery state lives in the database and survives scheduler restarts. Each portfolio
+and rule sends once until a successful evaluation clears it; optional `cooldown_hours`
+allows repeats while it remains triggered. Failed email delivery is retried without
+recording a sent alert. A process failure after email delivery but before the database
+commit can cause a duplicate on retry, since email and the database cannot commit
+atomically.
+
+Push is off by default. In the server's private `.env`, set `ALERT_NTFY_URL` to an HTTPS
+topic URL and optionally `ALERT_NTFY_TOKEN`, or set both `ALERT_PUSHOVER_TOKEN` and
+`ALERT_PUSHOVER_USER`. ntfy takes precedence if both providers are configured. Recreate
+the scheduler container after changing environment values. Push providers receive the
+same portfolio figures as the email; use only a private topic or account. Never put
+URLs or tokens in TOML, commands or git. Push requests refuse redirects to protect tokens and portfolio figures.
+Push failures emit a generic warning without
+secrets and do not retry an already successful email.

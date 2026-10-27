@@ -18,6 +18,7 @@ from portfolio_digest import __version__, migrate, validation
 from portfolio_digest.actions import KINDS, record_action
 from portfolio_digest.akahu import AkahuClient, AkahuError, push_success
 from portfolio_digest.akahu_sync import sync
+from portfolio_digest.alerts import run_alerts
 from portfolio_digest.config import (
     ConfigError,
     akahu_account_ids,
@@ -317,12 +318,26 @@ def cmd_report_send(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_alerts_check(args: argparse.Namespace) -> int:
+    config = read_config(Path(args.config))
+    with session_scope(make_engine()) as session:
+        results = run_alerts(session, config, dry_run=args.dry_run)
+    print("\n\n".join(results) if results else "No alerts to send.")
+    return 0
+
+
 def cmd_scheduler(args: argparse.Namespace) -> int:
     config = read_config(Path(args.config))
 
     def execute(schedule, scheduled):
         if schedule.kind == "prices":
-            return cmd_prices_fetch(argparse.Namespace(backfill=False, start=None, instrument=None))
+            result = cmd_prices_fetch(
+                argparse.Namespace(backfill=False, start=None, instrument=None)
+            )
+            # Even a partial fetch may leave a price stale. Evaluate the committed data.
+            with session_scope(make_engine()) as session:
+                run_alerts(session, config)
+            return result
         with session_scope(make_engine()) as session:
             run_report(session, config, schedule.name, now=scheduled)
         return 0
@@ -718,6 +733,15 @@ def build_parser() -> argparse.ArgumentParser:
     send_now.add_argument("--dry-run", action="store_true")
     send_now.add_argument("--out")
     send_now.set_defaults(func=cmd_report_send)
+
+    alerts = sub.add_parser("alerts", help="Check price and portfolio alerts")
+    alert_sub = alerts.add_subparsers(dest="alerts_command", required=True)
+    alert_check = alert_sub.add_parser("check")
+    alert_check.add_argument(
+        "--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml")
+    )
+    alert_check.add_argument("--dry-run", action="store_true")
+    alert_check.set_defaults(func=cmd_alerts_check)
 
     scheduler = sub.add_parser("scheduler", help="Run the shared price and report scheduler")
     scheduler.add_argument("--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"))

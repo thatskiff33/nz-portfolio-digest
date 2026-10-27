@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
+from portfolio_digest.alert_config import AlertConfig
 from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import address
 
@@ -80,6 +81,7 @@ class ScheduleConfig(BaseModel):
     recipients: list[str] = Field(default_factory=list)
     kuma_push_url: SecretStr | None = None
     schedules: list[Schedule]
+    alerts: AlertConfig = Field(default_factory=AlertConfig)
 
     @field_validator("timezone")
     @classmethod

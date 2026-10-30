@@ -22,3 +22,6 @@ report.html
 report.txt
 !tests/fixtures/report.html
 !tests/fixtures/report.txt
+
+# Private year-end previews.
+private-preview/

@@ -42,6 +42,15 @@ trap - EXIT HUP INT TERM
 docker compose run --rm backup --once
 docker compose build migrate scheduler
 docker compose stop scheduler
+# PR #29 used a separate annual timer. Retire it before the shared scheduler starts.
+if command -v systemctl >/dev/null 2>&1 &&
+    systemctl --user list-unit-files portfolio-digest-year-end.timer --no-legend |
+        grep -q '^portfolio-digest-year-end.timer'; then
+    systemctl --user disable --now portfolio-digest-year-end.timer
+    rm -f "$HOME/.config/systemd/user/portfolio-digest-year-end.service" \
+        "$HOME/.config/systemd/user/portfolio-digest-year-end.timer"
+    systemctl --user daemon-reload
+fi
 docker compose run --rm migrate
 docker compose run --rm migrate health
 docker compose up -d db backup scheduler

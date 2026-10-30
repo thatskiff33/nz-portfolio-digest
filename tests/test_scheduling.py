@@ -58,6 +58,12 @@ def test_checked_in_config_shares_prices_and_reports():
     assert {s.kind for s in config.schedules} == {"prices", "report"}
     assert config.named_report("weekly").days == 7
     assert config.named_report("monthly").period == "last_month"
+    assert {s.name for s in config.schedules if s.kind == "prices"} == {
+        "prices-morning",
+        "prices-evening",
+    }
+    assert config.named_report("year-end").period == "tax_year"
+    assert config.alerts.enabled
 
 
 @pytest.mark.parametrize(
@@ -144,3 +150,59 @@ def test_changing_config_replaces_pending_time_on_restart(tmp_path):
     assert datetime.fromisoformat(json.loads(path.read_text())["weekly"]) == datetime(
         2026, 11, 1, 7, tzinfo=UTC
     )
+
+
+def test_annual_year_end_runs_once_at_nine_auckland_across_dst_and_leap_year():
+    from pathlib import Path
+
+    schedule = read_config(Path("schedules.toml")).named_report("year-end")
+    assert schedule.period == "tax_year"
+    # 1 April is still NZDT in 2026 and 2027, but NZST in 2029.
+    first = datetime(2026, 3, 31, 20, tzinfo=UTC)
+    assert schedule.next_run(datetime(2026, 1, 1, tzinfo=UTC)) == first
+    assert schedule.next_run(first) == datetime(2027, 3, 31, 20, tzinfo=UTC)
+    assert schedule.next_run(datetime(2028, 3, 31, 20, tzinfo=UTC)) == datetime(
+        2029, 3, 31, 21, tzinfo=UTC
+    )
+
+
+def test_shared_scheduler_runs_every_configured_job_after_downtime(tmp_path):
+    from pathlib import Path
+
+    config = read_config(Path("schedules.toml"))
+    due = datetime(2026, 3, 31, 20, tzinfo=UTC)
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                **{s.name: due.isoformat() for s in config.schedules},
+                **{
+                    s.name + ":config": s.model_dump_json() + config.timezone
+                    for s in config.schedules
+                },
+            }
+        )
+    )
+    calls = []
+
+    class StopLoop(Exception):
+        pass
+
+    def sleep(_):
+        raise StopLoop
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, state_path).run(
+            lambda schedule, at: calls.append((schedule.name, at)) or 0,
+            now=lambda: due,
+            sleep=sleep,
+        )
+    assert set(calls) == {
+        ("prices-morning", due),
+        ("prices-evening", due),
+        ("weekly", due),
+        ("monthly", due),
+        ("year-end", due),
+    }
+    state = json.loads(state_path.read_text())
+    assert all(datetime.fromisoformat(state[s.name]) > due for s in config.schedules)

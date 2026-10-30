@@ -33,6 +33,15 @@ day = 1
 at = "08:00"
 period = "last_month"
 
+[[schedules]]
+name = "year-end"
+kind = "report"
+frequency = "yearly"
+month = 4
+day = 1
+at = "09:00"
+period = "tax_year"
+
 # Alerts run after each scheduled price fetch, using the report recipients and MAILER.
 [alerts]
 enabled = true

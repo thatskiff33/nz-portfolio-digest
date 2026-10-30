@@ -1,5 +1,6 @@
 """Mail delivery adapters. Provider errors are deliberately never echoed."""
 
+import base64
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -135,18 +136,29 @@ class PostmarkMailer:
 
     def send(self, msg: EmailMessage, recipients: list[str]) -> None:
         token = _secret(self.settings.postmark_server_token, "POSTMARK_SERVER_TOKEN")
+        payload = {
+            "From": str(msg["From"]),
+            "To": recipients[0],
+            "Bcc": ",".join(recipients[1:]),
+            "Subject": str(msg["Subject"]),
+            "HtmlBody": msg.get_body(preferencelist=("html",)).get_content(),
+            "TextBody": msg.get_body(preferencelist=("plain",)).get_content(),
+        }
+        attachments = [
+            {
+                "Name": part.get_filename(),
+                "Content": base64.b64encode(part.get_payload(decode=True)).decode("ascii"),
+                "ContentType": part.get_content_type(),
+            }
+            for part in msg.iter_attachments()
+        ]
+        if attachments:
+            payload["Attachments"] = attachments
         with httpx.Client(timeout=30) as client:
             response = client.post(
                 "https://api.postmarkapp.com/email",
                 headers={"X-Postmark-Server-Token": token},
-                json={
-                    "From": str(msg["From"]),
-                    "To": recipients[0],
-                    "Bcc": ",".join(recipients[1:]),
-                    "Subject": str(msg["Subject"]),
-                    "HtmlBody": msg.get_body(preferencelist=("html",)).get_content(),
-                    "TextBody": msg.get_body(preferencelist=("plain",)).get_content(),
-                },
+                json=payload,
             )
             response.raise_for_status()
             if response.json().get("ErrorCode") != 0:

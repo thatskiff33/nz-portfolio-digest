@@ -24,14 +24,15 @@ class Schedule(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
     kind: Literal["prices", "report"]
-    frequency: Literal["daily", "weekly", "monthly"]
+    frequency: Literal["daily", "weekly", "monthly", "yearly"]
     at: time
     weekday: Literal[
         "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
     ] = "sunday"
     day: int = Field(default=1, ge=1, le=28)
+    month: int = Field(default=4, ge=1, le=12)
     days: int = Field(default=7, ge=1, le=3660)
-    period: Literal["days", "last_month"] = "days"
+    period: Literal["days", "last_month", "tax_year"] = "days"
 
     @field_validator("at")
     @classmethod
@@ -57,6 +58,8 @@ class Schedule(BaseModel):
             if self.frequency == "weekly" and day.weekday() != WEEKDAYS.index(self.weekday):
                 continue
             if self.frequency == "monthly" and day.day != self.day:
+                continue
+            if self.frequency == "yearly" and (day.month != self.month or day.day != self.day):
                 continue
             local = datetime.combine(day, self.at)
             # Spring gap: run at the first valid local minute after the configured time.

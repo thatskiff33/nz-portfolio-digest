@@ -38,31 +38,62 @@ def load_returns(
     base_currency: str | None = None,
 ) -> Report:
     today = today or datetime.now(ZoneInfo(get_settings().timezone)).date()
-    # Validate syntax before querying; 'all' is resolved after loading trades.
+    # Validate syntax before querying; 'all' is resolved from stored activity below.
     start, end = period_range(period, today)
     portfolio = session.scalar(
         select(Portfolio).where(func.lower(Portfolio.name) == portfolio_name(name).lower())
     )
     if portfolio is None:
         raise ReturnError("Portfolio not found.")
+    if period == "all":
+        start, end = period_range(period, today, first_activity_date(session, portfolio.id, end))
     target_currency = base_currency or portfolio.base_currency
+    holdings, rates, conversion_flags = _load_inputs(
+        session, portfolio, start, end, target_currency
+    )
+    report = calculate_returns(holdings, start, end, rates, target_currency, gross_up=gross_up)
+    if conversion_flags:
+        rows = tuple(
+            replace(r, flags=tuple(sorted(set(r.flags) | conversion_flags)))
+            for r in report.holdings
+        )
+        return _combined_report(rows, start, end, target_currency)
+    return report
+
+
+def first_activity_date(session: Session, portfolio_id: int, end: date) -> date | None:
+    """Earliest reportable stored activity, including income without trades."""
+    first_trade = session.scalar(
+        select(func.min(Trade.trade_date)).where(
+            Trade.portfolio_id == portfolio_id, Trade.trade_date <= end
+        )
+    )
+    first_income = session.scalar(
+        select(func.min(Income.paid_date)).where(
+            Income.portfolio_id == portfolio_id,
+            Income.paid_date <= end,
+            Income.kind.in_(("dividend", "distribution")),
+        )
+    )
+    return min((day for day in (first_trade, first_income) if day is not None), default=None)
+
+
+def load_inputs(
+    session: Session, portfolio: Portfolio, start: date, end: date
+) -> tuple[tuple[Holding, ...], dict[str, tuple[Observation, ...]]]:
+    """Shared stored inputs for reports and sampled dashboard valuations."""
+    holdings, rates, _ = _load_inputs(session, portfolio, start, end, portfolio.base_currency)
+    return holdings, rates
+
+
+def _load_inputs(
+    session: Session, portfolio: Portfolio, start: date, end: date, target_currency: str
+) -> tuple[tuple[Holding, ...], dict[str, tuple[Observation, ...]], set[str]]:
     trades = session.scalars(
         select(Trade)
         .where(Trade.portfolio_id == portfolio.id, Trade.trade_date <= end)
         .order_by(Trade.trade_date, Trade.id)
     ).all()
-    if period == "all":
-        first_income = session.scalar(
-            select(func.min(Income.paid_date)).where(
-                Income.portfolio_id == portfolio.id,
-                Income.paid_date <= end,
-                Income.kind.in_(("dividend", "distribution")),
-            )
-        )
-        dates = [t.trade_date for t in trades]
-        if first_income is not None:
-            dates.append(first_income)
-        start, end = period_range(period, today, min(dates, default=None))
     income = session.scalars(
         select(Income).where(
             Income.portfolio_id == portfolio.id,
@@ -167,16 +198,7 @@ def load_returns(
                 instrument.name,
             )
         )
-    report = calculate_returns(
-        tuple(holdings), start, end, rates, target_currency, gross_up=gross_up
-    )
-    if conversion_flags:
-        rows = tuple(
-            replace(r, flags=tuple(sorted(set(r.flags) | conversion_flags)))
-            for r in report.holdings
-        )
-        return _combined_report(rows, start, end, target_currency)
-    return report
+    return tuple(holdings), rates, conversion_flags
 
 
 def _combined_report(rows: tuple[Result, ...], start: date, end: date, currency: str) -> Report:

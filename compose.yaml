@@ -1,5 +1,5 @@
-# Runs on your home server. Nothing here publishes a port: the database is only reachable
-# from the other services on this compose network. Secrets come from `.env` (see .env.example).
+# Runs on your home server. Only the dashboard publishes a private host port.
+# The database stays on the compose network. Secrets come from .env.
 
 name: portfolio-digest
 
@@ -116,6 +116,24 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  web:
+    build: .
+    restart: unless-stopped
+    entrypoint: ["python", "-m", "portfolio_digest.web.app"]
+    ports:
+      - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
+      DASHBOARD_BIND: ${DASHBOARD_BIND:-127.0.0.1}
+      DASHBOARD_SECURE_COOKIE: ${DASHBOARD_SECURE_COOKIE:-false}
+      TIMEZONE: ${TIMEZONE:-Pacific/Auckland}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:

@@ -127,20 +127,20 @@ def test_every_figure_by_hand(ledger):
         performance["NZX:FERN"].opening,
         performance["NZX:FERN"].closing,
         performance["NZX:FERN"].amounts.total,
-    ) == (D(1200), D(1368), D(587))
-    assert performance["NASDAQ:CLOUD"].amounts.total == D(15)
+    ) == (D(1200), D(1368), D(579))
+    assert performance["NASDAQ:CLOUD"].amounts.total == D(12)
     assert performance["ASX:GUM"].amounts.total == D(12036)
     p = report.performance.total
-    # 66,168 close + 693 sales - 1,200 open - 53,103 buys - 16 DRP + 96 gross income.
+    # 66,168 close + 693 sales - 1,200 open - 53,103 buys - 16 DRP + 85 net income.
     assert (p.opening, p.closing, p.purchases, p.sales, p.adjustments, p.amounts.total) == (
         D(1200),
         D(66168),
         D(53103),
         D(693),
         D(16),
-        D(12638),
+        D(12627),
     )
-    assert p.percentages.total.quantize(D(".01")) == D("23.27")
+    assert p.percentages.total.quantize(D(".01")) == D("23.25")
     assert (report.foreign_peak, report.foreign_peak_day, report.fif_exceeded) == (
         D(52800),
         day("2025-11-01"),
@@ -270,7 +270,7 @@ def test_database_loader_and_cli_dry_run_never_sends(year_engine, monkeypatch, t
     with Session(year_engine) as session:
         loaded = load_year_end(session, "Invented", 2026)
     assert loaded.total == calculate_year_end(*ledger, 2026).total
-    assert loaded.performance.total.amounts.total == D(12638)
+    assert loaded.performance.total.amounts.total == D(12627)
     assert (
         main(
             [
@@ -286,7 +286,7 @@ def test_database_loader_and_cli_dry_run_never_sends(year_engine, monkeypatch, t
         )
         == 0
     )
-    assert "12638" in (tmp_path / "year-end-2026.csv").read_text()
+    assert "12627" in (tmp_path / "year-end-2026.csv").read_text()
     assert "Invented" in (tmp_path / "year-end-2026.html").read_text()
     with Session(year_engine) as session:
         session.query(Portfolio).filter_by(name="Invented").one().base_currency = "USD"
@@ -331,11 +331,11 @@ def test_delivery_uses_shared_mailer_and_attachment(year_engine, monkeypatch, pr
     assert envelope == (recipients or ["owner@example.invalid"])
     assert message["To"] == "undisclosed-recipients:;"
     assert "31 March 2026" in message["Subject"]
-    assert "12,638.00" in message.get_body(preferencelist=("html",)).get_content()
-    assert "12,638.00" in message.get_body(preferencelist=("plain",)).get_content()
+    assert "12,627.00" in message.get_body(preferencelist=("html",)).get_content()
+    assert "12,627.00" in message.get_body(preferencelist=("plain",)).get_content()
     attachment = next(message.iter_attachments())
     assert attachment.get_filename() == "year-end-2026.csv"
-    assert "12638" in attachment.get_payload(decode=True).decode()
+    assert "12627" in attachment.get_payload(decode=True).decode()
 
 
 def test_year_end_preview_requires_html_path(year_engine, tmp_path):
@@ -376,7 +376,7 @@ def test_scheduled_year_end_uses_original_due_year_and_previews_without_credenti
         )
     assert "31 March 2026" in (tmp_path / "annual-portfolio-1.txt").read_text()
     assert "Invented" in (tmp_path / "annual-portfolio-1.html").read_text()
-    assert "12638" in (tmp_path / "annual-portfolio-1.csv").read_text()
+    assert "12627" in (tmp_path / "annual-portfolio-1.csv").read_text()
 
 
 def test_all_portfolios_continue_after_one_fails(year_engine, monkeypatch, tmp_path):
@@ -550,3 +550,45 @@ def test_year_end_scheduler_dispatch_retains_persisted_due_date(year_engine, mon
     )
     assert cmd_scheduler(argparse.Namespace(config="schedules.toml", state="unused.json")) == 0
     assert seen == [("year-end", due)]
+
+
+def test_year_end_and_email_agree_on_net_dividend_total_return(year_engine):
+    from sqlalchemy import select
+
+    from portfolio_digest.reports import build_report
+
+    with Session(year_engine) as session:
+        # The email chart also values intermediate dates. Supply an invented
+        # quote for the AU position before the final year-end observation.
+        gum = session.scalar(select(Instrument).where(Instrument.code == "GUM"))
+        session.add_all(
+            [
+                Price(
+                    instrument_id=gum.id,
+                    price_date=day("2025-08-01"),
+                    close=D(400),
+                    source="invented",
+                ),
+                FxRate(
+                    currency="AUD",
+                    base_currency="NZD",
+                    rate_date=day("2025-08-01"),
+                    rate=D("1.1"),
+                    source="invented",
+                ),
+            ]
+        )
+        session.flush()
+        annual = load_year_end(session, "Invented", 2026)
+        email = build_report(session, day("2025-04-01"), day("2026-03-31"))
+    assert annual.performance.start == email.returns.start == day("2025-03-31")
+    assert annual.performance.end == email.returns.end == day("2026-03-31")
+    assert annual.performance.total.amounts == email.returns.total.amounts
+    assert annual.performance.total.percentages == email.returns.total.percentages
+    assert annual.performance.total.amounts.total == email.total_return == D(12627)
+    assert annual.performance.total.amounts.dividends == annual.total.net == D(85)
+    assert annual.total.gross == email.returns.total.gross_dividends == D(96)
+    assert annual.total.imputation == email.returns.total.imputation_gross_up == D(10)
+    assert (
+        annual.total.resident + annual.total.foreign == email.returns.total.withholding_tax == D(11)
+    )

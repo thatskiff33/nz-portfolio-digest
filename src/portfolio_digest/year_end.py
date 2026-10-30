@@ -34,8 +34,9 @@ NOTES = (
     "DRP income is included; reinvested units must also have a recorded buy or adjustment. "
     "Splits require a matching quantity adjustment. Missing acquisition history uses the "
     "recorded opening-balance or transfer value, which may differ from tax cost.",
-    "Total return uses gross dividends and the returns engine's opening value plus purchase "
-    "outlays denominator. Carried-forward prices and FX are listed below.",
+    "Total return uses net cash dividends, as in email reports, and the returns engine's "
+    "opening value plus purchase outlays denominator. "
+    "Carried-forward prices and FX are listed below.",
 )
 
 
@@ -99,7 +100,7 @@ def calculate_year_end(
         replace(
             h,
             income=tuple(
-                Payment(p.day, p.gross, p.currency, p.fx)
+                Payment(p.day, p.net, p.currency, p.fx, p.gross, p.withholding, p.imputation)
                 for p in dividends
                 if p.holding == f"{h.exchange}:{h.code}"
             ),

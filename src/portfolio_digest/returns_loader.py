@@ -71,31 +71,50 @@ def load_inputs(
     base_currency: str | None = None,
 ) -> PortfolioInputs:
     today = today or datetime.now(ZoneInfo(get_settings().timezone)).date()
-    # Validate syntax before querying; 'all' is resolved after loading trades.
+    # Validate syntax before querying; 'all' is resolved from stored activity below.
     start, end = period_range(period, today)
     portfolio = session.scalar(
         select(Portfolio).where(func.lower(Portfolio.name) == portfolio_name(name).lower())
     )
     if portfolio is None:
         raise ReturnError("Portfolio not found.")
+    if period == "all":
+        start, end = period_range(period, today, first_activity_date(session, portfolio.id, end))
+    return load_portfolio_inputs(session, portfolio, start, end, base_currency=base_currency)
+
+
+def first_activity_date(session: Session, portfolio_id: int, end: date) -> date | None:
+    """Earliest reportable stored activity, including income without trades."""
+    first_trade = session.scalar(
+        select(func.min(Trade.trade_date)).where(
+            Trade.portfolio_id == portfolio_id, Trade.trade_date <= end
+        )
+    )
+    first_income = session.scalar(
+        select(func.min(Income.paid_date)).where(
+            Income.portfolio_id == portfolio_id,
+            Income.paid_date <= end,
+            Income.kind.in_(("dividend", "distribution")),
+        )
+    )
+    return min((day for day in (first_trade, first_income) if day is not None), default=None)
+
+
+def load_portfolio_inputs(
+    session: Session,
+    portfolio: Portfolio,
+    start: date,
+    end: date,
+    *,
+    base_currency: str | None = None,
+) -> PortfolioInputs:
+    """Load stored inputs once for reports and sampled dashboard valuations."""
     target_currency = base_currency or portfolio.base_currency
     trades = session.scalars(
         select(Trade)
         .where(Trade.portfolio_id == portfolio.id, Trade.trade_date <= end)
         .order_by(Trade.trade_date, Trade.id)
     ).all()
-    if period == "all":
-        first_income = session.scalar(
-            select(func.min(Income.paid_date)).where(
-                Income.portfolio_id == portfolio.id,
-                Income.paid_date <= end,
-                Income.kind.in_(("dividend", "distribution")),
-            )
-        )
-        dates = [t.trade_date for t in trades]
-        if first_income is not None:
-            dates.append(first_income)
-        start, end = period_range(period, today, min(dates, default=None))
     income = session.scalars(
         select(Income).where(
             Income.portfolio_id == portfolio.id,

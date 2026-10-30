@@ -483,6 +483,39 @@ def test_all_period_includes_income_without_trades(monkeypatch):
     engine.dispose()
 
 
+def test_cli_keeps_corporate_action_command_after_dashboard_merge(monkeypatch, capsys):
+    engine = _sqlite_engine(monkeypatch)
+    with Session(engine) as session:
+        session.add(Portfolio(name="Rights example", base_currency="NZD"))
+        session.commit()
+    monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: engine)
+    assert (
+        main(
+            [
+                "corporate-actions",
+                "rights_entitlement",
+                "NZX:EXAMPLERG",
+                "--date",
+                "2026-10-20",
+                "--reference",
+                "fictional-entitlement",
+                "--portfolio",
+                "Rights example",
+                "--details",
+                '{"quantity": "10"}',
+            ]
+        )
+        == 0
+    )
+    assert "Recorded corporate action" in capsys.readouterr().out
+    with Session(engine) as session:
+        instrument = session.scalar(select(Instrument).where(Instrument.code == "EXAMPLERG"))
+        assert instrument.kind == "rights"
+        trade = session.scalar(select(Trade).where(Trade.instrument_id == instrument.id))
+        assert trade.quantity == D(10)
+    engine.dispose()
+
+
 def test_email_engine_and_cli_figures_are_identical(returns_engine, monkeypatch, capsys):
     from portfolio_digest.reports import build_report, render
     from portfolio_digest.returns_table import render_table
@@ -671,3 +704,18 @@ def test_email_keeps_nzd_trades_and_income_native_in_foreign_portfolio(returns_e
         session.flush()
         native = load_returns(session, "Separate", "2026-10-14:2026-10-19", base_currency="NZD")
         assert native.holdings == (row,)
+
+
+def test_named_and_portfolio_loaders_share_complete_inputs(returns_engine):
+    from portfolio_digest.returns_loader import PortfolioInputs, load_inputs, load_portfolio_inputs
+
+    with Session(returns_engine) as session:
+        portfolio = session.scalar(select(Portfolio).where(Portfolio.name == "Invented"))
+        start, end = date(2026, 10, 12), date(2026, 10, 19)
+        named = load_inputs(session, "invented", f"{start}:{end}")
+        direct = load_portfolio_inputs(session, portfolio, start, end)
+        assert isinstance(named, PortfolioInputs)
+        assert named == direct
+        assert named.start == start and named.end == end
+        assert named.income and named.instruments and named.holdings and named.rates
+        assert named.holdings[0].income[0].amount == D(4)

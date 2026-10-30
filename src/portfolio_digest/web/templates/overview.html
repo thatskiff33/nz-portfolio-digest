@@ -1,0 +1,159 @@
+{% from "returns.html" import returns %}
+{% extends "base.html" %}
+{% block title %}
+    {{ portfolio.name }} · Portfolio digest
+{% endblock %}
+{% block content %}
+    <div class="page-heading">
+        <div>
+            <p class="eyebrow">Portfolio overview</p>
+            <h1>{{ portfolio.name }}</h1>
+            <p class="muted">Your investments, at a glance. All values in {{ portfolio.base_currency }}.</p>
+        </div>
+        <span class="date-pill">As at {{ end.strftime("%d %b %Y") }}</span>
+    </div>
+    <form class="period-form" method="get" action="/p/{{ portfolio.id }}">
+        <label>
+            Period<select name="period">
+            {% for value,label in [('week','Week'),('month','Month'),('ytd','Year to date'),('all','All time'),('custom','Custom')] %}
+                <option value="{{ value }}" {% if period == value %} selected {% endif %}>{{ label }}</option>
+            {% endfor %}
+            </select>
+        </label>
+        <label>
+            From<input type="date" name="start" value="{{ start }}" required>
+        </label>
+        <label>
+            To<input type="date" name="end" value="{{ end }}" required>
+        </label>
+        <button>Apply period</button>
+    </form>
+    <div class="stats">
+        <section class="stat primary">
+            <p>Portfolio value</p>
+            <strong>{{ (report.total.closing if report else none)|money }}</strong>
+            <span>{{ portfolio.base_currency }} · {{ dashboard.holdings|length }} holdings</span>
+        </section>
+        <section class="stat">
+            <p>Opening value</p>
+            <strong>{{ (report.total.opening if report else none)|money }}</strong>
+            <span>{{ start.strftime("%d %b %Y") }}</span>
+        </section>
+        <section class="stat">
+            <p>Investment return</p>
+            <strong>{{ (report.total.amounts.total if report else none)|money }}</strong>
+            <span>{{ (report.total.percentages.total|money ~ '%') if report and report.total.percentages else 'n/a' }} · Selected period</span>
+        </section>
+    </div>
+    {% if dashboard.error %}
+        <p class="notice">Figures unavailable: {{ dashboard.error }}</p>
+    {% elif report.total.flags %}
+        <div class="notice"><p>Some observations are stale or carried forward:</p>
+            <ul>{% for flag in report.total.flags %}<li>{{ flag }}</li>{% endfor %}</ul>
+        </div>
+    {% endif %}
+    <section class="panel">
+        <div class="section-heading">
+            <div>
+                <h2>Value over time</h2>
+                <p class="muted">Market value of your holdings, excluding cash. Changes include trades.</p>
+            </div>
+            <span class="legend">● {{ portfolio.base_currency }}</span>
+        </div>
+        {% include "chart.html" %}
+    </section>
+    <section class="panel">
+        <div class="section-heading">
+            <div>
+                <h2>Holdings</h2>
+                <p class="muted">Grouped by market · Prices in listing currency · Values in {{ portfolio.base_currency }}</p>
+            </div>
+        </div>
+        <form class="sort-form" method="get">
+            <input type="hidden" name="period" value="{{ period }}">
+            <input type="hidden" name="start" value="{{ start }}">
+            <input type="hidden" name="end" value="{{ end }}">
+            <label>
+                Sort by<select name="sort">
+                {% for key,label in [('code','Code'),('name','Name'),('quantity','Quantity'),('price','Price'),('value','Value')] %}
+                    <option value="{{ key }}" {% if sort == key %} selected {% endif %}>{{ label }}</option>
+                {% endfor %}
+                </select>
+            </label>
+            <label>
+                Order<select name="direction">
+                <option value="asc">Ascending</option>
+                <option value="desc" {% if direction == 'desc' %} selected {% endif %}>Descending</option>
+                </select>
+            </label>
+            <button class="quiet">Sort holdings</button>
+        </form>
+        {% for market,rows in markets.items() %}
+            <h3 class="market">
+                {{ market }} <span>{{ rows|length }} {{ 'holding' if rows|length == 1 else 'holdings' }}</span>
+            </h3>
+            <div class="table-scroll"
+                 role="region"
+                 aria-label="{{ market }} holdings"
+                 tabindex="0">
+                <table>
+                    <thead>
+                        <tr>
+                            <th scope="col">Holding</th>
+                            <th scope="col">Quantity</th>
+                            <th scope="col">Price</th>
+                            <th scope="col">Value</th>
+                            <th scope="col">Capital gain</th>
+                            <th scope="col">Net dividends</th>
+                            <th scope="col">Currency gain</th>
+                            <th scope="col">Total return</th>
+                            <th scope="col">Gross income</th>
+                            <th scope="col">Withholding tax</th>
+                            <th scope="col">Imputation credits</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in rows %}
+                            <tr>
+                                <td>
+                                    <a class="holding"
+                                       href="/p/{{ portfolio.id }}/holding/{{ row.instrument.id }}">{{ row.instrument.code }}</a>
+                                    <small>{{ row.instrument.name }}</small>
+                                </td>
+                                <td>{{ row.quantity|quantity }}</td>
+                                <td>
+                                    {{ row.price|money }} <small>{{ row.quote_date or 'No quote' }}
+                                    {% if row.result and row.result.flags %}
+                                        · Check data
+                                    {% endif %}
+                                    </small>
+                                </td>
+                                <td>{{ row.value|money }}</td>
+                                {{ returns(row.result) }}
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                    <tfoot>
+                        <tr>
+                            <th scope="row" colspan="3">{{ market }} subtotal</th>
+                            <td>{{ (subtotals[market].closing if market in subtotals else none)|money }}</td>
+                            {{ returns(subtotals.get(market)) }}
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+        {% else %}
+            <p>{{ 'Holdings performance cannot be displayed until the data issue is resolved.' if dashboard.error else 'No holdings for this period. Import your trades or sign in to add one.' }}</p>
+        {% endfor %}
+        <div class="table-scroll" role="region" aria-label="Portfolio returns" tabindex="0">
+        <table><thead><tr><th scope="col">Total</th><th scope="col">Capital gain</th>
+            <th scope="col">Net dividends</th><th scope="col">Currency gain</th><th scope="col">Total return</th>
+                            <th scope="col">Gross income</th>
+                            <th scope="col">Withholding tax</th>
+                            <th scope="col">Imputation credits</th>
+        </tr></thead><tbody><tr>
+            <th scope="row">Portfolio total</th>
+            {{ returns(report.total if report else none) }}
+        </tr></tbody></table></div>
+    </section>
+{% endblock %}

@@ -39,6 +39,10 @@ services:
       TIMEZONE: ${TIMEZONE:-Pacific/Auckland}
       PRICE_SOURCE: ${PRICE_SOURCE:-yahoo}
       FX_SOURCES: ${FX_SOURCES:-yahoo,frankfurter}
+      ALERT_NTFY_URL: ${ALERT_NTFY_URL:-}
+      ALERT_NTFY_TOKEN: ${ALERT_NTFY_TOKEN:-}
+      ALERT_PUSHOVER_TOKEN: ${ALERT_PUSHOVER_TOKEN:-}
+      ALERT_PUSHOVER_USER: ${ALERT_PUSHOVER_USER:-}
       MAILER: ${MAILER:-gmail}
       MAIL_FROM: ${MAIL_FROM:-}
       MAIL_OWNER: ${MAIL_OWNER:-}

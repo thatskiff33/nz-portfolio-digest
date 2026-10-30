@@ -125,7 +125,7 @@ services:
       - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-8000}:8000"
     environment:
       DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
-      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
       DASHBOARD_BIND: ${DASHBOARD_BIND:-127.0.0.1}
       DASHBOARD_SECURE_COOKIE: ${DASHBOARD_SECURE_COOKIE:-false}
       TIMEZONE: ${TIMEZONE:-Pacific/Auckland}

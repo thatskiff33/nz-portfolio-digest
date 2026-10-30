@@ -268,6 +268,14 @@ docker compose up -d --build scheduler
   is not a superuser and cannot connect to any other database. The `postgres` superuser
   password is only given to the database container.
 
+## Dashboard upgrade note
+
+Existing servers can keep deploying, migrating, scheduling and backing up without
+setting `DASHBOARD_PASSWORD`. Compose defaults it to an empty value. Before starting
+the optional dashboard, set a random password of at least 16 characters in the
+server's private `.env`. The dashboard refuses to start with a missing or shorter
+password.
+
 ## Private dashboard over Tailscale
 
 The `web` service shares the app package and database. It runs FastAPI on container port

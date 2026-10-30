@@ -191,8 +191,8 @@ def calculate_year_end(
                     remaining -= share
                 lots[-1][1] += remaining
         else:
-            rate = fx(h.currency, day, trade.fx)
             if trade.delta > ZERO:
+                rate = fx(h.currency, day, trade.fx)
                 lots.append([trade.quantity, (trade.quantity * trade.price + trade.fees) * rate])
             else:
                 units = -trade.delta
@@ -210,6 +210,7 @@ def calculate_year_end(
                     if not lot[0]:
                         lots.pop(0)
                 if trade.kind == "sell" and start < day <= end:
+                    rate = fx(h.currency, day, trade.fx)
                     gain = (trade.quantity * trade.price - trade.fees) * rate - cost
                     stats[label][0 if gain >= ZERO else 1] += gain
         quantities[label] = held + trade.delta

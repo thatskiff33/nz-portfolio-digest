@@ -1,7 +1,7 @@
 """Bounded, expiring server-side sessions and password verification.
 
 Run one worker. Restarting the web service revokes all sessions. Login throttling is
-process-wide so changing client addresses or cookies cannot bypass it.
+per client address, with a process-wide ceiling against distributed attempts.
 """
 
 import hashlib
@@ -14,6 +14,9 @@ from fastapi import HTTPException, Request
 
 COOKIE = "portfolio_session"
 LIFETIME = 8 * 60 * 60
+LOGIN_WINDOW = 300
+CLIENT_FAILURE_LIMIT = 5
+GLOBAL_FAILURE_LIMIT = 50
 
 
 @dataclass
@@ -30,18 +33,20 @@ class Security:
         self.salt = secrets.token_bytes(16)
         self.expected = self.digest(password)
         self.sessions: dict[str, BrowserSession] = {}
-        self.failures: list[int] = []
+        self.failures: list[tuple[int, str]] = []
         self.lock = threading.RLock()
 
     def digest(self, password: str) -> bytes:
         return hashlib.scrypt(password.encode(), salt=self.salt, n=16384, r=8, p=1)
 
-    def browser(self, request: Request) -> tuple[str, BrowserSession]:
+    def browser(self, request: Request, *, create: bool = False) -> tuple[str, BrowserSession]:
         now = int(time.monotonic())
         with self.lock:
             self.sessions = {k: v for k, v in self.sessions.items() if v.expires > now}
             ident = request.cookies.get(COOKIE, "")
             if ident not in self.sessions:
+                if not create:
+                    return "", BrowserSession("", 0)
                 if len(self.sessions) >= 1024:
                     raise HTTPException(503, "Too many browser sessions. Try again later.")
                 ident = secrets.token_urlsafe(32)
@@ -49,7 +54,9 @@ class Security:
             return ident, self.sessions[ident]
 
     def csrf(self, request: Request, token: str) -> None:
-        if not secrets.compare_digest(request.state.browser.csrf.encode(), token.encode()):
+        if not request.state.session_id or not secrets.compare_digest(
+            request.state.browser.csrf.encode(), token.encode()
+        ):
             raise HTTPException(403, "The form has expired. Reload and try again.")
 
     def require_login(self, request: Request) -> None:
@@ -59,13 +66,17 @@ class Security:
     def login(self, request: Request, password: str) -> None:
         now = int(time.monotonic())
         with self.lock:
-            self.failures = [n for n in self.failures if n > now - 300]
-            if len(self.failures) >= 5:
+            address = request.client.host if request.client else "unknown"
+            self.failures = [(n, host) for n, host in self.failures if n > now - LOGIN_WINDOW]
+            if (
+                sum(host == address for _, host in self.failures) >= CLIENT_FAILURE_LIMIT
+                or len(self.failures) >= GLOBAL_FAILURE_LIMIT
+            ):
                 raise HTTPException(429, "Too many failed sign-ins. Wait five minutes.")
             if len(password) > 1024 or not secrets.compare_digest(
                 self.digest(password), self.expected
             ):
-                self.failures.append(now)
+                self.failures.append((now, address))
                 raise HTTPException(401, "Password not recognised.")
             # Rotate the opaque ID and CSRF token, preventing session fixation.
             self.sessions.pop(request.state.session_id, None)

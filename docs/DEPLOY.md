@@ -308,9 +308,11 @@ No reverse proxy trust is enabled, and no external CDNs, fonts or analytics are 
 Read pages need no sign-in. Sign in with the app password for manual trades, signed
 adjustment corrections, reconciliation comparisons and import undo. Every POST checks a
 CSRF token, including sign-in and sign-out. Sessions are server-side, expire after eight
-hours and use HttpOnly, SameSite=Strict cookies. Five failed sign-ins in five minutes
-block further attempts for the remainder of that window, across all clients. Restarting
-web revokes sessions and resets this limit. Do not run multiple workers or replicas.
+hours and use HttpOnly, SameSite=Strict cookies. Anonymous read pages do not create
+sessions; opening the sign-in form creates one for its CSRF token. Five failed sign-ins
+in five minutes block that client address for the remainder of that window. A global
+ceiling of 50 failures in five minutes limits attempts across all clients. Restarting
+web revokes sessions and resets these limits. Do not run multiple workers or replicas.
 Rotate the password by editing `.env` and recreating web. Access logs are disabled and
 password fields are never returned in error responses.
 

@@ -84,6 +84,10 @@ column. AU franking never enters totals. With gross-up enabled, add imputation t
 the accounting identity above. Interest and other income are excluded. Income rows
 alone do not create shares: imported DRPs also create a linked purchase trade.
 
+Year-end summaries use this same net cash dividend basis for total return. Gross
+dividends, withholding and imputation remain separate income/tax figures; they do
+not increase the year-end performance total.
+
 ## Percentages and rounding
 
 This is a simple, unannualised period return. The shared denominator for all four

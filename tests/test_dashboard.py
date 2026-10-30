@@ -183,8 +183,11 @@ def test_read_pages(client, path, text):
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "unsafe-inline" not in response.headers["content-security-policy"]
-    assert "HttpOnly" in response.headers["set-cookie"]
-    assert "SameSite=strict" in response.headers["set-cookie"]
+    if path == "/login":
+        assert "HttpOnly" in response.headers["set-cookie"]
+        assert "SameSite=strict" in response.headers["set-cookie"]
+    else:
+        assert "set-cookie" not in response.headers
     assert response.headers["cache-control"] == "no-store"
 
 
@@ -510,7 +513,7 @@ def test_secure_cookie_option(engine_web):
     with TestClient(
         create_app(engine_web, PASSWORD, secure_cookie=True), base_url="https://testserver"
     ) as secure_client:
-        assert "Secure" in secure_client.get("/").headers["set-cookie"]
+        assert "Secure" in secure_client.get("/login").headers["set-cookie"]
 
 
 def test_empty_portfolio_list(engine_web):
@@ -552,3 +555,100 @@ def test_session_capacity_returns_service_unavailable(client):
     response = client.get("/login")
     assert response.status_code == 503
     assert response.headers["x-frame-options"] == "DENY"
+
+
+@pytest.mark.parametrize(
+    "path,status",
+    [("/", 200), ("/p/1/imports", 200), ("/p/1/reconcile", 200), ("/missing", 404)],
+)
+def test_anonymous_requests_do_not_allocate_sessions(client, path, status):
+    # A stream of clients without cookies must leave room for a new sign-in form.
+    for _ in range(10):
+        client.cookies.clear()
+        response = client.get(path)
+        assert response.status_code == status
+        assert "set-cookie" not in response.headers
+    assert not client.app.state.security.sessions
+    response = client.get("/login")
+    assert token(response)
+    assert len(client.app.state.security.sessions) == 1
+    assert client.get("/login").status_code == 200
+    assert len(client.app.state.security.sessions) == 1
+
+
+def test_full_session_store_still_allows_anonymous_reads(client):
+    from portfolio_digest.web.security import BrowserSession
+
+    security = client.app.state.security
+    security.sessions = {str(n): BrowserSession("fake", 10**12) for n in range(1024)}
+    assert client.get("/p/1").status_code == 200
+    assert client.post("/login", data={"csrf": "", "password": PASSWORD}).status_code == 403
+    assert len(security.sessions) == 1024
+
+
+def test_logout_does_not_allocate_replacement_session(client):
+    csrf = sign_in(client)
+    response = client.post("/logout", data={"csrf": csrf})
+    assert response.status_code == 200
+    assert not client.app.state.security.sessions
+    assert not client.cookies.get("portfolio_session")
+
+
+def test_login_throttle_is_per_address_not_cookie_or_forwarded_header(client, engine_web):
+    csrf = token(client.get("/login"))
+    for _ in range(5):
+        assert client.post("/login", data={"csrf": csrf, "password": "wrong"}).status_code == 401
+    client.cookies.clear()
+    csrf = token(client.get("/login"))
+    assert (
+        client.post(
+            "/login",
+            data={"csrf": csrf, "password": PASSWORD},
+            headers={"x-forwarded-for": "100.100.20.30"},
+        ).status_code
+        == 429
+    )
+    with TestClient(client.app, client=("100.100.20.30", 12345)) as other:
+        sign_in(other)
+
+
+def test_login_global_ceiling_and_window_expiry(client, monkeypatch):
+    from portfolio_digest.web import security as security_module
+
+    now = 10000
+    monkeypatch.setattr(security_module.time, "monotonic", lambda: now)
+    # Oversized passwords still count, without paying the scrypt cost for this test.
+    for address in range(10):
+        with TestClient(client.app, client=(f"100.100.20.{address}", 12345)) as other:
+            csrf = token(other.get("/login"))
+            for _ in range(5):
+                assert (
+                    other.post("/login", data={"csrf": csrf, "password": "x" * 1025}).status_code
+                    == 401
+                )
+    csrf = token(client.get("/login"))
+    assert client.post("/login", data={"csrf": csrf, "password": PASSWORD}).status_code == 429
+    assert len(client.app.state.security.failures) == 50
+    now += 300
+    sign_in(client)
+    assert not client.app.state.security.failures
+
+
+def test_client_login_throttle_expires(client, monkeypatch):
+    from portfolio_digest.web import security as security_module
+
+    now = 10000
+    monkeypatch.setattr(security_module.time, "monotonic", lambda: now)
+    csrf = token(client.get("/login"))
+    for _ in range(5):
+        assert client.post("/login", data={"csrf": csrf, "password": "x" * 1025}).status_code == 401
+    now += 299
+    assert client.post("/login", data={"csrf": csrf, "password": PASSWORD}).status_code == 429
+    now += 1
+    sign_in(client)
+
+
+@pytest.mark.parametrize("password", ["", "too-short"])
+def test_dashboard_refuses_missing_or_short_password(engine_web, password):
+    with pytest.raises(ValueError, match="at least 16"):
+        create_app(engine_web, password)

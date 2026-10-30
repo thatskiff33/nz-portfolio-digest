@@ -65,7 +65,7 @@ def create_app(
                 "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
             }
         )
-        if hasattr(request.state, "session_id"):
+        if getattr(request.state, "session_id", ""):
             response.set_cookie(
                 COOKIE,
                 request.state.session_id,
@@ -121,6 +121,7 @@ def create_app(
 
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):
+        request.state.session_id, request.state.browser = security.browser(request, create=True)
         with Session(engine) as session:
             return render(request, session, "login.html")
 
@@ -135,7 +136,9 @@ def create_app(
         await form(request)
         security.sessions.pop(request.state.session_id, None)
         request.state.session_id, request.state.browser = security.browser(request)
-        return RedirectResponse("/", status_code=303)
+        response = RedirectResponse("/", status_code=303)
+        response.delete_cookie(COOKIE, httponly=True, samesite="strict", secure=secure_cookie)
+        return response
 
     @app.get("/p/{pid}", response_class=HTMLResponse)
     def overview(

@@ -67,7 +67,15 @@ def test_smtp_providers_encrypt_then_authenticate_and_send_both_parts(
     assert "Bcc" not in msg
 
 
-def test_postmark_http_contract_and_token_header(monkeypatch, msg):
+@pytest.mark.parametrize("with_attachment", [False, True])
+def test_postmark_http_contract_and_token_header(monkeypatch, msg, with_attachment):
+    if with_attachment:
+        msg.add_attachment(
+            b"Holding,Net\r\nNZX:EXAMPLE,32\r\n",
+            maintype="text",
+            subtype="csv",
+            filename="year-end-2026.csv",
+        )
     requests = []
 
     def handle(request):
@@ -92,6 +100,15 @@ def test_postmark_http_contract_and_token_header(monkeypatch, msg):
     assert payload["Bcc"] == "second@example.invalid"
     assert payload["TextBody"].strip() == "Hello"
     assert payload["HtmlBody"].strip() == "<p>Hello</p>"
+    if with_attachment:
+        import base64
+
+        attachment = payload["Attachments"][0]
+        assert attachment["Name"] == "year-end-2026.csv"
+        assert attachment["ContentType"] == "text/csv"
+        assert base64.b64decode(attachment["Content"]) == b"Holding,Net\r\nNZX:EXAMPLE,32\r\n"
+    else:
+        assert "Attachments" not in payload
 
 
 def test_ses_api_sends_raw_multipart_and_explicit_credentials(monkeypatch, msg):

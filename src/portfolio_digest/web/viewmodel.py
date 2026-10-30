@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.models import Instrument, Portfolio
@@ -16,7 +15,7 @@ from portfolio_digest.returns import (
     holding_units_at,
     period_range,
 )
-from portfolio_digest.returns_loader import load_inputs
+from portfolio_digest.returns_loader import load_portfolio_inputs
 
 
 @dataclass
@@ -35,21 +34,18 @@ class Holding:
 class Dashboard:
     def __init__(self, session: Session, portfolio: Portfolio, start: date, end: date):
         self.inputs, self.rates = (), {}
+        instruments = {}
         self.currency = portfolio.base_currency
         self.error = None
         try:
-            self.inputs, self.rates = load_inputs(session, portfolio, start, end)
+            data = load_portfolio_inputs(session, portfolio, start, end)
+            self.inputs, self.rates = data.holdings, data.rates
+            instruments = {(i.exchange, i.code): i for i in data.instruments}
             self.report = self.calculate(start, end)
         except ReturnError as exc:
             self.report = None
             self.error = str(exc)
         results = {r.label: r for r in self.report.holdings} if self.report else {}
-        keys = {(h.exchange, h.code) for h in self.inputs}
-        instruments = {
-            (i.exchange, i.code): i
-            for i in session.scalars(select(Instrument))
-            if (i.exchange, i.code) in keys
-        }
         self.holdings = []
         for holding in self.inputs:
             result = results.get(f"{holding.exchange}:{holding.code}")

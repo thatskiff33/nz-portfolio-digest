@@ -1,6 +1,6 @@
 """Database boundary for the pure returns engine. No writes or remote price fetching."""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import localcontext
 from zoneinfo import ZoneInfo
@@ -28,6 +28,18 @@ from portfolio_digest.returns import (
 from portfolio_digest.validation import portfolio_name
 
 
+@dataclass(frozen=True)
+class PortfolioInputs:
+    base_currency: str
+    holdings: tuple[Holding, ...]
+    rates: dict[str, tuple[Observation, ...]]
+    income: tuple[Income, ...]
+    instruments: tuple[Instrument, ...]
+    start: date
+    end: date
+    conversion_flags: frozenset[str]
+
+
 def load_returns(
     session: Session,
     name: str,
@@ -37,6 +49,27 @@ def load_returns(
     gross_up: bool = False,
     base_currency: str | None = None,
 ) -> Report:
+    data = load_inputs(session, name, period, today, base_currency=base_currency)
+    report = calculate_returns(
+        data.holdings, data.start, data.end, data.rates, data.base_currency, gross_up=gross_up
+    )
+    if data.conversion_flags:
+        rows = tuple(
+            replace(r, flags=tuple(sorted(set(r.flags) | data.conversion_flags)))
+            for r in report.holdings
+        )
+        return _combined_report(rows, data.start, data.end, data.base_currency)
+    return report
+
+
+def load_inputs(
+    session: Session,
+    name: str,
+    period: str,
+    today: date | None = None,
+    *,
+    base_currency: str | None = None,
+) -> PortfolioInputs:
     today = today or datetime.now(ZoneInfo(get_settings().timezone)).date()
     # Validate syntax before querying; 'all' is resolved from stored activity below.
     start, end = period_range(period, today)
@@ -47,18 +80,7 @@ def load_returns(
         raise ReturnError("Portfolio not found.")
     if period == "all":
         start, end = period_range(period, today, first_activity_date(session, portfolio.id, end))
-    target_currency = base_currency or portfolio.base_currency
-    holdings, rates, conversion_flags = _load_inputs(
-        session, portfolio, start, end, target_currency
-    )
-    report = calculate_returns(holdings, start, end, rates, target_currency, gross_up=gross_up)
-    if conversion_flags:
-        rows = tuple(
-            replace(r, flags=tuple(sorted(set(r.flags) | conversion_flags)))
-            for r in report.holdings
-        )
-        return _combined_report(rows, start, end, target_currency)
-    return report
+    return load_portfolio_inputs(session, portfolio, start, end, base_currency=base_currency)
 
 
 def first_activity_date(session: Session, portfolio_id: int, end: date) -> date | None:
@@ -78,17 +100,16 @@ def first_activity_date(session: Session, portfolio_id: int, end: date) -> date 
     return min((day for day in (first_trade, first_income) if day is not None), default=None)
 
 
-def load_inputs(
-    session: Session, portfolio: Portfolio, start: date, end: date
-) -> tuple[tuple[Holding, ...], dict[str, tuple[Observation, ...]]]:
-    """Shared stored inputs for reports and sampled dashboard valuations."""
-    holdings, rates, _ = _load_inputs(session, portfolio, start, end, portfolio.base_currency)
-    return holdings, rates
-
-
-def _load_inputs(
-    session: Session, portfolio: Portfolio, start: date, end: date, target_currency: str
-) -> tuple[tuple[Holding, ...], dict[str, tuple[Observation, ...]], set[str]]:
+def load_portfolio_inputs(
+    session: Session,
+    portfolio: Portfolio,
+    start: date,
+    end: date,
+    *,
+    base_currency: str | None = None,
+) -> PortfolioInputs:
+    """Load stored inputs once for reports and sampled dashboard valuations."""
+    target_currency = base_currency or portfolio.base_currency
     trades = session.scalars(
         select(Trade)
         .where(Trade.portfolio_id == portfolio.id, Trade.trade_date <= end)
@@ -127,10 +148,10 @@ def _load_inputs(
     conversion_flags: set[str] = set()
 
     def recorded_fx(value, day, currency):
-        if day <= start:
-            return None
-        if value is None or target_currency == portfolio.base_currency:
+        if target_currency == portfolio.base_currency:
             return value
+        if day <= start or value is None:
+            return None
         if currency == target_currency:
             # Native target-currency amounts need no conversion. Broker FX and
             # market cross-rates need not be exact reciprocals.
@@ -198,7 +219,16 @@ def _load_inputs(
                 instrument.name,
             )
         )
-    return tuple(holdings), rates, conversion_flags
+    return PortfolioInputs(
+        target_currency,
+        tuple(holdings),
+        rates,
+        tuple(income),
+        tuple(instruments),
+        start,
+        end,
+        frozenset(conversion_flags),
+    )
 
 
 def _combined_report(rows: tuple[Result, ...], start: date, end: date, currency: str) -> Report:

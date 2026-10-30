@@ -704,3 +704,18 @@ def test_email_keeps_nzd_trades_and_income_native_in_foreign_portfolio(returns_e
         session.flush()
         native = load_returns(session, "Separate", "2026-10-14:2026-10-19", base_currency="NZD")
         assert native.holdings == (row,)
+
+
+def test_named_and_portfolio_loaders_share_complete_inputs(returns_engine):
+    from portfolio_digest.returns_loader import PortfolioInputs, load_inputs, load_portfolio_inputs
+
+    with Session(returns_engine) as session:
+        portfolio = session.scalar(select(Portfolio).where(Portfolio.name == "Invented"))
+        start, end = date(2026, 10, 12), date(2026, 10, 19)
+        named = load_inputs(session, "invented", f"{start}:{end}")
+        direct = load_portfolio_inputs(session, portfolio, start, end)
+        assert isinstance(named, PortfolioInputs)
+        assert named == direct
+        assert named.start == start and named.end == end
+        assert named.income and named.instruments and named.holdings and named.rates
+        assert named.holdings[0].income[0].amount == D(4)

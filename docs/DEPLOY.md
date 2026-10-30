@@ -89,15 +89,21 @@ For rows fetched before this convention was introduced, run
 The `scheduler` container reads `schedules.toml`. This is the one place to change times,
 report periods and recipients. Prices run at 10:30 and 18:30 Auckland time. Weekly reports
 run Sunday at 20:00 for the preceding seven completed calendar days. Monthly reports run
-on the 1st at 08:00 for the previous calendar month. Today's unfinished markets are excluded.
+on the 1st at 08:00 for the previous calendar month. Year-end summaries run on 1 April
+at 09:00 for the NZ tax year just ended, one email per NZD portfolio. Weekly and monthly
+reports exclude today's unfinished markets.
 All schedules use `Pacific/Auckland`, including daylight saving. The US FX close can fall
 after the morning fetch during NZ summer, so the evening fetch supplies that day's rate.
 
-If you previously installed the price systemd timer, disable it before starting the
-container, so price fetching has just one scheduler:
+If you previously installed the price systemd timer or PR #29's year-end timer, disable
+them before starting the container, so each job has just one scheduler:
 
 ```sh
 systemctl --user disable --now portfolio-digest-prices.timer
+# Only if the old year-end timer was installed:
+systemctl --user disable --now portfolio-digest-year-end.timer
+rm -f ~/.config/systemd/user/portfolio-digest-year-end.{service,timer}
+systemctl --user daemon-reload
 # After completing the mail settings below:
 docker compose up -d --build scheduler
 ```
@@ -110,9 +116,11 @@ An optional `kuma_push_url` is pinged only after successful delivery. Ping failu
 logged without the URL and do not fail the send.
 
 Each `[[schedules]]` needs a unique `name`, `kind` (`prices` or `report`), `frequency`
-(`daily`, `weekly` or `monthly`) and local `at = "HH:MM"`. Weekly schedules use a lower-case
-`weekday`; monthly schedules use `day` (1 to 28). Reports use `days` (1 to 3660, default 7)
-or `period = "last_month"`. Unknown fields and invalid settings fail before jobs start.
+(`daily`, `weekly`, `monthly` or `yearly`) and local `at = "HH:MM"`. Weekly schedules use a
+lower-case `weekday`; monthly schedules use `day` (1 to 28). Reports use `days` (1 to 3660, default 7)
+or `period = "last_month"`. Yearly schedules use `month` (1 to 12) and `day` (1 to 28).
+The annual summary uses `period = "tax_year"`. Unknown fields and invalid settings fail
+before jobs start.
 A time inside the spring clock gap runs at the first valid minute afterwards. A repeated
 autumn time runs once, at its first occurrence.
 
@@ -150,8 +158,8 @@ mail settings are separate from the read-only OAuth credentials used by the ASB 
 
 Verify the sender/domain in Postmark. Set `MAILER=postmark`, `MAIL_FROM`, `MAIL_OWNER` and
 `POSTMARK_SERVER_TOKEN` (the Server API token, not the account token). Delivery uses the
-HTTPS email API with both HTML and plain text. The first recipient is in To; additional
-recipients are in Bcc. SMTP and SES use private envelope recipients.
+HTTPS email API with both HTML and plain text, plus the year-end CSV attachment.
+The first recipient is in To; additional recipients are in Bcc. SMTP and SES use private envelope recipients.
 
 ### AWS SES
 
@@ -188,6 +196,39 @@ works without downloading images. Each market has the requested Sharesight-style
 and subtotals, followed by the portfolio total. Missing price/FX data fails the entire
 report with a non-zero exit instead of quietly omitting a holding. Stored stale data can
 be used but is flagged. A failed send also exits non-zero and never pings monitoring.
+
+For year-end delivery, use `--schedule year-end`. Its preview writes one
+`report-portfolio-ID.html`, `.txt` and `.csv` per portfolio. It uses the same mail
+settings, recipients and preview boundary as weekly/monthly delivery. The CSV is attached
+for Gmail, SMTP, Postmark and SES. Explicit historical years remain available through
+`year-end --portfolio NAME --year YYYY`; see the [summary guide](../README.md#nz-tax-year-summary).
+
+When upgrading an existing server, the deploy action preserves its private schedule.
+Add this entry to that file if it is missing, then restart the scheduler:
+
+```toml
+[[schedules]]
+name = "year-end"
+kind = "report"
+frequency = "yearly"
+month = 4
+day = 1
+at = "09:00"
+period = "tax_year"
+```
+
+If migrating PR #29's SMTP settings, use `MAILER=smtp`, move `SMTP_SENDER` to
+`MAIL_FROM` and `SMTP_RECIPIENT` to `MAIL_OWNER`. Retain the host, port and authentication
+settings, then remove the two obsolete variables. The annual systemd units have been
+removed; the deploy script disables an installed legacy year-end timer before restarting
+the scheduler. On a manual upgrade, run the disable commands above.
+
+Annual catch-up retains the due occurrence's tax year, even if the scheduler restarts
+in a later year. Delivery stops on the first failed portfolio. A retry may resend
+earlier portfolios, so check the provider after a partial send. Monitoring is pinged
+only after every portfolio succeeds. US closing data may not yet be stored at 09:00 NZDT
+on 1 April; inspect carried-forward flags and refresh through 31 March before a manual
+rerun if needed.
 
 The email model uses the shared period engine in `returns.py` through `returns_loader`,
 documented in [RETURNS.md](RETURNS.md). It combines all portfolios by listing in NZD.

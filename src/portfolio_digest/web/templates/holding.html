@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% from "returns.html" import returns %}
+{% block content %}
+    <p class="eyebrow">{{ portfolio.name }} / {{ instrument.exchange }}</p>
+    <h1>{{ instrument.code }}</h1>
+    <p class="muted">{{ instrument.name }} · Prices in {{ instrument.currency }}</p>
+    <section class="panel">
+        <h2>All-time returns</h2>
+        <p class="muted">{{ start }} to {{ end }} · Values in {{ portfolio.base_currency }}</p>
+        {% if returns_error %}<p class="notice">Figures unavailable: {{ returns_error }}</p>{% endif %}
+        <div class="table-scroll" role="region" aria-label="Holding returns" tabindex="0">
+            <table>
+                <thead><tr>
+                    <th scope="col">Capital gain</th>
+                    <th scope="col">Net dividends</th>
+                    <th scope="col">Currency gain</th>
+                    <th scope="col">Total return</th>
+                    <th scope="col">Gross income</th>
+                    <th scope="col">Withholding tax</th>
+                    <th scope="col">Imputation credits</th>
+                </tr></thead>
+                <tbody><tr>{{ returns(result) }}</tr></tbody>
+            </table>
+        </div>
+    </section>
+    <section class="panel">
+        <h2>Price history</h2>
+        {% include "chart.html" %}
+    </section>
+    <section class="panel">
+        <h2>Trades</h2>
+        <div class="table-scroll"
+             role="region"
+             aria-label="Trade history"
+             tabindex="0">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Type</th>
+                        <th>Quantity</th>
+                        <th>Price</th>
+                        <th>Fees</th>
+                        <th>Currency</th>
+                        <th>Notes</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in trades %}
+                        <tr>
+                            <td>{{ t.trade_date }}</td>
+                            <td>{{ t.trade_type }}</td>
+                            <td>{{ t.quantity|quantity }}</td>
+                            <td>{{ t.price|money }}</td>
+                            <td>{{ t.fees|money }}</td>
+                            <td>{{ t.currency }}</td>
+                            <td>{{ t.notes or '' }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+    <section class="panel">
+        <h2>Income</h2>
+        <div class="table-scroll"
+             role="region"
+             aria-label="Income history"
+             tabindex="0">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Paid</th>
+                        <th>Kind</th>
+                        <th>Gross</th>
+                        <th>Net</th>
+                        <th>Imputation credits</th>
+                        <th>Withholding tax</th>
+                        <th>Currency</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for i in income %}
+                        <tr>
+                            <td>{{ i.paid_date }}</td>
+                            <td>{{ i.kind }}</td>
+                            <td>{{ i.gross_amount|money }}</td>
+                            <td>{{ i.net_amount|money }}</td>
+                            <td>{{ i.imputation_credits|money }}</td>
+                            <td>{{ i.withholding_tax|money }}</td>
+                            <td>{{ i.currency }}</td>
+                        </tr>
+                    {% else %}
+                        <tr>
+                            <td colspan="7">No income recorded.</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+{% endblock %}

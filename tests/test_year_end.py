@@ -457,6 +457,35 @@ def test_completed_pre_year_positions_need_no_historical_fx(rebuy):
     assert report.flags == ()
 
 
+def test_partial_pre_year_disposal_needs_no_proceeds_fx():
+    h = Holding(
+        "NASDAQ",
+        "OLD",
+        "USD",
+        (
+            trade("2023-01-01", "buy", "10", "10", fx="1.5"),
+            trade("2024-01-01", "sell", "5", "12"),
+            trade("2025-05-01", "sell", "2", "20", fx="2"),
+        ),
+        (
+            Observation(day("2025-03-31"), D(15)),
+            Observation(day("2026-03-31"), D(25)),
+        ),
+    )
+    rates = {
+        "USD": (
+            Observation(day("2025-03-31"), D(2)),
+            Observation(day("2026-03-31"), D(2)),
+        )
+    }
+    report = calculate_year_end((h,), (), rates, 2026)
+    # Prior-year proceeds do not change the surviving FIFO acquisition cost.
+    assert report.foreign_peak == D(75)
+    assert report.total.gains == D(50)  # 2*20*2 proceeds - 2*10*1.5 cost.
+    assert report.performance.total.closing == D(150)
+    assert report.flags == ()
+
+
 def test_year_end_loader_retains_historical_broker_fx(monkeypatch):
     engine = _sqlite_engine(monkeypatch)
     with Session(engine) as session:

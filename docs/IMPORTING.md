@@ -18,7 +18,18 @@ output, allowing the rest of the label to import. The stored trade is retained; 
 amendment and correct the history explicitly rather than overwriting it automatically.
 The first accepted version of a new reference in a Gmail batch is retained. Unreadable
 Gmail contract notes are also skipped with a message ID and reason; review and correct
-them explicitly so the history is complete. Interrupted imports are marked failed.
+them explicitly so the history is complete. A Gmail network or HTTP failure fails the whole
+run and imports nothing, so retry the feed once the connection is restored. At the start
+of each import, running attempts for the same portfolio older than one hour are marked
+failed with the note "Interrupted; marked failed at next import". Failed imports leave
+no new instruments behind.
+
+Numbers use a decimal point. Commas are accepted only as thousands separators in groups
+of three, for example `1,234.56` or `12,345`. Decimal commas such as `1,5` or `27,50`, and
+mixed formats such as `1.234,56`, are refused with the row's location.
+Trade and payment dates must be no later than tomorrow in Pacific/Auckland. Use
+four-digit years; only ASB contract-note emails accept two-digit years, and these must
+also meet the date limit.
 Currency prefixes on prices and fees must agree with their declared currency.
 
 Broker exports contain private financial information. Keep them outside the repository,

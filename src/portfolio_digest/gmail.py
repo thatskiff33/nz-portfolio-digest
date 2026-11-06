@@ -164,6 +164,8 @@ class AsbGmailImporter:
             try:
                 raw = self.client.raw_message(message_id)
                 result.trades.append(parse_contract_note(raw, where))
+            except GmailError:
+                raise
             except NotAContractNote:
                 result.skipped.append(RowError(where, "not an ASB contract note"))
             except (FileProblem, RowProblem) as exc:

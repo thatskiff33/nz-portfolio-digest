@@ -443,3 +443,99 @@ def test_asb_contract_note_table_and_tabbed_fields(source):
     result = AsbEmailImporter().parse(content, ParseContext())
     assert result.errors == []
     assert result.trades == original.trades
+
+
+@pytest.mark.parametrize("value", ["1,5", "1.234,56", "12,34,5", "27,50"])
+@pytest.mark.parametrize("column", ["Quantity", "Price in Dollars", "Brokerage"])
+def test_decimal_commas_are_row_errors(value, column):
+    import csv
+    import io
+
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream)
+    columns = [
+        "Trade Date",
+        "Instrument Code",
+        "Market Code",
+        "Quantity",
+        "Price in Dollars",
+        "Transaction Type",
+        "Brokerage",
+    ]
+    row = ["14/03/2024", "EXM", "NZX", "1", "2", "BUY", "0"]
+    row[columns.index(column)] = value
+    writer.writerow(columns)
+    writer.writerow(row)
+    result = SharesightCsvImporter().parse(stream.getvalue().encode(), ParseContext())
+    assert not result.trades
+    assert len(result.errors) == 1
+    assert result.errors[0].where == "line 2"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1,234.56", "1234.56"),
+        ("12,345", "12345"),
+        ("-1,234.56", "-1234.56"),
+    ],
+)
+def test_valid_thousands_groups_are_exact(value, expected):
+    from portfolio_digest.importers.base import parse_decimal
+
+    assert parse_decimal(value, "amount") == Decimal(expected)
+
+
+@pytest.fixture
+def auckland_date_boundary(monkeypatch):
+    from datetime import UTC, datetime
+
+    from portfolio_digest.importers import base
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2024, 6, 30, 12, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(base, "datetime", Clock)
+
+
+@pytest.mark.parametrize("value", ["14/03/24", "04/03/68", "2024-07-03"])
+def test_invalid_trade_dates_name_the_line(auckland_date_boundary, value):
+    content = (
+        "Trade Date,Instrument Code,Market Code,Quantity,Price in Dollars,"
+        f"Transaction Type\n{value},EXM,NZX,1,2,BUY\n"
+    ).encode()
+    result = SharesightCsvImporter().parse(content, ParseContext())
+    assert not result.trades
+    assert result.errors[0].where == "line 2"
+
+
+def test_date_limit_uses_auckland_today_plus_one_day(auckland_date_boundary):
+    from datetime import date
+
+    from portfolio_digest.importers.base import RowProblem, parse_date
+
+    assert parse_date("2024-07-02") == date(2024, 7, 2)
+    with pytest.raises(RowProblem, match="later than"):
+        parse_date("2024-07-03")
+
+
+@pytest.mark.parametrize("value,accepted", [(b"14/03/24", True), (b"04/03/68", False)])
+def test_asb_contract_note_two_digit_years(auckland_date_boundary, value, accepted):
+    content = fixture("asb-contract-note.eml").replace(b"14/03/2024", value)
+    result = AsbEmailImporter().parse(content, ParseContext())
+    assert bool(result.trades) is accepted
+    assert bool(result.errors) is not accepted
+
+
+def test_future_payment_date_names_the_line(auckland_date_boundary):
+    content = (
+        b"Order ID,Trade date,Instrument code,Market code,Quantity,Price,Transaction type,"
+        b"Currency,Gross amount,Amount\n"
+        b"made-up-dividend,2024-07-03,EXM,NZX,0,0,DIVIDEND,NZD,10,10\n"
+    )
+    result = SharesiesImporter().parse(content, ParseContext())
+    assert not result.incomes
+    assert result.errors[0].where == "line 2"
+    assert "later than" in result.errors[0].message

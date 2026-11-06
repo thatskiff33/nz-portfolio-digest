@@ -156,6 +156,7 @@ class Instrument(Base):
     name: Mapped[str] = mapped_column(String(255))
     currency: Mapped[str] = mapped_column(String(3))
     kind: Mapped[str] = mapped_column(String(16), default=InstrumentKind.SHARE.value)
+    split_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Overrides the automatic Yahoo symbol (e.g. AIR.NZ) for odd cases.
     yahoo_symbol: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -233,7 +234,9 @@ class Trade(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    income_id: Mapped[int | None] = mapped_column(ForeignKey("income.id", ondelete="RESTRICT"))
+    income_id: Mapped[int | None] = mapped_column(
+        ForeignKey("income.id", ondelete="RESTRICT"), index=True
+    )
     consideration: Mapped[Decimal | None] = mapped_column(Money)
 
     portfolio: Mapped[Portfolio] = relationship(back_populates="trades")
@@ -457,7 +460,9 @@ class DividendSuggestion(Base):
     ex_date: Mapped[date] = mapped_column(Date)
     gross_amount: Mapped[Decimal] = mapped_column(Money)
     status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
-    income_id: Mapped[int | None] = mapped_column(ForeignKey("income.id", ondelete="RESTRICT"))
+    income_id: Mapped[int | None] = mapped_column(
+        ForeignKey("income.id", ondelete="RESTRICT"), index=True
+    )
 
 
 class ImportIncomeMatch(Base):
@@ -473,7 +478,12 @@ class ImportIncomeMatch(Base):
 
 
 class AlertState(Base):
-    """Last delivery per portfolio, rule and holding; cleared rules are removed."""
+    """Last delivery per portfolio and rule. Cleared rules are removed.
+
+    A daily move stores its close dates in the rule key,
+    ``daily:{exchange}:{code}:{previous}:{latest}``. That pair is not sent again.
+    Portfolio-drop and stale keys do not include dates.
+    """
 
     __tablename__ = "alert_states"
     portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id"), primary_key=True)

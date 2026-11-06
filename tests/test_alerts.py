@@ -119,12 +119,126 @@ def test_dry_run_sends_nothing_and_does_not_suppress_real_delivery(sample):
 def test_cooldown_repeats_only_when_elapsed(sample):
     session, _, _ = sample
     rules = config(cooldown_hours=2)
-    alerts.run_alerts(session, rules, now=NOW)
+    first = alerts.run_alerts(session, rules, now=NOW)
+    assert "moved" in first[0]
+    assert "Portfolio value changed" in first[0]
     session.flush()
     session.expire_all()
     assert not alerts.run_alerts(session, rules, now=NOW + timedelta(hours=1))
-    assert alerts.run_alerts(session, rules, now=NOW + timedelta(hours=2))
+    second = alerts.run_alerts(session, rules, now=NOW + timedelta(hours=2))
+    assert "Portfolio value changed" in second[0]
+    assert "moved" not in second[0]
     assert alerts.send.call_count == 2
+
+
+@pytest.mark.parametrize("cooldown_hours", [None, 100])
+def test_consecutive_qualifying_daily_moves_both_send(sample, cooldown_hours):
+    session, portfolio, instrument = sample
+    session.add(
+        Price(
+            instrument_id=instrument.id,
+            price_date=date(2026, 10, 19),
+            close=D("7"),
+            source="made_up",
+            is_stale=False,
+        )
+    )
+    session.commit()
+    # Test the default and a cooldown longer than the gap between the two closes.
+    rules = config(cooldown_hours=cooldown_hours, portfolio_drop_percent=D("99"))
+    friday = alerts.run_alerts(session, rules, now=NOW)
+    monday = alerts.run_alerts(session, rules, now=datetime(2026, 10, 19, 7, tzinfo=UTC))
+    assert "2026-10-15 to 2026-10-16" in friday[0]
+    assert "-20.00%" in friday[0]
+    assert "2026-10-16 to 2026-10-19" in monday[0]
+    assert "-12.50%" in monday[0]
+    assert alerts.send.call_count == 2
+    assert session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-15:2026-10-16")) is None
+    assert (
+        session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-16:2026-10-19"))
+        is not None
+    )
+
+
+def test_same_daily_pair_does_not_resend_later_that_day_or_over_the_weekend(sample):
+    session, portfolio, _ = sample
+    rules = config(cooldown_hours=1, portfolio_drop_percent=D("99"))
+    friday = alerts.run_alerts(session, rules, now=NOW)
+    assert "2026-10-15 to 2026-10-16" in friday[0]
+    alerts.send.reset_mock()
+    for now in (
+        NOW + timedelta(hours=2),
+        datetime(2026, 10, 17, 7, tzinfo=UTC),
+        datetime(2026, 10, 18, 7, tzinfo=UTC),
+    ):
+        assert alerts.run_alerts(session, rules, now=now) == []
+    alerts.send.assert_not_called()
+    assert (
+        session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-15:2026-10-16"))
+        is not None
+    )
+
+
+def test_cooldown_still_repeats_a_stale_price(sample):
+    session, _, instrument = sample
+    latest = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id, Price.price_date == date(2026, 10, 16)
+        )
+    )
+    session.delete(latest)
+    session.commit()
+    rules = config(cooldown_hours=2, stale_trading_days=0, portfolio_drop_percent=D("99"))
+    first = alerts.run_alerts(session, rules, now=NOW)
+    assert "price stale" in first[0]
+    assert "moved" not in first[0]
+    assert not alerts.run_alerts(session, rules, now=NOW + timedelta(hours=1))
+    second = alerts.run_alerts(session, rules, now=NOW + timedelta(hours=2))
+    assert "price stale" in second[0]
+    assert alerts.send.call_count == 2
+
+
+def test_under_threshold_clears_the_recorded_daily_pair(sample):
+    session, portfolio, _ = sample
+    rules = config(portfolio_drop_percent=D("99"))
+    alerts.run_alerts(session, rules, now=NOW)
+    pair = "daily:NZX:MADEUP:2026-10-15:2026-10-16"
+    assert session.get(AlertState, (portfolio.id, pair)) is not None
+    widened = config(daily_percent=D("25"), portfolio_drop_percent=D("99"))
+    alerts.run_alerts(session, widened, now=NOW)
+    assert session.get(AlertState, (portfolio.id, pair)) is None
+
+
+def test_missing_close_keeps_the_recorded_daily_pair(sample):
+    session, portfolio, instrument = sample
+    rules = config(portfolio_drop_percent=D("99"))
+    alerts.run_alerts(session, rules, now=NOW)
+    price = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id, Price.price_date == date(2026, 10, 16)
+        )
+    )
+    price.is_stale = True
+    session.commit()
+    assert not alerts.run_alerts(session, rules, now=NOW)
+    assert (
+        session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-15:2026-10-16"))
+        is not None
+    )
+
+
+def test_undated_daily_row_does_not_suppress_the_current_pair(sample):
+    session, portfolio, _ = sample
+    session.add(AlertState(portfolio_id=portfolio.id, rule_key="daily:NZX:MADEUP", sent_at=NOW))
+    session.commit()
+    rules = config(portfolio_drop_percent=D("99"))
+    sent = alerts.run_alerts(session, rules, now=NOW)
+    assert "2026-10-15 to 2026-10-16" in sent[0]
+    assert session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP")) is None
+    assert (
+        session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-15:2026-10-16"))
+        is not None
+    )
 
 
 def test_clear_rearms_rule_and_unknown_data_does_not_clear(sample, monkeypatch):
@@ -285,31 +399,44 @@ def test_cli_dry_run_prints_without_delivering(sample, monkeypatch, capsys):
     assert not session.scalars(select(AlertState)).all()
 
 
-@pytest.mark.parametrize("fetch_result", [0, 1])
-def test_scheduler_checks_alerts_after_success_or_partial_fetch(monkeypatch, fetch_result):
+@pytest.mark.parametrize(
+    ("errors", "fetch_result"),
+    [
+        ([None], 0),
+        ([None, "failed"], 0),
+        (["failed"], 1),
+    ],
+)
+def test_scheduler_checks_alerts_after_success_or_partial_fetch(monkeypatch, errors, fetch_result):
     from argparse import Namespace
     from contextlib import nullcontext
     from datetime import time
 
     from portfolio_digest import cli
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
     from portfolio_digest.scheduling import Schedule
 
+    instruments = [Outcome("invented", error=error) for error in errors]
+    report = FetchReport(outcomes=instruments, instrument_outcomes=instruments)
+    checkpoint = object()
     events = []
     rules = config()
     monkeypatch.setattr(cli, "read_config", lambda _: rules)
     monkeypatch.setattr(cli, "make_engine", lambda: None)
     monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext("session"))
+    monkeypatch.setattr(cli, "_fetch_prices", lambda _: events.append("fetch committed") or report)
     monkeypatch.setattr(
-        cli, "cmd_prices_fetch", lambda _: events.append("fetch committed") or fetch_result
+        cli, "run_alerts", lambda s, c, **kw: events.append((s, c, kw["checkpoint"]))
     )
-    monkeypatch.setattr(cli, "run_alerts", lambda s, c: events.append((s, c)))
 
     def run(_, execute):
-        return execute(Schedule(name="prices", kind="prices", frequency="daily", at=time(18)), NOW)
+        return execute(
+            Schedule(name="prices", kind="prices", frequency="daily", at=time(18)), NOW, checkpoint
+        )
 
     monkeypatch.setattr(cli.Scheduler, "run", run)
     assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == fetch_result
-    assert events == ["fetch committed", ("session", rules)]
+    assert events == ["fetch committed", ("session", rules, checkpoint)]
 
 
 def test_portfolio_threshold_is_strict(sample):
@@ -330,7 +457,7 @@ def test_dry_run_does_not_clear_sent_state(sample, monkeypatch):
     session.commit()
     monkeypatch.setattr(alerts, "evaluate", lambda *a: {"daily:NZX:MADEUP": None})
     assert not alerts.run_alerts(session, config(), dry_run=True, now=NOW)
-    assert session.get(AlertState, (1, "daily:NZX:MADEUP")) is not None
+    assert session.get(AlertState, (1, "daily:NZX:MADEUP:2026-10-15:2026-10-16")) is not None
     assert alerts.send.call_count == 1
 
 
@@ -421,3 +548,166 @@ def test_push_refuses_redirects_with_credentials(target):
     )
     with pytest.raises(HTTPError):
         alerts._push_opener.error("http", request, Mock(), 302, "Found", {"location": target})
+
+
+def test_unrecorded_downloaded_split_suppresses_portfolio_drop(sample):
+    from portfolio_digest.models import Split
+
+    session, portfolio, instrument = sample
+    session.add(
+        Split(
+            instrument_id=instrument.id,
+            split_date=date(2026, 10, 16),
+            shares_before=D(1),
+            shares_after=D(4),
+            source="yahoo",
+        )
+    )
+    session.get(Price, (instrument.id, date(2026, 10, 16))).close = D("2.5")
+    states = alerts.evaluate(session, portfolio, config(), NOW)
+    assert states.get("portfolio") is None
+
+
+def test_failed_portfolio_does_not_roll_back_earlier_or_block_later(sample, monkeypatch):
+    session, first, _ = sample
+    session.add_all(
+        [
+            Portfolio(name="Second invented", base_currency="NZD"),
+            Portfolio(name="Third invented", base_currency="NZD"),
+        ]
+    )
+    session.commit()
+    key = "invented"
+    monkeypatch.setattr(alerts, "evaluate", lambda *a: {key: alerts.Trigger(key, "Invented move")})
+    sent = []
+
+    def send(settings, msg, recipients):
+        text = msg.get_body(preferencelist=("plain",)).get_content()
+        if "Second invented" in text:
+            raise MailError("invented-private-token")
+        sent.append(text)
+
+    monkeypatch.setattr(alerts, "send", send)
+    for _ in range(3):
+        with pytest.raises(MailError, match="Some portfolio alerts failed") as error:
+            alerts.run_alerts(session, config(), now=NOW)
+        assert "invented-private-token" not in str(error.value)
+        session.rollback()  # Match the CLI's failed outer session scope.
+    assert len(sent) == 2
+    assert len(session.scalars(select(AlertState)).all()) == 2
+    assert session.get(AlertState, (2, key)) is None
+
+
+def test_alert_checkpoint_skips_completed_portfolios_even_after_cooldown(sample, monkeypatch):
+    from portfolio_digest.scheduling import DeliveryCheckpoint
+
+    session, _, _ = sample
+    session.add(Portfolio(name="Second invented", base_currency="NZD"))
+    session.commit()
+    checked = []
+    saved = []
+    checkpoint = DeliveryCheckpoint(set(), lambda: saved.append(set(checkpoint.delivered)))
+
+    def evaluate(session, portfolio, config, now):
+        checked.append(portfolio.id)
+        if portfolio.id == 2:
+            raise RuntimeError("invented-private-token")
+        return {"invented": alerts.Trigger("invented", "Invented move")}
+
+    monkeypatch.setattr(alerts, "evaluate", evaluate)
+    for now in [NOW, NOW + timedelta(hours=8)]:
+        with pytest.raises(MailError):
+            alerts.run_alerts(session, config(cooldown_hours=1), now=now, checkpoint=checkpoint)
+    assert checked == [1, 2, 2]
+    assert saved == [{1}]
+    assert alerts.send.call_count == 1
+
+
+def test_alert_checkpoint_failure_stops_before_next_portfolio(sample, monkeypatch):
+    from portfolio_digest.scheduling import DeliveryCheckpoint, SchedulerStateError
+
+    session, _, _ = sample
+    session.add(Portfolio(name="Second invented", base_currency="NZD"))
+    session.commit()
+    checked = []
+
+    def evaluate(session, portfolio, config, now):
+        checked.append(portfolio.id)
+        return {"invented": alerts.Trigger("invented", "Invented move")}
+
+    def fail():
+        raise SchedulerStateError("Cannot write scheduler state.")
+
+    monkeypatch.setattr(alerts, "evaluate", evaluate)
+    with pytest.raises(SchedulerStateError):
+        alerts.run_alerts(session, config(), now=NOW, checkpoint=DeliveryCheckpoint(set(), fail))
+    assert checked == [1]
+    session.rollback()
+    assert session.get(AlertState, (1, "invented")) is not None
+    alerts.push.assert_not_called()
+
+
+def test_dry_run_neither_saves_checkpoint_nor_commits(sample, monkeypatch):
+    from portfolio_digest.scheduling import DeliveryCheckpoint
+
+    session, _, _ = sample
+    checkpoint = DeliveryCheckpoint(set(), Mock())
+    commit = Mock(side_effect=AssertionError("Dry run committed"))
+    monkeypatch.setattr(session, "commit", commit)
+    assert alerts.run_alerts(session, config(), dry_run=True, now=NOW, checkpoint=checkpoint)
+    assert checkpoint.delivered == set()
+    checkpoint.save.assert_not_called()
+    commit.assert_not_called()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_cli_partial_fetch_advances_but_total_failure_remains_pending(
+    tmp_path, monkeypatch, partial
+):
+    import json
+    from argparse import Namespace
+    from contextlib import nullcontext
+
+    from portfolio_digest import cli
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
+    from portfolio_digest.scheduling import Schedule, Scheduler
+
+    schedule = Schedule(name="prices", kind="prices", frequency="daily", at="09:00")
+    rules = ScheduleConfig(schedules=[schedule])
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "prices": NOW.isoformat(),
+                "prices:config": schedule.model_dump_json() + rules.timezone,
+            }
+        )
+    )
+    instruments = [Outcome("invented", error="failed")]
+    if partial:
+        instruments.append(Outcome("another invented"))
+    report = FetchReport(outcomes=instruments, instrument_outcomes=instruments)
+    monkeypatch.setattr(cli, "read_config", lambda _: rules)
+    monkeypatch.setattr(cli, "_fetch_prices", lambda _: report)
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext(None))
+    checkpoints = []
+    monkeypatch.setattr(cli, "run_alerts", lambda *a, checkpoint: checkpoints.append(checkpoint))
+
+    class Stop(Exception):
+        pass
+
+    def stop(_):
+        raise Stop
+
+    real_run = Scheduler.run
+    monkeypatch.setattr(
+        Scheduler, "run", lambda self, execute: real_run(self, execute, now=lambda: NOW, sleep=stop)
+    )
+    with pytest.raises(Stop):
+        cli.cmd_scheduler(Namespace(config="unused", state=str(path)))
+    assert len(checkpoints) == 1
+    state = json.loads(path.read_text())
+    due = datetime.fromisoformat(state["prices"])
+    assert (due > NOW) is partial
+    assert (state["prices:retry"]["retry_at"] is None) is partial

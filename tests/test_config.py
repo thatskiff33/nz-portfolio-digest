@@ -62,3 +62,24 @@ def test_a_malformed_database_url_is_never_echoed(url):
         make_engine(url)
     assert "s3cret-pass" not in str(exc.value)
     assert exc.value.__suppress_context__
+
+
+@pytest.mark.parametrize("dotenv", [False, True])
+def test_report_settings_are_independent_and_mask_secrets(
+    no_settings_file, monkeypatch, tmp_path, dotenv
+):
+    from portfolio_digest.config import get_report_settings
+
+    values = {
+        "REPORT_RECIPIENTS": "one@example.invalid,two@example.invalid",
+        "REPORT_KUMA_PUSH_URL": "https://monitor.example.invalid/invented-token",
+    }
+    if dotenv:
+        (tmp_path / ".env").write_text("\n".join(f"{key}={value}" for key, value in values.items()))
+    else:
+        for key, value in values.items():
+            monkeypatch.setenv(key, value)
+    settings = get_report_settings()
+    assert settings.recipients == values["REPORT_RECIPIENTS"]
+    assert settings.kuma_push_url.get_secret_value() == values["REPORT_KUMA_PUSH_URL"]
+    assert "invented-token" not in repr(settings)

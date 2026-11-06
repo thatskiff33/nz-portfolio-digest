@@ -8,12 +8,13 @@ Fees reduce capital. All percentages share opening value plus purchase outlays
 plus non-cash value moved in as denominator. Sales and non-cash removals are
 withdrawals, not a reduction in capital put at risk.
 Non-split adjustments move units in or out at their recorded price without cash.
-A parcel keeps its local cost (q * p0), so a split rescales units exactly.
+A parcel keeps its local cost (q * p0) when a split rescales its units.
 See docs/RETURNS.md for boundaries, income and missing-data conventions.
 """
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from functools import wraps
@@ -26,6 +27,7 @@ from sqlalchemy.orm import Session
 from portfolio_digest.importing import ImportFailure
 from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.calendars import FX, TradingCalendar, for_exchange
+from portfolio_digest.splits import rescale_price, split_change, split_warning
 
 ZERO = Decimal(0)
 HUNDRED = Decimal(100)
@@ -60,6 +62,15 @@ class Observation:
             raise ReturnError("Observations must be finite, non-negative Decimals.")
 
 
+class ObservationSeries(tuple):
+    """Stable date ordering prepared once for logarithmic lookups."""
+
+    def __new__(cls, points=()):
+        if isinstance(points, cls):
+            return points
+        return super().__new__(cls, sorted(points, key=lambda p: p.day))
+
+
 @dataclass(frozen=True)
 class Transaction:
     day: date
@@ -68,6 +79,7 @@ class Transaction:
     price: Decimal
     fees: Decimal = ZERO
     fx: Decimal | None = None
+    registry_split: bool = False
 
     def __post_init__(self) -> None:
         for value in (self.quantity, self.price, self.fees):
@@ -144,6 +156,9 @@ class Holding:
     income: tuple[Payment, ...] = ()
     splits: tuple[SplitEvent, ...] = ()
     name: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "prices", ObservationSeries(self.prices))
 
 
 @dataclass(frozen=True)
@@ -262,7 +277,13 @@ def _lookup(
     Flagged when stored as stale, or when a trading day passed without a fresh one.
     Using Friday's close on a weekend or a market holiday is normal and not flagged.
     """
-    point = max((p for p in points if p.day <= day), key=lambda p: p.day, default=None)
+    if not isinstance(points, ObservationSeries):
+        points = ObservationSeries(points)
+    index = bisect_right(points, day, key=lambda p: p.day) - 1
+    # Keep the original first-observation rule for duplicate dates.
+    point = (
+        points[bisect_left(points, points[index].day, key=lambda p: p.day)] if index >= 0 else None
+    )
     if point is None:
         raise ReturnError(f"Missing {label} on or before {day}.")
     if point.stale or _skips_trading_day(calendar, point.day, day):
@@ -292,18 +313,30 @@ def _ordered_trades(holding: Holding, end: date) -> list[Transaction]:
         daily = daily_trades.get(day, [])
         split = splits.get(day)
         if split is not None and split.automatic and held:
-            change = held * (split.after - split.before) / split.before
+            change = split_change(held, split.before, split.after)
             if not any(
-                t.kind == "adjustment" and _matches_split(held, t.quantity, split) for t in daily
+                t.kind == "adjustment" and registry_adjustment_matches(held, t.quantity, split)
+                for t in daily
             ):
-                daily.insert(0, Transaction(day, "adjustment", change, ZERO))
+                if change:
+                    daily.insert(
+                        0, Transaction(day, "adjustment", change, ZERO, registry_split=True)
+                    )
+            else:
+                daily = [
+                    replace(t, registry_split=True)
+                    if t.kind == "adjustment"
+                    and registry_adjustment_matches(held, t.quantity, split)
+                    else t
+                    for t in daily
+                ]
         matching = next(
             (
                 i
                 for i, trade in enumerate(daily)
                 if trade.kind == "adjustment"
                 and split is not None
-                and _matches_split(held, trade.quantity, split)
+                and is_split_trade(trade, held, split)
             ),
             None,
         )
@@ -339,6 +372,65 @@ def _matches_split(held: Decimal, change: Decimal, split: SplitEvent) -> bool:
     return change * split.before == held * (split.after - split.before)
 
 
+def is_split_trade(trade: Transaction, held: Decimal, split: SplitEvent | None) -> bool:
+    """Registry identity is authoritative; owner adjustments still match exactly."""
+    return trade.kind == "adjustment" and (
+        trade.registry_split or (split is not None and _matches_split(held, trade.quantity, split))
+    )
+
+
+@_financial_math
+def registry_adjustment_matches(held: Decimal, change: Decimal, split: SplitEvent) -> bool:
+    return held > ZERO and (
+        _matches_split(held, change, split)
+        or change == split_change(held, split.before, split.after)
+    )
+
+
+@_financial_math
+def matching_registry_adjustments(holding: Holding, split: SplitEvent) -> tuple[Transaction, ...]:
+    """Replay without either candidate, so synthetic units never enter the comparison."""
+    matches = []
+    for trade in holding.trades:
+        if trade.kind != "adjustment" or abs((trade.day - split.day).days) > 10:
+            continue
+        history = replace(
+            holding,
+            trades=tuple(t for t in holding.trades if t is not trade),
+            splits=tuple(s for s in holding.splits if s is not split),
+        )
+        held = holding_units_at(history, split.day - timedelta(days=1))
+        if registry_adjustment_matches(held, trade.quantity, split):
+            matches.append(trade)
+    return tuple(matches)
+
+
+@_financial_math
+def holding_history_flags(holding: Holding, end: date) -> tuple[str, ...]:
+    """Diagnose each portfolio's day-opening ownership, including pre-opening events."""
+    flags = set()
+    for split in holding.splits:
+        if split.day > end:
+            continue
+        if split.automatic:
+            if any(t.day != split.day for t in matching_registry_adjustments(holding, split)):
+                flags.add(
+                    f"Split on {split.day} also has a matching adjustment within 10 days; "
+                    "reconcile the duplicate entries (docs/dividends.md)"
+                )
+            continue
+        held = holding_units_at(holding, split.day - timedelta(days=1))
+        if (
+            held > ZERO
+            and not any(
+                t.day == split.day and is_split_trade(t, held, split) for t in holding.trades
+            )
+            and not any(s.automatic and s.day == split.day for s in holding.splits)
+        ):
+            flags.add(split_warning(split.day))
+    return tuple(sorted(flags))
+
+
 @_financial_math
 def holding_return(
     holding: Holding,
@@ -351,7 +443,7 @@ def holding_return(
 ) -> Result:
     if start > end:
         raise ReturnError("Period start must not be after its end.")
-    flags: set[str] = set()
+    flags: set[str] = set(holding_history_flags(holding, end))
 
     calendar = for_exchange(holding.exchange)
 
@@ -371,10 +463,10 @@ def holding_return(
 
     def price_on(day: date) -> Decimal:
         close = _lookup(holding.prices, day, f"{holding.code} price", flags, calendar)
-        source = max(p.day for p in holding.prices if p.day <= day)
+        source = holding.prices[bisect_right(holding.prices, day, key=lambda p: p.day) - 1].day
         for split in holding.splits:
-            if split.automatic and source < split.day <= day:
-                close *= split.before / split.after
+            if source < split.day <= day:
+                close = rescale_price(close, split.before, split.after)
         return close
 
     trades = _ordered_trades(holding, end)
@@ -418,7 +510,7 @@ def holding_return(
             trade.kind == "adjustment"
             and split is not None
             and first_on_day
-            and _matches_split(quantity, trade.quantity, split)
+            and is_split_trade(trade, quantity, split)
         ):
             # Preserve local cost and entry FX. A zero-fee split needs no FX quote.
             if trade.fees:
@@ -557,7 +649,8 @@ class Position:
     proceeds: Decimal = ZERO
 
 
-def _ledger_events(trades, splits, end):
+def ledger_holding(trades, splits):
+    """Load immutable quantity history shared by diagnostics and ledger consumers."""
     split_rows = list(splits)
     transactions = []
     originals = {}
@@ -582,6 +675,11 @@ def _ledger_events(trades, splits, end):
             for s in split_rows
         ),
     )
+    return holding, originals
+
+
+def _ledger_events(trades, splits, end):
+    holding, originals = ledger_holding(trades, splits)
     return _ordered_trades(holding, end), {s.day: s for s in holding.splits}, originals
 
 
@@ -609,7 +707,7 @@ def position(trades, splits, end: date, *, before_trades: bool = False) -> Posit
             first
             and row.kind == "adjustment"
             and split is not None
-            and _matches_split(result.units, row.quantity, split)
+            and is_split_trade(row, result.units, split)
         ):
             result.units += row.quantity
             result.cost_base += row.fees
@@ -627,7 +725,12 @@ def position(trades, splits, end: date, *, before_trades: bool = False) -> Posit
                 raise ImportFailure(
                     "Units removed exceed holdings; check trades and corporate actions."
                 )
-            result.cost_base -= result.cost_base * removed / result.units
+            # A full exit consumes the cost exactly, without a multiply/divide residual.
+            result.cost_base = (
+                ZERO
+                if removed == result.units
+                else result.cost_base - result.cost_base * removed / result.units
+            )
             result.units -= removed
             result.proceeds += amount - row.fees if row.kind == "sell" else ZERO
         else:
@@ -762,8 +865,8 @@ def report(
                 raise ImportFailure(f"Missing price for {instrument.code} on or before {end}.")
             close = latest.close
             for split in splits:
-                if split.source == "registry" and latest.price_date < split.split_date <= end:
-                    close *= split.shares_before / split.shares_after
+                if latest.price_date < split.split_date <= end:
+                    close = rescale_price(close, split.shares_before, split.shares_after)
             value = (
                 holding.units
                 * close

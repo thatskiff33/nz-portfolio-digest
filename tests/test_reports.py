@@ -221,3 +221,139 @@ def test_shared_change_retains_decimal_precision():
     with localcontext() as context:
         context.prec = 10
         assert row.change == D(".01")
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_preview_files_are_private_even_with_permissive_umask(tmp_path, overwrite):
+    import os
+    import stat
+
+    if os.name != "posix":
+        pytest.skip("POSIX permissions only")
+    out = tmp_path / "annual.html"
+    if overwrite:
+        for suffix in (".html", ".txt", ".csv"):
+            path = out.with_suffix(suffix)
+            path.write_text("old")
+            path.chmod(0o666)
+    previous = os.umask(0)
+    try:
+        report_service.deliver_report(
+            report_config(),
+            "Invented",
+            "<p>Preview</p>",
+            "Preview",
+            dry_run=True,
+            out=out,
+            csv="invented,value\n",
+        )
+    finally:
+        os.umask(previous)
+    for suffix, content in (
+        (".html", "<p>Preview</p>"),
+        (".txt", "Preview"),
+        (".csv", "invented,value\n"),
+    ):
+        path = out.with_suffix(suffix)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.read_text() == content
+
+
+def test_year_end_preview_uses_private_shared_delivery(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    from portfolio_digest import year_end_service
+
+    if os.name != "posix":
+        pytest.skip("POSIX permissions only")
+    monkeypatch.setattr(year_end_service, "load_year_end", lambda *args: object())
+    monkeypatch.setattr(year_end_service, "render_html", lambda *args: "Invented HTML")
+    monkeypatch.setattr(year_end_service, "render_text", lambda *args: "Invented text")
+    monkeypatch.setattr(year_end_service, "render_csv", lambda *args: "Invented CSV")
+    out = tmp_path / "annual.html"
+    previous = os.umask(0)
+    try:
+        year_end_service.run_year_end(
+            None, report_config(), "Invented", 2026, dry_run=True, out=out
+        )
+    finally:
+        os.umask(previous)
+    for suffix, content in (
+        (".html", "Invented HTML"),
+        (".txt", "Invented text"),
+        (".csv", "Invented CSV"),
+    ):
+        path = out.with_suffix(suffix)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.read_text() == content
+
+
+def test_split_warning_is_actionable_and_escaped_in_email():
+    report = example_report()
+    warning = "Split on 2026-10-06 not yet recorded; add the adjustment"
+    row = replace(report.holdings[0], label="ASX:FERN<&>", flags=(warning,))
+    report = replace(report, returns=replace(report.returns, holdings=(row,)))
+    html, text = render(report)
+    assert warning in text and warning in html
+    assert "FERN<&>" in text
+    assert "FERN&lt;&amp;&gt;" in html
+    assert "(stale)" not in text
+
+
+def test_email_dry_run_includes_engine_split_warning(tmp_path, monkeypatch):
+    from portfolio_digest.returns import (
+        Holding,
+        Observation,
+        SplitEvent,
+        Transaction,
+        calculate_returns,
+    )
+
+    start, action, end = date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7)
+    holding = Holding(
+        "NZX",
+        "FERN<&>",
+        "NZD",
+        trades=(Transaction(date(2026, 10, 1), "buy", D(100), D(10)),),
+        prices=(Observation(start, D(10)), Observation(end, D("2.5"))),
+        splits=(SplitEvent(action, D(1), D(4)),),
+    )
+    returns = calculate_returns((holding,), start, end, {})
+    report = Report(start, end, returns)
+    assert returns.total.flags == returns.markets[0].flags == returns.holdings[0].flags
+
+    @contextmanager
+    def scope(_):
+        yield FakeSession()
+
+    monkeypatch.setattr(cli, "session_scope", scope)
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(report_service, "build_report", lambda *a: report)
+    monkeypatch.setattr(report_service, "send", lambda *a: pytest.fail("Email sent in dry-run"))
+    config = tmp_path / "schedules.toml"
+    config.write_text(
+        '[[schedules]]\nname="weekly"\nkind="report"\nfrequency="weekly"\nat="20:00"\n'
+    )
+    out = tmp_path / "split-warning.html"
+    assert (
+        cli.main(
+            [
+                "report",
+                "send-now",
+                "--schedule",
+                "weekly",
+                "--config",
+                str(config),
+                "--dry-run",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    message = "Split on 2026-10-06 not yet recorded; add the adjustment"
+    assert message in out.read_text()
+    assert message in out.with_suffix(".txt").read_text()
+    assert "FERN&lt;&amp;&gt;" in out.read_text()
+    assert "FERN<&>" in out.with_suffix(".txt").read_text()

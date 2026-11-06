@@ -25,3 +25,21 @@ report.txt
 
 # Private year-end previews.
 private-preview/
+
+# Private mail, reports, snapshots, credentials and database exports.
+*.eml
+*.htm
+*.html
+*.txt
+*.json
+*.xlsx
+*.ofx
+*.qif
+*.sql
+*.sql.gz
+state/
+client_secret*.json
+# Project assets and invented fixtures must remain visible to git.
+!src/**/templates/**
+!src/**/static/**
+!tests/fixtures/**

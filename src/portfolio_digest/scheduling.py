@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from portfolio_digest.alert_config import AlertConfig
-from portfolio_digest.config import ConfigError
+from portfolio_digest.config import ConfigError, get_report_settings
 from portfolio_digest.mailers import address
 
 logger = logging.getLogger(__name__)
@@ -162,7 +162,15 @@ def _write_heartbeat(path: Path) -> None:
 
 def read_config(path: Path) -> ScheduleConfig:
     try:
-        return ScheduleConfig.model_validate(tomllib.loads(path.read_text()))
+        data = tomllib.loads(path.read_text())
+        if "kuma_push_url" in data:
+            logger.warning("Move the monitoring setting from TOML to REPORT_KUMA_PUSH_URL in .env.")
+        overrides = get_report_settings()
+        if overrides.recipients.strip():
+            data["recipients"] = [value.strip() for value in overrides.recipients.split(",")]
+        if overrides.kuma_push_url and overrides.kuma_push_url.get_secret_value().strip():
+            data["kuma_push_url"] = overrides.kuma_push_url
+        return ScheduleConfig.model_validate(data)
     except (OSError, ValueError, KeyError, ValidationError):
         raise ConfigError(
             "Cannot read schedule configuration. Check its path and TOML settings."

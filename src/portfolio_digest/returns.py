@@ -24,7 +24,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.importing import ImportFailure
-from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
+from portfolio_digest.models import (
+    FINANCIAL_PRECISION,
+    FxRate,
+    Income,
+    Instrument,
+    Portfolio,
+    Price,
+    Split,
+    Trade,
+)
 from portfolio_digest.prices.calendars import FX, TradingCalendar, for_exchange
 from portfolio_digest.splits import rescale_price, split_change, split_warning
 
@@ -35,12 +44,12 @@ T = TypeVar("T")
 
 
 def _financial_math(function: Callable[P, T]) -> Callable[P, T]:
-    """Allow 64-digit schema products plus subtraction and aggregation headroom."""
+    """Run with `FINANCIAL_PRECISION` digits so schema products are exact."""
 
     @wraps(function)
     def exact(*args: P.args, **kwargs: P.kwargs) -> T:
         with localcontext() as context:
-            context.prec = max(context.prec, 80)
+            context.prec = max(context.prec, FINANCIAL_PRECISION)
             return function(*args, **kwargs)
 
     return exact

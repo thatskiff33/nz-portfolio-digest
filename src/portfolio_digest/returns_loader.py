@@ -10,7 +10,16 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.config import get_settings
-from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
+from portfolio_digest.models import (
+    FINANCIAL_PRECISION,
+    FxRate,
+    Income,
+    Instrument,
+    Portfolio,
+    Price,
+    Split,
+    Trade,
+)
 from portfolio_digest.prices.calendars import FX
 from portfolio_digest.returns import (
     Holding,
@@ -111,7 +120,7 @@ def _recorded_fx(value, day, currency, origin, target, start, rates, flags):
     if day <= start or value is None or currency == target:
         return None
     with localcontext() as context:
-        context.prec = max(context.prec, 80)
+        context.prec = max(context.prec, FINANCIAL_PRECISION)
         return value * _lookup(rates.get(origin, ()), day, f"{origin}/{target} FX", flags, FX)
 
 

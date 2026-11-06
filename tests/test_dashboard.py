@@ -11,6 +11,7 @@ from sqlalchemy import CheckConstraint, MetaData, create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from portfolio_digest.formatting import display_quantity
 from portfolio_digest.models import (
     Base,
     FxRate,
@@ -317,7 +318,31 @@ def test_dashboard_quantity_replays_splits(engine_web, after, recorded_adjustmen
     row = next(r for r in response.context["dashboard"].holdings if r.instrument.id == 1)
     assert row.quantity == units == Decimal("100.125") * after
     assert row.value == units * row.price
-    assert f"<td>{units.normalize():f}</td>" in response.text
+    assert f"<td>{display_quantity(units)}</td>" in response.text
+
+
+def test_dashboard_quantity_display_stops_at_eight_places(engine_web):
+    with Session(engine_web) as session:
+        session.add(
+            Split(
+                instrument_id=1,
+                split_date=DAY,
+                shares_before=Decimal("7"),
+                shares_after=Decimal("1"),
+                source="registry",
+            )
+        )
+        session.commit()
+        expected = load_returns(session, "Kōwhai Fund", "all", DAY)
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        response = client.get(f"/p/1?period=custom&start={expected.start}&end={DAY}")
+    assert response.status_code == 200
+    row = next(item for item in response.context["dashboard"].holdings if item.instrument.id == 1)
+    shown = display_quantity(row.quantity)
+    assert shown == "14.30357143"
+    assert f"<td>{shown}</td>" in response.text
+    assert "e" not in shown.lower()
+    assert len(format(row.quantity, "f")) > len(shown) + 8
 
 
 def test_missing_inputs_are_explained(engine_web):

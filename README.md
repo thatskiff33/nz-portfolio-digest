@@ -113,9 +113,11 @@ imputation credits, resident and foreign withholding, net received or reinvested
 and closing 31 March values, and total return. CSV retains full calculation precision;
 HTML displays amounts to two decimal places. Realised sales use **historical FIFO cost**,
 including acquisition fees and net of sale fees. Annual performance uses the existing
-returns engine, which starts from opening market value and includes gross dividends.
-Its percentage denominator is opening value plus purchase outlays. Splits preserve cost;
-DRP units need a recorded buy or quantity adjustment as well as the income record.
+returns engine, which starts from opening market value and includes net cash dividends.
+Its percentage denominator is opening value plus purchase outlays. Registry-recorded
+splits and consolidations need no extra quantity adjustment. A Yahoo-only split needs
+a matching quantity adjustment. Imported DRPs that include a DRP quantity create the
+linked buy. Add a purchase manually only for residual cash or a partial reinvestment.
 Opening balances and transfers use their recorded value, so supply full acquisition
 history for reliable historical cost. Missing prices or FX stop the report; carried-forward
 data is disclosed in both outputs. This command never downloads prices or changes history.
@@ -127,10 +129,11 @@ including Australian shares, are conservatively included. A warning appears **ab
 NZ$50,000**. FIF exemptions and calculations are outside this report; the threshold applies
 per person across portfolios, so this portfolio alone cannot establish an exemption.
 
-The current income schema has one combined withholding field. The report classifies it as
-resident withholding for NZX holdings and foreign withholding otherwise. Check this
-assumption against tax statements, particularly dual listings and NZ funds investing
-overseas. Gross cash dividends exclude imputation credits, which are shown separately.
+Resident and foreign withholding follow the components stored from broker or registry
+evidence. Any unclassified remainder is resident withholding for an NZX holding and
+foreign withholding otherwise. The report names each holding where that remainder
+was used. Check this classification against your tax statements. Gross cash dividends
+exclude imputation credits, which are shown separately.
 NZ generally does not tax capital gains for long-term investors, but exceptions apply.
 This summary is information, not tax advice.
 

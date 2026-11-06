@@ -89,6 +89,17 @@ def test_html_and_text_match_reviewable_synthetic_snapshots():
     assert "Currency gain" in text
 
 
+def test_sold_units_and_subcent_prices_stay_readable():
+    base = example_report()
+    sold = replace(base.returns.holdings[0], units=D("0E-8"), price=D("0.0012"))
+    returns = replace(base.returns, holdings=(sold, base.returns.holdings[1]))
+    html, text = render(replace(base, returns=returns))
+    assert "(0 units)" in html and "(0 units)" in text
+    assert "0E-8" not in html and "0E-8" not in text
+    assert "0.0012 AUD" in html and "0.0012 AUD" in text
+    assert "0.00 AUD" not in html and "0.00 AUD" not in text
+
+
 def test_html_escapes_untrusted_instrument_labels():
     report = example_report()
     bad = replace(report.returns.holdings[0], label="<script>:<img src=x>", exchange="<script>")

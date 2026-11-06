@@ -8,6 +8,7 @@ from itertools import groupby
 
 from sqlalchemy.orm import Session
 
+from portfolio_digest.formatting import display_price, display_quantity
 from portfolio_digest.returns import ZERO, Result, ReturnError
 from portfolio_digest.returns import Report as ReturnsReport
 from portfolio_digest.returns_loader import load_combined_returns
@@ -221,7 +222,7 @@ def render(report: Report) -> tuple[str, str]:
             label = row.label.split(":", 1)[1] + (" (stale)" if row.flags else "")
             cells = [
                 label,
-                f"{money(row.price)} {row.currency}" if row.price is not None else "",
+                f"{display_price(row.price)} {row.currency}" if row.price is not None else "",
                 money(row.closing),
                 money(row.amounts.capital),
                 money(row.amounts.dividends),
@@ -233,9 +234,10 @@ def render(report: Report) -> tuple[str, str]:
             ]
             parts.append(
                 '<tr><td colspan="7" style="padding:10px 1px 0;text-align:left;color:#526c62">'
-                f"{escape(row.name)} ({row.units} units)</td></tr>" + html_row(cells[:7])
+                f"{escape(row.name)} ({display_quantity(row.units)} units)</td></tr>"
+                + html_row(cells[:7])
             )
-            text.append(f"{row.name} ({row.units} units)")
+            text.append(f"{row.name} ({display_quantity(row.units)} units)")
             text.append(" | ".join(cells))
         market_result = next(r for r in report.returns.markets if r.label == market)
         subtotal = total_row("Subtotal", market_result)

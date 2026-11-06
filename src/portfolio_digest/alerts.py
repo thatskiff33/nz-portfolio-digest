@@ -14,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError
+from portfolio_digest.formatting import display_price
 from portfolio_digest.mailers import mail_settings, message, send
 from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.calendars import FX, for_exchange
@@ -151,7 +152,8 @@ def evaluate(session, portfolio, config, now):
                 Trigger(
                     key,
                     f"{label} moved {movement:+.2f}% ({start} to {end}); "
-                    f"closing prices {opening} to {prices[end]} {instrument.currency} "
+                    f"closing prices {display_price(opening)} to {display_price(prices[end])} "
+                    f"{instrument.currency} "
                     "(split-adjusted).",
                 )
                 if abs(movement) > limits.daily_percent

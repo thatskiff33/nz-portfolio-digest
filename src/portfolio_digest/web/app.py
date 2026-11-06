@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.db import make_engine
+from portfolio_digest.formatting import display_quantity
 from portfolio_digest.importers.base import FileProblem, RowProblem
 from portfolio_digest.importing import ImportFailure, undo_import
 from portfolio_digest.manual import add_trade, prepare_trade
@@ -40,7 +41,7 @@ def create_app(
     app.state.security = security
     templates = Jinja2Templates(directory=ROOT / "templates")
     templates.env.filters["money"] = lambda n: "Unavailable" if n is None else f"{n:,.2f}"
-    templates.env.filters["quantity"] = lambda n: format(n.normalize(), "f")
+    templates.env.filters["quantity"] = display_quantity
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
     @app.middleware("http")

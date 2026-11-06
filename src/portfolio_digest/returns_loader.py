@@ -20,6 +20,7 @@ from portfolio_digest.returns import (
     ReturnError,
     SplitEvent,
     Transaction,
+    _financial_math,
     _lookup,
     calculate_returns,
     period_range,
@@ -62,6 +63,7 @@ def load_returns(
     return report
 
 
+@_financial_math
 def load_inputs(
     session: Session,
     name: str,
@@ -100,6 +102,7 @@ def first_activity_date(session: Session, portfolio_id: int, end: date) -> date 
     return min((day for day in (first_trade, first_income) if day is not None), default=None)
 
 
+@_financial_math
 def load_portfolio_inputs(
     session: Session,
     portfolio: Portfolio,

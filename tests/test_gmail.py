@@ -11,6 +11,15 @@ from portfolio_digest.gmail import SCOPE, AsbGmailImporter, GmailClient, GmailEr
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def test_compose_passes_optional_gmail_settings_to_the_import_container():
+    compose = (Path(__file__).resolve().parents[1] / "compose.yaml").read_text()
+    app_environment = compose.split("environment: &app_environment\n", 1)[1].split(
+        "    depends_on:", 1
+    )[0]
+    for name in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_LABEL"):
+        assert f"{name}: ${{{name}:-}}" in app_environment
+
+
 class FakeGoogle:
     def __init__(self):
         self.calls = []

@@ -39,6 +39,11 @@ services:
       TIMEZONE: ${TIMEZONE:-Pacific/Auckland}
       PRICE_SOURCE: ${PRICE_SOURCE:-yahoo}
       FX_SOURCES: ${FX_SOURCES:-yahoo,frankfurter}
+      # Optional read-only ASB contract-note import from Gmail.
+      GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID:-}
+      GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:-}
+      GMAIL_REFRESH_TOKEN: ${GMAIL_REFRESH_TOKEN:-}
+      GMAIL_LABEL: ${GMAIL_LABEL:-}
       ALERT_NTFY_URL: ${ALERT_NTFY_URL:-}
       ALERT_NTFY_TOKEN: ${ALERT_NTFY_TOKEN:-}
       ALERT_PUSHOVER_TOKEN: ${ALERT_PUSHOVER_TOKEN:-}

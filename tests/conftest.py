@@ -67,6 +67,8 @@ def no_settings_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         "DASHBOARD_BIND",
         "DASHBOARD_SECURE_COOKIE",
         "DASHBOARD_HOSTNAMES",
+        "REPORT_RECIPIENTS",
+        "REPORT_KUMA_PUSH_URL",
     ):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()

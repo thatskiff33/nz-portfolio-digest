@@ -20,3 +20,22 @@ def test_compose_passes_market_data_settings_to_the_fetch_container():
     compose = (ROOT / "compose.yaml").read_text()
     assert "PRICE_SOURCE: ${PRICE_SOURCE:-yahoo}" in compose
     assert "FX_SOURCES: ${FX_SOURCES:-yahoo,frankfurter}" in compose
+
+
+def test_compose_forwards_private_report_settings_and_rotates_all_logs():
+    import yaml
+
+    services = yaml.safe_load((ROOT / "compose.yaml").read_text())["services"]
+    for name in ("migrate", "scheduler"):
+        env = services[name]["environment"]
+        for setting in (
+            "REPORT_RECIPIENTS",
+            "REPORT_KUMA_PUSH_URL",
+            "REPORT_PRICES_KUMA_PUSH_URL",
+        ):
+            assert env[setting] == "${" + setting + ":-}"
+    for service in services.values():
+        assert service["logging"] == {
+            "driver": "json-file",
+            "options": {"max-size": "10m", "max-file": "3"},
+        }

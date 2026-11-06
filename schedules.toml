@@ -1,12 +1,11 @@
 # Shared in-container schedule. Edit here, then restart the scheduler container.
 timezone = "Pacific/Auckland"
-# Empty means MAIL_OWNER from the environment. One list applies to every report.
+# Set REPORT_RECIPIENTS in the server .env, never put private addresses here.
+# Non-empty environment overrides this list; an empty list falls back to MAIL_OWNER.
 recipients = []
-# Optional private Uptime Kuma push URL. Keep it in the server copy only, never git.
-# kuma_push_url = "https://monitor.example.invalid/api/push/PRIVATE_TOKEN"
-# Optional push URL for price fetches. Pinged only when every instrument and rate
-# succeeded. Use a separate Push monitor with a 26-hour heartbeat.
-# prices_kuma_push_url = "https://monitor.example.invalid/api/push/PRIVATE_TOKEN"
+# Set optional REPORT_KUMA_PUSH_URL in the server .env, never put its URL here.
+# Set optional REPORT_PRICES_KUMA_PUSH_URL in the server .env for price fetches. It is
+# pinged only when every instrument and rate succeeded. Use a 26-hour heartbeat.
 
 [[schedules]]
 name = "prices-morning"

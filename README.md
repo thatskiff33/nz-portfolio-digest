@@ -108,7 +108,10 @@ The preview writes `year-end-2026.html`, `year-end-2026.txt` and
 `year-end-2026.csv` and sends nothing. Keep these private financial reports outside git.
 The send command emails HTML and plain text with a CSV attachment, using the same
 `MAILER`, `MAIL_FROM`, `MAIL_OWNER` and provider credentials as weekly and monthly reports.
-The recipients in `schedules.toml` override `MAIL_OWNER` for every report. Use `--config`
+Non-empty `REPORT_RECIPIENTS` in the server `.env` overrides TOML recipients for every
+report. TOML recipients then take precedence over the `MAIL_OWNER` fallback. Keep private
+recipients and `REPORT_KUMA_PUSH_URL` in `.env`; the latter overrides legacy TOML monitoring.
+Empty or whitespace-only report environment settings leave TOML values in effect. Use `--config`
 to select another schedule file. See [email setup](docs/DEPLOY.md#email-reports).
 Preview mode needs no mail configuration.
 
@@ -163,10 +166,11 @@ The scheduled report can also be sent or previewed through the shared report com
 
 ```sh
 portfolio-digest report send-now --schedule year-end
-portfolio-digest report send-now --schedule year-end --dry-run --out annual.html
+mkdir -p -m 700 ./private-preview
+portfolio-digest report send-now --schedule year-end --dry-run --out ./private-preview/annual.html
 ```
 
-The latter writes `annual-portfolio-ID.html`, `.txt` and `.csv` for each portfolio,
+The latter writes `./private-preview/annual-portfolio-ID.html`, `.txt` and `.csv` for each portfolio,
 using its database ID. Scheduled year-end reports continue past failed portfolios and
 record each successful portfolio in the scheduler state file. Retries skip those
 portfolios and monitoring is pinged only when the whole occurrence succeeds. Alerts

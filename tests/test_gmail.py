@@ -262,6 +262,27 @@ def test_failed_force_save_preserves_existing_file(tmp_path, monkeypatch, stage)
     assert list(tmp_path.iterdir()) == [path]
 
 
+def test_save_without_force_preserves_concurrent_output(tmp_path, monkeypatch):
+    from portfolio_digest import gmail
+
+    path = tmp_path / "made-up-token-file"
+    check_output = gmail._check_token_output
+    checks = 0
+
+    def create_after_final_check(output, *, force):
+        nonlocal checks
+        check_output(output, force=force)
+        checks += 1
+        if checks == 2:
+            output.write_text("preserve-concurrent-token")
+
+    monkeypatch.setattr(gmail, "_check_token_output", create_after_final_check)
+    with pytest.raises(GmailError, match="already exists"):
+        gmail.save_refresh_token(path, "invented-refresh")
+    assert path.read_text() == "preserve-concurrent-token"
+    assert list(tmp_path.iterdir()) == [path]
+
+
 @pytest.mark.parametrize(
     "kind,force",
     [

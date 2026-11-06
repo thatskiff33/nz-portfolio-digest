@@ -265,7 +265,15 @@ def save_refresh_token(path: Path, token: str, *, force: bool = False) -> None:
         with handle:
             handle.write(f"GMAIL_REFRESH_TOKEN={token}\n")
         _check_token_output(path, force=force)
-        os.replace(temporary, path)
+        if force:
+            os.replace(temporary, path)
+        else:
+            # Publish the completed file without overwriting a concurrent writer.
+            os.link(temporary, path)
+    except FileExistsError:
+        raise GmailError(
+            "The token output file already exists. Choose another path or use --force."
+        ) from None
     except OSError:
         raise GmailError("Cannot save the token file. Check its path and permissions.") from None
     finally:

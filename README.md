@@ -46,9 +46,13 @@ codes are used as-is. Set an exception for a right, renamed or delisted security
 `portfolio-digest prices symbol NZX:AIRRG AIRRG.NZ`. See the deployment guide for the
 twice-daily schedule and recovery commands. Stored closes are raw, unadjusted prices in
 major currency units. Registry-recorded splits and consolidations adjust units without
-changing total cost. Do not also enter an ADJUSTMENT for a recorded registry action.
+changing total cost or parcel FX. Holdings round to 8 decimal places, half-even, at
+the action; record any cash in lieu separately as a sale. Matching registry actions
+and ADJUSTMENT entries within inclusive ±10 calendar days are refused in either order.
 For downloaded Split metadata, an ADJUSTMENT trade records the quantity change; the
-returns engine preserves parcel cost when it matches that ratio. Other adjustments
+returns engine preserves parcel cost when it matches that ratio exactly. Missing
+adjustments produce an actionable warning in returns, emails and `prices check`, and
+suppress the portfolio-drop alert until resolved. Other adjustments
 move units at their recorded price without cash. Do not split-adjust stored closes again.
 
 Dividends and ETF distributions import from Sharesies CSV and ASB dividend advice. Yahoo

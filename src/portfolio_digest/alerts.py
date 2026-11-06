@@ -21,6 +21,7 @@ from portfolio_digest.returns import ReturnError, units_at
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.returns_table import format_number as money
 from portfolio_digest.scheduling import SchedulerStateError
+from portfolio_digest.splits import rescale_price
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ def evaluate(session, portfolio, config, now):
             opening = prices[start]
             for split in splits:
                 if start < split.split_date <= end:
-                    opening = opening * split.shares_before / split.shares_after
+                    opening = rescale_price(opening, split.shares_before, split.shares_after)
             movement = (prices[end] / opening - 1) * Decimal(100)
             key = f"daily:{label}"
             states[key] = (

@@ -1,7 +1,7 @@
 """Calendar boundaries, DST, configuration validation and restart behaviour."""
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -83,42 +83,67 @@ def test_config_errors_do_not_echo_inputs(tmp_path, content):
     assert "private-token" not in str(caught.value)
 
 
-def test_failed_occurrence_survives_restart_then_advances_after_success(tmp_path):
-    schedule = weekly()
-    config = ScheduleConfig(schedules=[schedule])
-    path = tmp_path / "state.json"
-    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+class StopLoop(Exception):
+    pass
+
+
+def stop(_):
+    raise StopLoop
+
+
+def seed(path, config, due):
     path.write_text(
         json.dumps(
             {
-                "weekly": due.isoformat(),
-                "weekly:config": schedule.model_dump_json() + config.timezone,
+                **{s.name: due.isoformat() for s in config.schedules},
+                **{
+                    s.name + ":config": s.model_dump_json() + config.timezone
+                    for s in config.schedules
+                },
             }
         )
     )
 
-    def now():
-        return datetime(2026, 10, 25, 8, tzinfo=UTC)
 
-    scheduler = Scheduler(config, path)
-    assert scheduler.run(lambda *a: 1, now=now) == 1
-    assert json.loads(path.read_text())["weekly"] == due.isoformat()
+@pytest.mark.parametrize("throws", [False, True])
+def test_failure_retries_independently_and_survives_restart(tmp_path, throws):
+    prices = Schedule(name="prices", kind="prices", frequency="daily", at="09:00")
+    config = ScheduleConfig(schedules=[prices, weekly()])
+    path = tmp_path / "state.json"
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+    instant = due
     calls = []
 
-    class StopLoop(Exception):
-        pass
+    def execute(schedule, at, checkpoint):
+        calls.append((schedule.name, at))
+        if schedule.kind == "prices":
+            if throws:
+                raise RuntimeError("invented-private-token")
+            return 1
+        return 0
 
-    def sleep(_):
-        raise StopLoop
+    def run(callback=execute):
+        with pytest.raises(StopLoop):
+            Scheduler(config, path).run(callback, now=lambda: instant, sleep=stop)
 
-    with pytest.raises(StopLoop):
-        scheduler.run(lambda s, at: calls.append(at) or 0, now=now, sleep=sleep)
-    assert calls == [due]
-    assert datetime.fromisoformat(json.loads(path.read_text())["weekly"]) > now()
-    calls.clear()
-    with pytest.raises(StopLoop):
-        scheduler.run(lambda *a: calls.append(a) or 0, now=now, sleep=sleep)
-    assert calls == []
+    run()
+    assert calls == [("prices", due), ("weekly", due)]
+    run()
+    assert len(calls) == 2
+    for minutes in [30, 60, 120, 240, 360, 360]:
+        instant += timedelta(minutes=minutes)
+        run()
+        assert calls[-1] == ("prices", due)
+        previous_count = len(calls)
+        run()
+        assert len(calls) == previous_count
+    instant += timedelta(hours=6)
+    run(lambda *args: 0)
+    state = json.loads(path.read_text())
+    assert datetime.fromisoformat(state["prices"]) > instant
+    assert state["prices:retry"]["failures"] == 0
+    assert state["prices:retry"]["delivered"] == []
 
 
 def test_changing_config_replaces_pending_time_on_restart(tmp_path):
@@ -193,7 +218,7 @@ def test_shared_scheduler_runs_every_configured_job_after_downtime(tmp_path):
 
     with pytest.raises(StopLoop):
         Scheduler(config, state_path).run(
-            lambda schedule, at: calls.append((schedule.name, at)) or 0,
+            lambda schedule, at, checkpoint: calls.append((schedule.name, at)) or 0,
             now=lambda: due,
             sleep=sleep,
         )
@@ -206,3 +231,188 @@ def test_shared_scheduler_runs_every_configured_job_after_downtime(tmp_path):
     }
     state = json.loads(state_path.read_text())
     assert all(datetime.fromisoformat(state[s.name]) > due for s in config.schedules)
+
+
+def test_legacy_extra_config_field_preserves_pending_and_logs_skips(tmp_path, caplog):
+    schedule = weekly()
+    config = ScheduleConfig(schedules=[schedule])
+    path = tmp_path / "state.json"
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    legacy = {**schedule.model_dump(mode="json"), "future_option": "invented"}
+    path.write_text(
+        json.dumps(
+            {
+                "weekly": due.isoformat(),
+                "weekly:config": json.dumps(legacy) + config.timezone,
+            }
+        )
+    )
+    calls = []
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda s, at, checkpoint: calls.append(at) or 0,
+            now=lambda: due + timedelta(days=15),
+            sleep=stop,
+        )
+    assert calls == [due]
+    assert "Skipped intervening" in caplog.text
+    assert "Discarded" not in caplog.text
+
+
+@pytest.mark.parametrize("removed", [False, True])
+def test_changed_or_removed_schedule_logs_discard(tmp_path, caplog, removed):
+    path = tmp_path / "state.json"
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, ScheduleConfig(schedules=[weekly("21:00")]), due)
+    config = ScheduleConfig(schedules=[] if removed else [weekly()])
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(lambda *a: 0, now=lambda: due, sleep=stop)
+    assert "Discarded pending" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "retry",
+    [
+        {"failures": -1},
+        {"failures": True},
+        {"failures": 1},
+        {"retry_at": "invented-private-token"},
+        {"failures": 1, "retry_at": "2026-10-25T07:00:00"},
+        {"delivered": [True]},
+        {"delivered": ["invented-private-token"]},
+        {"delivered": [0]},
+        {"delivered": [1, 1]},
+        {"delivered": {}},
+    ],
+)
+def test_invalid_retry_state_is_fatal_and_sanitised(tmp_path, retry):
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    seed(path, config, datetime(2026, 10, 25, 7, tzinfo=UTC))
+    state = json.loads(path.read_text())
+    state["weekly:retry"] = retry
+    path.write_text(json.dumps(state))
+    with pytest.raises(ConfigError, match="Cannot read scheduler state") as error:
+        Scheduler(config, path).run(lambda *a: pytest.fail("Executed malformed state"))
+    assert "invented-private-token" not in str(error.value)
+
+
+def test_checkpoint_is_durable_and_fsync_precedes_replace(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from portfolio_digest import scheduling
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+    events = []
+    fsync = scheduling.os.fsync
+    replace = Path.replace
+
+    def sync(fd):
+        events.append("sync")
+        fsync(fd)
+
+    def move(source, target):
+        assert events[-1] == "sync"
+        events.append("replace")
+        return replace(source, target)
+
+    monkeypatch.setattr(scheduling.os, "fsync", sync)
+    monkeypatch.setattr(Path, "replace", move)
+
+    def execute(s, at, checkpoint):
+        checkpoint.complete(7)
+        assert json.loads(path.read_text())["weekly:retry"]["delivered"] == [7]
+        return 1
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: due, sleep=stop)
+    delivered = []
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda s, at, cp: delivered.extend(cp.delivered) or 0,
+            now=lambda: due + timedelta(minutes=30),
+            sleep=stop,
+        )
+    assert delivered == [7]
+    assert json.loads(path.read_text())["weekly:retry"]["delivered"] == []
+
+
+@pytest.mark.parametrize("stage", ["open", "fsync", "replace"])
+def test_checkpoint_write_error_is_fatal_and_preserves_previous_file(tmp_path, monkeypatch, stage):
+    from pathlib import Path
+
+    from portfolio_digest import scheduling
+    from portfolio_digest.scheduling import SchedulerStateError
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+
+    def execute(s, at, checkpoint):
+        def fail(*args, **kwargs):
+            raise OSError("invented-private-token")
+
+        if stage == "fsync":
+            monkeypatch.setattr(scheduling.os, "fsync", fail)
+        elif stage == "replace":
+            monkeypatch.setattr(Path, "replace", fail)
+        else:
+            original_open = Path.open
+
+            def open_file(path, *args, **kwargs):
+                if path.suffix == ".new":
+                    fail()
+                return original_open(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "open", open_file)
+        checkpoint.complete(1)
+
+    with pytest.raises(SchedulerStateError, match="Cannot write scheduler state"):
+        Scheduler(config, path).run(execute, now=lambda: due, sleep=stop)
+    assert json.loads(path.read_text())["weekly:retry"]["delivered"] == []
+
+
+def test_backoff_starts_when_attempt_finishes_and_logs_are_private(tmp_path, caplog):
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+    instant = due
+    calls = []
+
+    def execute(*args):
+        nonlocal instant
+        calls.append(instant)
+        instant += timedelta(minutes=15)
+        raise RuntimeError("invented-private-token")
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: instant, sleep=stop)
+    instant = due + timedelta(minutes=30)
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: instant, sleep=stop)
+    assert len(calls) == 1
+    instant = due + timedelta(minutes=45)
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: instant, sleep=stop)
+    assert len(calls) == 2
+    assert "retry deferred" in caplog.text
+    assert "invented-private-token" not in caplog.text
+
+
+def test_configuration_error_stops_scheduler_without_retry(tmp_path):
+    config = ScheduleConfig(schedules=[weekly()])
+    path = tmp_path / "state.json"
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+
+    def execute(*args):
+        raise ConfigError("Invalid configuration.")
+
+    with pytest.raises(ConfigError, match="Invalid configuration"):
+        Scheduler(config, path).run(execute, now=lambda: due, sleep=stop)
+    assert json.loads(path.read_text())["weekly:retry"]["failures"] == 0

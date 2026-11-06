@@ -152,9 +152,12 @@ preceding stored close. Review carried-forward flags; refresh prices and FX thro
 For an all-portfolio preview, use `year-end --all --year 2026 --dry-run --out
 ./private-preview`; each portfolio gets a numbered subdirectory. Other portfolios continue
 if one fails, and the command exits non-zero if any failed. Manual reruns send again.
-The scheduler retries failed occurrences after restart using their original tax year;
-a retry may resend to portfolios already delivered. Check provider delivery before
-retrying an uncertain result. Inspect failures with `docker compose logs scheduler`.
+The scheduler retries each failed job independently after 30 minutes, doubling the delay
+to a maximum of 6 hours. Retry times and the original tax year survive restarts in the
+existing scheduler state volume. A partial price fetch advances with warnings; if every
+instrument fails, that price job retries while other schedules continue. No holdings
+counts as success. Alerts still check the committed data after partial fetches.
+Inspect failures with `docker compose logs scheduler`.
 
 The scheduled report can also be sent or previewed through the shared report command:
 
@@ -164,9 +167,18 @@ portfolio-digest report send-now --schedule year-end --dry-run --out annual.html
 ```
 
 The latter writes `annual-portfolio-ID.html`, `.txt` and `.csv` for each portfolio,
-using its database ID. A scheduled report stops on the first failed portfolio, exits
-non-zero and does not ping monitoring. First startup schedules future occurrences;
-existing pending occurrences catch up once after downtime.
+using its database ID. Scheduled year-end reports continue past failed portfolios and
+record each successful portfolio in the scheduler state file. Retries skip those
+portfolios and monitoring is pinged only when the whole occurrence succeeds. Alerts
+commit sent state per portfolio and use the same occurrence checkpoints on scheduled
+checks. Keep the state volume and run one scheduler replica.
+
+Delivery remains at least once: provider acceptance followed by a crash before the
+checkpoint or database commit can duplicate email. Partial recipient acceptance is
+also uncertain. Check provider delivery before retrying an uncertain result manually.
+Only configuration or scheduler-state errors stop the scheduler with a non-zero exit.
+First startup schedules future occurrences; existing pending occurrences catch up once
+after downtime, with any intervening skipped occurrences logged.
 
 ### Price and movement alerts
 

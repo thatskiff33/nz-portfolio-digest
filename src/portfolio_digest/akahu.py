@@ -8,19 +8,15 @@ from http.client import HTTPException
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request, build_opener
 
 from pydantic import SecretStr
+
+from portfolio_digest.pings import NoRedirect, PingError, ping
 
 
 class AkahuError(Exception):
     """A safe message that contains no upstream content."""
-
-
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # Never forward credentials to a redirect destination.
-        return None
 
 
 def exact_units(value: Any) -> Decimal:
@@ -128,10 +124,6 @@ def push_success(url: SecretStr) -> None:
     raw = url.get_secret_value()
     try:
         parts = urlsplit(raw)
-        if parts.scheme not in ("http", "https") or not parts.netloc:
-            raise AkahuError("UPTIME_KUMA_PUSH_URL must be an HTTP(S) URL.")
-        if parts.fragment:
-            raise AkahuError("UPTIME_KUMA_PUSH_URL must not contain a fragment.")
         query = [
             (key, value)
             for key, value in parse_qsl(parts.query, keep_blank_values=True)
@@ -139,9 +131,10 @@ def push_success(url: SecretStr) -> None:
         ]
         query.append(("status", "up"))
         push_url = urlunsplit(parts._replace(query=urlencode(query)))
-        with build_opener(NoRedirect()).open(push_url, timeout=15) as response:
-            payload = json.loads(response.read())
+        payload = json.loads(ping(push_url))
         if not isinstance(payload, dict) or payload.get("ok") is not True:
             raise AkahuError("Kuma success push was not accepted.")
-    except (OSError, ValueError, HTTPException):
+    except PingError as error:
+        raise AkahuError(f"UPTIME_KUMA_PUSH_URL: {error}") from None
+    except ValueError:
         raise AkahuError("Kuma success push failed.") from None

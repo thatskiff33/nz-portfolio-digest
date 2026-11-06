@@ -652,3 +652,39 @@ def test_client_login_throttle_expires(client, monkeypatch):
 def test_dashboard_refuses_missing_or_short_password(engine_web, password):
     with pytest.raises(ValueError, match="at least 16"):
         create_app(engine_web, password)
+
+
+@pytest.mark.parametrize("day,stale", [(21, False), (22, True)])
+def test_live_routes_and_dashboard_reuse_frozen_instant(engine_web, monkeypatch, day, stale):
+    from portfolio_digest.web import app as web_app
+    from portfolio_digest.web import viewmodel
+
+    instant = datetime(2026, 10, day, 9, tzinfo=ZoneInfo("Pacific/Auckland"))
+    clocks = []
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            clocks.append(tz)
+            return instant.astimezone(tz)
+
+    monkeypatch.setattr(web_app, "datetime", FrozenDatetime)
+    seen = []
+    calculate = viewmodel.calculate_returns
+
+    def capture(*args, **kwargs):
+        seen.append(kwargs.get("as_of"))
+        return calculate(*args, **kwargs)
+
+    monkeypatch.setattr(viewmodel, "calculate_returns", capture)
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        page = client.get("/p/1?period=all")
+        detail = client.get("/p/1/holding/2")
+    assert page.status_code == detail.status_code == 200
+    row = next(r for r in page.context["report"].holdings if r.label == "NYSE:FERN")
+    assert bool(row.flags) == stale
+    assert detail.context["result"].flags == row.flags
+    assert page.context["end"] == instant.date()
+    assert len(clocks) == 2
+    assert len(seen) > 2  # Includes sampled series calculations.
+    assert all(value == instant for value in seen)

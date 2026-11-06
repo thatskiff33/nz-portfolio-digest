@@ -91,7 +91,9 @@ For the ongoing feed:
 2. In Gmail, create a dedicated label and apply it only to ASB contract-note emails.
 3. Put `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` and `GMAIL_LABEL` in the private `.env`.
 4. On a machine with a browser, run `portfolio-digest gmail authorise`. It requests only
-   `gmail.readonly` and writes the refresh token to `.env.gmail` with owner-only permissions.
+   `gmail.readonly` and writes the refresh token to `.env.gmail` with owner-only permissions
+   on Unix. On Windows the file is not permission-restricted; delete it after copying
+   the token into the server’s private `.env`.
    Existing files are refused unless `--force` is supplied. Symlinks are always refused.
    The command names the variable to copy; it never prints the token.
 5. Copy `GMAIL_REFRESH_TOKEN` from that file into the server's private `.env`, then securely

@@ -340,6 +340,39 @@ def test_daily_movement_ignores_trading_costs_and_adjusts_splits(sample):
     assert "+60.00%" in alerts.evaluate(session, portfolio, config(), NOW)["daily:NZX:MADEUP"].text
 
 
+def test_split_adjusted_repeating_price_uses_shared_formatter(sample):
+    from decimal import localcontext
+
+    from portfolio_digest.formatting import display_price
+    from portfolio_digest.models import Split
+
+    session, portfolio, instrument = sample
+    session.add(
+        Split(
+            instrument_id=instrument.id,
+            split_date=date(2026, 10, 16),
+            shares_before=D(1),
+            shares_after=D(7),
+            source="registry",
+        )
+    )
+    with localcontext() as context:
+        context.prec = 80
+        opening = D(10) * D(1) / D(7)
+        closing = D(8)
+        movement = (closing / opening - 1) * D(100)
+        text = alerts.evaluate(session, portfolio, config(), NOW)["daily:NZX:MADEUP"].text
+    assert text == (
+        f"NZX:MADEUP moved {movement:+.2f}% (2026-10-15 to 2026-10-16); "
+        f"closing prices {display_price(opening)} to {display_price(closing)} NZD "
+        "(split-adjusted)."
+    )
+    assert f"{movement:+.2f}%" == "+460.00%"
+    assert display_price(opening) == "1.4286"
+    assert str(opening) not in text
+    assert len(str(opening)) >= 80
+
+
 def test_threshold_is_strict_and_missing_close_is_unknown(sample):
     session, portfolio, instrument = sample
     assert (

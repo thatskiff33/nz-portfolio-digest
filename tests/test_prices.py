@@ -730,7 +730,11 @@ def test_quality_compares_fresh_closes_across_gaps_unless_a_split_intervenes(gap
     rows.append((last, Decimal("100"), False))
     session = MagicMock()
     session.execute.return_value.all.return_value = rows
-    session.scalars.return_value = [] if split_day is None else [split_day]
+    session.scalars.side_effect = lambda statement: (
+        ([] if split_day is None else [split_day])
+        if statement.column_descriptions[0]["name"] == "split_date"
+        else []
+    )
     holding = Holding(1, "NZX", "QUALITY", "NZD", None, first, last, False)
     findings = check_data(session, [holding], "NZD", datetime(2026, 10, 6, 22, tzinfo=UTC))
     assert ("stale-price" if gap == "stale" else "missing-price", middle) in {

@@ -495,3 +495,31 @@ def test_name_only_holding_can_be_mapped_manually(local_engine):
 def test_unusable_holdings_fail_safely(local_engine, row):
     with pytest.raises(AkahuError):
         sync(local_engine, "Fictional", sync_client([row]), [])
+
+
+def test_sync_reconciles_rounded_registry_consolidation_and_keeps_raw_units(local_engine):
+    from portfolio_digest.models import Split
+
+    with Session(local_engine) as session:
+        session.scalars(select(Trade)).one().quantity = Decimal(100)
+        session.add(
+            Split(
+                instrument_id=1,
+                split_date=date(2026, 10, 1),
+                shares_before=Decimal(3),
+                shares_after=Decimal(1),
+                source="registry",
+            )
+        )
+        session.commit()
+    snapshot_id, mismatches, unmapped = sync(
+        local_engine, "Fictional", sync_client([holding("33.333333333")]), []
+    )
+    assert mismatches == []
+    assert unmapped == 0
+    with Session(local_engine) as session:
+        snapshot = session.get(AkahuSnapshot, snapshot_id)
+        assert snapshot.status == "matched"
+        observation = json.loads(snapshot.observations)[0]["holdings"][0]
+        assert observation["units"] == "33.333333333"
+        assert observation["compared_units"] == "33.33333333"

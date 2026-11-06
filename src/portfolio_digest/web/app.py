@@ -45,7 +45,8 @@ def safe_return_path(value: object) -> str:
             return "/"
         decoded = unquote(candidate)
         if decoded == candidate:
-            return candidate
+            # Decode only for validation; keep query values and path encoding intact.
+            return value
         candidate = decoded
     return "/"
 
@@ -62,7 +63,8 @@ def _same_site(value: str) -> bool:
 
 def _current_target(request: Request) -> str:
     """Path and query as the app received them. Host and forwarded headers are ignored."""
-    path = request.scope.get("path") or "/"
+    raw_path = request.scope.get("raw_path")
+    path = raw_path.decode("latin-1") if raw_path else request.scope.get("path") or "/"
     raw_query = request.scope.get("query_string", b"")
     query = (
         raw_query.decode("latin-1", "ignore") if isinstance(raw_query, bytes) else str(raw_query)

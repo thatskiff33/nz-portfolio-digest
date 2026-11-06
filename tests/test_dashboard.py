@@ -3,6 +3,7 @@
 import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -773,6 +774,9 @@ def test_configured_hosts_are_accepted(engine_web, bind, extra, host):
     "target",
     [
         "/p/1/imports?sort=date&direction=desc",
+        "/p/1/imports?filter=a%26sort%3Db",
+        "/p/1/imports?filter=a%23b",
+        "/p/1/imports?filter=a%2526b",
         "https://other.example/",
         "//other.example/",
         "/\\other.example/",
@@ -800,6 +804,18 @@ def test_login_validates_and_preserves_return_path(client, target):
     )
     assert response.status_code == 303
     assert response.headers["location"] == expected
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["/p/1/imports?filter=a%26b", "/p/%31/imports?filter=a%23b"],
+)
+def test_signed_out_redirect_preserves_encoded_request_target(client, target):
+    response = client.get(target, follow_redirects=False)
+    assert response.status_code == 303
+    location = urlsplit(response.headers["location"])
+    assert location.path == "/login"
+    assert parse_qs(location.query)["next"] == [target]
 
 
 @pytest.fixture

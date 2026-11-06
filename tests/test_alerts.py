@@ -131,7 +131,8 @@ def test_cooldown_repeats_only_when_elapsed(sample):
     assert alerts.send.call_count == 2
 
 
-def test_consecutive_qualifying_daily_moves_both_send(sample):
+@pytest.mark.parametrize("cooldown_hours", [None, 100])
+def test_consecutive_qualifying_daily_moves_both_send(sample, cooldown_hours):
     session, portfolio, instrument = sample
     session.add(
         Price(
@@ -143,8 +144,8 @@ def test_consecutive_qualifying_daily_moves_both_send(sample):
         )
     )
     session.commit()
-    # Longer than the gap between the two closes, so a cooldown cannot be what sends Monday.
-    rules = config(cooldown_hours=100, portfolio_drop_percent=D("99"))
+    # Test the default and a cooldown longer than the gap between the two closes.
+    rules = config(cooldown_hours=cooldown_hours, portfolio_drop_percent=D("99"))
     friday = alerts.run_alerts(session, rules, now=NOW)
     monday = alerts.run_alerts(session, rules, now=datetime(2026, 10, 19, 7, tzinfo=UTC))
     assert "2026-10-15 to 2026-10-16" in friday[0]

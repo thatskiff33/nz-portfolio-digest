@@ -1,6 +1,6 @@
 """Exercise the real SQL loader and CLI using entirely invented database rows."""
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal as D
 
 import pytest
@@ -706,16 +706,18 @@ def test_email_keeps_nzd_trades_and_income_native_in_foreign_portfolio(returns_e
         assert native.holdings == (row,)
 
 
-def test_named_and_portfolio_loaders_share_complete_inputs(returns_engine):
+@pytest.mark.parametrize("as_of", [None, datetime(2026, 10, 19, 0, tzinfo=UTC)])
+def test_named_and_portfolio_loaders_share_complete_inputs(returns_engine, as_of):
     from portfolio_digest.returns_loader import PortfolioInputs, load_inputs, load_portfolio_inputs
 
     with Session(returns_engine) as session:
         portfolio = session.scalar(select(Portfolio).where(Portfolio.name == "Invented"))
         start, end = date(2026, 10, 12), date(2026, 10, 19)
-        named = load_inputs(session, "invented", f"{start}:{end}")
-        direct = load_portfolio_inputs(session, portfolio, start, end)
+        named = load_inputs(session, "invented", f"{start}:{end}", today=end, as_of=as_of)
+        direct = load_portfolio_inputs(session, portfolio, start, end, as_of=as_of)
         assert isinstance(named, PortfolioInputs)
         assert named == direct
+        assert named.as_of == as_of
         assert named.start == start and named.end == end
         assert named.income and named.instruments and named.holdings and named.rates
         assert named.holdings[0].income[0].amount == D(4)
@@ -763,3 +765,85 @@ def test_email_loads_history_once_and_renders_identically(returns_engine, foreig
     assert actual == expected
     assert render(actual) == render(expected)
     assert len(reads) == 4  # One price and FX read per portfolio, regardless of samples.
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_loader_live_date_and_freshness_share_one_instant(returns_engine, monkeypatch, live):
+    from portfolio_digest import returns_loader
+
+    instant = datetime(2026, 10, 12, 22, tzinfo=UTC)
+    calls = []
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            calls.append(tz)
+            return instant.astimezone(tz)
+
+    monkeypatch.setenv("TIMEZONE", "Pacific/Auckland")
+    get_settings.cache_clear()
+    monkeypatch.setattr(returns_loader, "datetime", FrozenDatetime)
+    with Session(returns_engine) as session:
+        data = returns_loader.load_inputs(
+            session, "Invented", "month", **({} if live else {"as_of": instant})
+        )
+        report = load_returns(
+            session, "Invented", "2026-10-12:2026-10-13", **({} if live else {"as_of": instant})
+        )
+    assert data.as_of == instant
+    assert data.end == date(2026, 10, 13)
+    assert report.total.closing == D(150)
+    assert not report.total.flags
+    assert len(calls) == (2 if live else 0)
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_recorded_fx_conversion_uses_live_close_boundary(returns_engine, live):
+    from portfolio_digest.returns_loader import load_inputs
+
+    monday, tuesday = date(2026, 10, 12), date(2026, 10, 13)
+    with Session(returns_engine) as session:
+        portfolio = session.scalar(select(Portfolio).where(Portfolio.name == "Invented"))
+        instrument = session.scalar(select(Instrument))
+        session.add_all(
+            [
+                FxRate(
+                    rate_date=monday,
+                    currency="NZD",
+                    base_currency="AUD",
+                    rate=D("0.9"),
+                    source="test",
+                ),
+                FxRate(
+                    rate_date=monday,
+                    currency="USD",
+                    base_currency="AUD",
+                    rate=D("1.35"),
+                    source="test",
+                ),
+                Income(
+                    portfolio_id=portfolio.id,
+                    instrument_id=instrument.id,
+                    paid_date=tuesday,
+                    kind="dividend",
+                    currency="USD",
+                    gross_amount=D(2),
+                    net_amount=D(2),
+                    fx_rate=D("1.5"),
+                    source="test",
+                    external_ref="live-fx",
+                ),
+            ]
+        )
+        session.flush()
+        data = load_inputs(
+            session,
+            "Invented",
+            f"{monday}:{tuesday}",
+            tuesday,
+            base_currency="AUD",
+            as_of=datetime(2026, 10, 12, 22, tzinfo=UTC) if live else None,
+        )
+    assert bool(data.conversion_flags) == (not live)
+    assert data.holdings[0].income[0].fx == D("1.35")

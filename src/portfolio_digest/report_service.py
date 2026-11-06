@@ -15,7 +15,7 @@ from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
 from portfolio_digest.models import Portfolio
 from portfolio_digest.reports import ReportError, build_report, render
-from portfolio_digest.scheduling import ScheduleConfig
+from portfolio_digest.scheduling import DeliveryCheckpoint, ScheduleConfig, SchedulerStateError
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,7 @@ def run_report(
     out: Path | None = None,
     now: datetime | None = None,
     settings: MailSettings | None = None,
+    checkpoint: DeliveryCheckpoint | None = None,
 ) -> None:
     _validate_preview(dry_run, out)
     schedule = config.named_report(schedule_name)
@@ -64,21 +65,40 @@ def run_report(
         from portfolio_digest.year_end_service import latest_ended_year, run_year_end
 
         year = latest_ended_year(now)
-        portfolios = (
-            select(Portfolio).where(Portfolio.base_currency == "NZD").order_by(Portfolio.id)
-        )
-        for portfolio in session.scalars(portfolios):
+        portfolios = session.execute(
+            select(Portfolio.id, Portfolio.name)
+            .where(Portfolio.base_currency == "NZD")
+            .order_by(Portfolio.id)
+        ).all()
+        failed = False
+        for portfolio_id, name in portfolios:
+            if not dry_run and checkpoint and portfolio_id in checkpoint.delivered:
+                continue
             preview = (
-                out.with_name(f"{out.stem}-portfolio-{portfolio.id}{out.suffix}") if out else None
+                out.with_name(f"{out.stem}-portfolio-{portfolio_id}{out.suffix}") if out else None
             )
-            run_year_end(
-                session,
-                config,
-                portfolio.name,
-                year,
-                dry_run=dry_run,
-                out=preview,
-                settings=settings,
+            try:
+                run_year_end(
+                    session,
+                    config,
+                    name,
+                    year,
+                    dry_run=dry_run,
+                    out=preview,
+                    settings=settings,
+                )
+            except SchedulerStateError:
+                raise
+            except Exception:
+                session.rollback()
+                failed = True
+                logger.warning("Portfolio year-end delivery failed.")
+                continue
+            if not dry_run and checkpoint:
+                checkpoint.complete(portfolio_id)
+        if failed:
+            raise ReportError(
+                "Some portfolio year-end reports failed. Check report data and delivery settings."
             )
         if not dry_run:
             ping_kuma(config)

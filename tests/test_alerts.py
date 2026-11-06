@@ -285,36 +285,46 @@ def test_cli_dry_run_prints_without_delivering(sample, monkeypatch, capsys):
     assert not session.scalars(select(AlertState)).all()
 
 
-@pytest.mark.parametrize("fetch_result", [0, 1])
-def test_scheduler_checks_alerts_after_success_or_partial_fetch(monkeypatch, fetch_result):
+@pytest.mark.parametrize(
+    ("errors", "fetch_result"),
+    [
+        ([None], 0),
+        ([None, "failed"], 0),
+        (["failed"], 1),
+    ],
+)
+def test_scheduler_checks_alerts_after_success_or_partial_fetch(monkeypatch, errors, fetch_result):
     from argparse import Namespace
     from contextlib import nullcontext
     from datetime import time
 
     from portfolio_digest import cli
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
     from portfolio_digest.scheduling import Schedule
 
+    instruments = [Outcome("invented", error=error) for error in errors]
+    report = FetchReport(outcomes=instruments, instrument_outcomes=instruments)
+    checkpoint = object()
     events = []
     rules = config()
     monkeypatch.setattr(cli, "read_config", lambda _: rules)
     monkeypatch.setattr(cli, "make_engine", lambda: None)
     monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext("session"))
+    monkeypatch.setattr(cli, "_fetch_prices", lambda _: events.append("fetch committed") or report)
     monkeypatch.setattr(
-        cli,
-        "cmd_prices_fetch",
-        lambda *args, **kwargs: events.append("fetch committed") or fetch_result,
+        cli, "run_alerts", lambda s, c, **kw: events.append((s, c, kw["checkpoint"]))
     )
-    monkeypatch.setattr(cli, "run_alerts", lambda s, c: events.append((s, c)))
 
     def run(_, execute):
-        outcome = execute(
-            Schedule(name="prices", kind="prices", frequency="daily", at=time(18)), NOW
+        code, labels = execute(
+            Schedule(name="prices", kind="prices", frequency="daily", at=time(18)), NOW, checkpoint
         )
-        return outcome[0] if isinstance(outcome, tuple) else outcome
+        assert labels == tuple(outcome.label for outcome in report.outcomes if outcome.error)
+        return code
 
     monkeypatch.setattr(cli.Scheduler, "run", run)
     assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == fetch_result
-    assert events == ["fetch committed", ("session", rules)]
+    assert events == ["fetch committed", ("session", rules, checkpoint)]
 
 
 def test_suppressed_portfolio_is_logged_and_listed_on_dry_run(sample, monkeypatch, caplog, capsys):
@@ -414,18 +424,25 @@ def test_price_monitor_pings_only_after_a_clean_fetch(monkeypatch):
     monkeypatch.setattr(cli, "read_config", lambda _: rules)
     monkeypatch.setattr(cli, "make_engine", lambda: None)
     monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext("session"))
-    monkeypatch.setattr(cli, "run_alerts", lambda *a: None)
+    monkeypatch.setattr(cli, "run_alerts", lambda *a, **kw: None)
     monkeypatch.setattr(cli, "ping_monitor", pings.append)
-    outcomes = [(1, ("NZX:MADEUP",)), (0, ())]
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
+
+    failed = Outcome("NZX:MADEUP", error="failed")
+    clean = Outcome("NZX:MADEUP")
+    outcomes = [
+        FetchReport(outcomes=[failed], instrument_outcomes=[failed]),
+        FetchReport(outcomes=[clean], instrument_outcomes=[clean]),
+    ]
 
     def fetch(*_args, **_kwargs):
         return outcomes.pop(0)
 
-    monkeypatch.setattr(cli, "cmd_prices_fetch", fetch)
+    monkeypatch.setattr(cli, "_fetch_prices", fetch)
 
     def run(_, execute):
         return execute(
-            Schedule(name="prices", kind="prices", frequency="daily", at=time(10, 30)), NOW
+            Schedule(name="prices", kind="prices", frequency="daily", at=time(10, 30)), NOW, None
         )
 
     monkeypatch.setattr(cli.Scheduler, "run", run)
@@ -434,7 +451,7 @@ def test_price_monitor_pings_only_after_a_clean_fetch(monkeypatch):
         ("NZX:MADEUP",),
     )
     assert pings == []
-    assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == 0
+    assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == (0, ())
     assert pings == [url]
 
 
@@ -566,3 +583,166 @@ def test_push_refuses_redirects_with_credentials(target):
     )
     with pytest.raises(HTTPError):
         alerts._push_opener.error("http", request, Mock(), 302, "Found", {"location": target})
+
+
+def test_unrecorded_downloaded_split_suppresses_portfolio_drop(sample):
+    from portfolio_digest.models import Split
+
+    session, portfolio, instrument = sample
+    session.add(
+        Split(
+            instrument_id=instrument.id,
+            split_date=date(2026, 10, 16),
+            shares_before=D(1),
+            shares_after=D(4),
+            source="yahoo",
+        )
+    )
+    session.get(Price, (instrument.id, date(2026, 10, 16))).close = D("2.5")
+    states = alerts.evaluate(session, portfolio, config(), NOW)
+    assert states.get("portfolio") is None
+
+
+def test_failed_portfolio_does_not_roll_back_earlier_or_block_later(sample, monkeypatch):
+    session, first, _ = sample
+    session.add_all(
+        [
+            Portfolio(name="Second invented", base_currency="NZD"),
+            Portfolio(name="Third invented", base_currency="NZD"),
+        ]
+    )
+    session.commit()
+    key = "invented"
+    monkeypatch.setattr(alerts, "evaluate", lambda *a: {key: alerts.Trigger(key, "Invented move")})
+    sent = []
+
+    def send(settings, msg, recipients):
+        text = msg.get_body(preferencelist=("plain",)).get_content()
+        if "Second invented" in text:
+            raise MailError("invented-private-token")
+        sent.append(text)
+
+    monkeypatch.setattr(alerts, "send", send)
+    for _ in range(3):
+        with pytest.raises(MailError, match="Some portfolio alerts failed") as error:
+            alerts.run_alerts(session, config(), now=NOW)
+        assert "invented-private-token" not in str(error.value)
+        session.rollback()  # Match the CLI's failed outer session scope.
+    assert len(sent) == 2
+    assert len(session.scalars(select(AlertState)).all()) == 2
+    assert session.get(AlertState, (2, key)) is None
+
+
+def test_alert_checkpoint_skips_completed_portfolios_even_after_cooldown(sample, monkeypatch):
+    from portfolio_digest.scheduling import DeliveryCheckpoint
+
+    session, _, _ = sample
+    session.add(Portfolio(name="Second invented", base_currency="NZD"))
+    session.commit()
+    checked = []
+    saved = []
+    checkpoint = DeliveryCheckpoint(set(), lambda: saved.append(set(checkpoint.delivered)))
+
+    def evaluate(session, portfolio, config, now, skipped=None):
+        checked.append(portfolio.id)
+        if portfolio.id == 2:
+            raise RuntimeError("invented-private-token")
+        return {"invented": alerts.Trigger("invented", "Invented move")}
+
+    monkeypatch.setattr(alerts, "evaluate", evaluate)
+    for now in [NOW, NOW + timedelta(hours=8)]:
+        with pytest.raises(MailError):
+            alerts.run_alerts(session, config(cooldown_hours=1), now=now, checkpoint=checkpoint)
+    assert checked == [1, 2, 2]
+    assert saved == [{1}]
+    assert alerts.send.call_count == 1
+
+
+def test_alert_checkpoint_failure_stops_before_next_portfolio(sample, monkeypatch):
+    from portfolio_digest.scheduling import DeliveryCheckpoint, SchedulerStateError
+
+    session, _, _ = sample
+    session.add(Portfolio(name="Second invented", base_currency="NZD"))
+    session.commit()
+    checked = []
+
+    def evaluate(session, portfolio, config, now, skipped=None):
+        checked.append(portfolio.id)
+        return {"invented": alerts.Trigger("invented", "Invented move")}
+
+    def fail():
+        raise SchedulerStateError("Cannot write scheduler state.")
+
+    monkeypatch.setattr(alerts, "evaluate", evaluate)
+    with pytest.raises(SchedulerStateError):
+        alerts.run_alerts(session, config(), now=NOW, checkpoint=DeliveryCheckpoint(set(), fail))
+    assert checked == [1]
+    session.rollback()
+    assert session.get(AlertState, (1, "invented")) is not None
+    alerts.push.assert_not_called()
+
+
+def test_dry_run_neither_saves_checkpoint_nor_commits(sample, monkeypatch):
+    from portfolio_digest.scheduling import DeliveryCheckpoint
+
+    session, _, _ = sample
+    checkpoint = DeliveryCheckpoint(set(), Mock())
+    commit = Mock(side_effect=AssertionError("Dry run committed"))
+    monkeypatch.setattr(session, "commit", commit)
+    assert alerts.run_alerts(session, config(), dry_run=True, now=NOW, checkpoint=checkpoint)
+    assert checkpoint.delivered == set()
+    checkpoint.save.assert_not_called()
+    commit.assert_not_called()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_cli_partial_fetch_advances_but_total_failure_remains_pending(
+    tmp_path, monkeypatch, partial
+):
+    import json
+    from argparse import Namespace
+    from contextlib import nullcontext
+
+    from portfolio_digest import cli
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
+    from portfolio_digest.scheduling import Schedule, Scheduler
+
+    schedule = Schedule(name="prices", kind="prices", frequency="daily", at="09:00")
+    rules = ScheduleConfig(schedules=[schedule])
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "prices": NOW.isoformat(),
+                "prices:config": schedule.model_dump_json() + rules.timezone,
+            }
+        )
+    )
+    instruments = [Outcome("invented", error="failed")]
+    if partial:
+        instruments.append(Outcome("another invented"))
+    report = FetchReport(outcomes=instruments, instrument_outcomes=instruments)
+    monkeypatch.setattr(cli, "read_config", lambda _: rules)
+    monkeypatch.setattr(cli, "_fetch_prices", lambda _: report)
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext(None))
+    checkpoints = []
+    monkeypatch.setattr(cli, "run_alerts", lambda *a, checkpoint: checkpoints.append(checkpoint))
+
+    class Stop(Exception):
+        pass
+
+    def stop(_):
+        raise Stop
+
+    real_run = Scheduler.run
+    monkeypatch.setattr(
+        Scheduler, "run", lambda self, execute: real_run(self, execute, now=lambda: NOW, sleep=stop)
+    )
+    with pytest.raises(Stop):
+        cli.cmd_scheduler(Namespace(config="unused", state=str(path)))
+    assert len(checkpoints) == 1
+    state = json.loads(path.read_text())
+    due = datetime.fromisoformat(state["prices"])
+    assert (due > NOW) is partial
+    assert (state["prices:retry"]["retry_at"] is None) is partial

@@ -4,6 +4,7 @@ Secrets never live in the repo. See `.env.example` for the full list.
 """
 
 import json
+import re
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -12,6 +13,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES
 from portfolio_digest.validation import currency_code
+
+# One DNS label, then optional dotted labels. No wildcard, scheme, port or path.
+_EXACT_HOSTNAME = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+)
 
 
 class ConfigError(Exception):
@@ -44,6 +51,15 @@ class Settings(BaseSettings):
     # Where exchange rates come from, tried in order until one works.
     fx_sources: str = "yahoo,frankfurter"
 
+    # Dashboard only. Empty is allowed here so the CLI still starts; the web process
+    # rejects a missing or short password when it builds sessions.
+    dashboard_password: SecretStr | None = None
+    dashboard_bind: str = "127.0.0.1"
+    # Pydantic accepts 1/yes/true/on and 0/no/false/off from the environment.
+    dashboard_secure_cookie: bool = False
+    # Optional exact hostnames (for example a Tailscale Serve name), comma-separated.
+    dashboard_hostnames: str = ""
+
     @field_validator("base_currency")
     @classmethod
     def _check_currency(cls, value: str) -> str:
@@ -74,9 +90,34 @@ class Settings(BaseSettings):
             raise ValueError(f"must list one or more of {', '.join(FX_SOURCES)}")
         return ",".join(names)
 
+    @field_validator("dashboard_hostnames")
+    @classmethod
+    def _check_dashboard_hostnames(cls, value: str) -> str:
+        names: list[str] = []
+        for raw in value.split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            if (
+                any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in name)
+                or any(token in name.lower() for token in ("*", "://", "/", "\\", ":"))
+                or _EXACT_HOSTNAME.fullmatch(name) is None
+            ):
+                raise ValueError(
+                    "must be comma-separated exact hostnames, without a scheme, port, path or wildcard"
+                )
+            lowered = name.lower()
+            if lowered not in names:
+                names.append(lowered)
+        return ",".join(names)
+
     @property
     def fx_source_names(self) -> list[str]:
         return self.fx_sources.split(",")
+
+    @property
+    def dashboard_hostname_list(self) -> list[str]:
+        return [name for name in self.dashboard_hostnames.split(",") if name]
 
 
 def akahu_account_ids(raw: str) -> list[str]:

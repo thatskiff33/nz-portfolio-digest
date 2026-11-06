@@ -24,12 +24,16 @@ from portfolio_digest.models import (
 )
 from portfolio_digest.returns import ReturnError, instrument_position
 from portfolio_digest.returns_loader import load_returns
+from urllib.parse import quote
+
 from portfolio_digest.web.app import create_app
 from portfolio_digest.web.binding import private_host
+from portfolio_digest.web.security import BrowserSession
 from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
 PASSWORD = "fictional-test-password-only"  # noqa: S105
 DAY = date(2026, 10, 20)
+BASE_URL = "http://127.0.0.1"
 
 
 def sample_engine(engine=None):
@@ -145,9 +149,14 @@ def engine_web(request):
     engine.dispose()
 
 
+def open_client(engine, password=PASSWORD, *, base_url=BASE_URL, client_address=None, **options):
+    params = {"client": client_address} if client_address is not None else {}
+    return TestClient(create_app(engine, password, **options), base_url=base_url, **params)
+
+
 @pytest.fixture
 def client(engine_web):
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with open_client(engine_web) as client:
         yield client
 
 
@@ -173,21 +182,16 @@ def sign_in(client):
         ("/p/1/imports", "0 duplicates"),
         ("/p/1/reconcile", "Reconciliation"),
         ("/p/2", "No holdings"),
-        ("/login", "App password"),
     ],
 )
 def test_read_pages(client, path, text):
+    sign_in(client)
     response = client.get(path)
     assert response.status_code == 200
     assert text in response.text
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert "unsafe-inline" not in response.headers["content-security-policy"]
-    if path == "/login":
-        assert "HttpOnly" in response.headers["set-cookie"]
-        assert "SameSite=strict" in response.headers["set-cookie"]
-    else:
-        assert "set-cookie" not in response.headers
     assert response.headers["cache-control"] == "no-store"
 
 
@@ -211,7 +215,8 @@ def test_dashboard_equals_returns_engine(engine_web, period):
                 assert value is None
             else:
                 assert value == point.total.closing
-        with TestClient(create_app(engine_web, PASSWORD)) as client:
+        with open_client(engine_web) as client:
+            sign_in(client)
             response = client.get(f"/p/1?period=custom&start={expected.start}&end={expected.end}")
         assert response.status_code == 200
         context = response.context
@@ -233,7 +238,8 @@ def test_holding_detail_income_matches_engine(engine_web):
             session, "Kōwhai Fund", "all", datetime.now(ZoneInfo("Pacific/Auckland")).date()
         )
         result = next(row for row in expected.holdings if row.label == "NZX:KOW")
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with open_client(engine_web) as client:
+        sign_in(client)
         response = client.get("/p/1/holding/1")
     assert response.status_code == 200
     assert response.context["result"] == result
@@ -272,7 +278,8 @@ def test_all_time_dashboard_includes_income_without_trades(engine_web):
         expected = load_returns(
             session, "Harbour Fund", "all", datetime.now(ZoneInfo("Pacific/Auckland")).date()
         )
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with open_client(engine_web) as client:
+        sign_in(client)
         overview = client.get("/p/2?period=all")
         detail = client.get("/p/2/holding/1")
     assert overview.context["report"] == expected
@@ -310,7 +317,8 @@ def test_dashboard_quantity_replays_splits(engine_web, after, recorded_adjustmen
         session.commit()
         expected = load_returns(session, "Kōwhai Fund", "all", DAY)
         units = instrument_position(session, 1, 1, DAY).units
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with open_client(engine_web) as client:
+        sign_in(client)
         response = client.get(f"/p/1?period=custom&start={expected.start}&end={DAY}")
     assert response.status_code == 200
     assert response.context["report"] == expected
@@ -325,7 +333,8 @@ def test_missing_inputs_are_explained(engine_web):
         session.delete(session.get(FxRate, (DAY, "USD", "NZD")))
         session.delete(session.get(FxRate, (DAY - timedelta(days=5), "USD", "NZD")))
         session.commit()
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with open_client(engine_web) as client:
+        sign_in(client)
         response = client.get(f"/p/1?period=custom&start={DAY}&end={DAY}")
     assert response.status_code == 200
     assert response.context["report"] is None
@@ -337,7 +346,8 @@ def test_loader_error_does_not_fabricate_zero_chart(engine_web):
     with Session(engine_web) as session:
         session.get(Trade, 2).currency = "NZD"
         session.commit()
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with open_client(engine_web) as client:
+        sign_in(client)
         response = client.get(f"/p/1?period=custom&start={DAY}&end={DAY}")
     assert response.status_code == 200
     assert "Trade currency differs" in response.text
@@ -415,7 +425,7 @@ def test_trade_reconciliation_undo_and_logout(client, engine_web):
         assert session.get(Trade, 1) is None
         assert session.get(ImportRun, 1).status == "undone"
     assert client.post("/logout", data={"csrf": csrf}).status_code == 200
-    assert client.get("/p/1/trade").status_code == 401
+    assert client.get("/p/1/trade", follow_redirects=False).status_code == 303
 
 
 def test_password_never_echoed_and_throttled(client, caplog):

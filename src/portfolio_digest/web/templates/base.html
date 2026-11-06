@@ -27,26 +27,26 @@
                     <button class="quiet">Sign out</button>
                 </form>
             {% else %}
-                <a href="/login">Sign in to edit</a>
+                <a href="/login">Sign in</a>
             {% endif %}
         </header>
         <div class="shell">
             <aside aria-label="Portfolio navigation">
-                <p class="eyebrow">Your portfolios</p>
-                {% for p in portfolios|default([]) %}
-                    <a class="portfolio-link {% if portfolio is defined and p.id == portfolio.id %} selected {% endif %}"
-                       href="/p/{{ p.id }}">{{ p.name }} <span>↗</span>
-                    </a>
-                {% endfor %}
-                {% if portfolio is defined %}
-                    <nav>
-                        <a href="/p/{{ portfolio.id }}">Overview &amp; holdings</a>
-                        <a href="/p/{{ portfolio.id }}/imports">Import history</a>
-                        <a href="/p/{{ portfolio.id }}/reconcile">Reconciliation</a>
-                        {% if request.state.browser.authenticated %}
+                {% if request.state.browser.authenticated %}
+                    <p class="eyebrow">Your portfolios</p>
+                    {% for p in portfolios|default([]) %}
+                        <a class="portfolio-link {% if portfolio is defined and p.id == portfolio.id %} selected {% endif %}"
+                           href="/p/{{ p.id }}">{{ p.name }} <span>↗</span>
+                        </a>
+                    {% endfor %}
+                    {% if portfolio is defined %}
+                        <nav>
+                            <a href="/p/{{ portfolio.id }}">Overview &amp; holdings</a>
+                            <a href="/p/{{ portfolio.id }}/imports">Import history</a>
+                            <a href="/p/{{ portfolio.id }}/reconcile">Reconciliation</a>
                             <a href="/p/{{ portfolio.id }}/trade">Add trade or correction</a>
-                        {% endif %}
-                    </nav>
+                        </nav>
+                    {% endif %}
                 {% endif %}
                 <p class="aside-note">
                     A clearer view between emails.

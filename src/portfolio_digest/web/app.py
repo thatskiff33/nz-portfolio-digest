@@ -1,8 +1,9 @@
 """Server-rendered private dashboard. No portfolio data leaves this server."""
 
-import os
 from datetime import datetime
+from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
@@ -11,7 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import Response
 
+from portfolio_digest.config import get_settings
 from portfolio_digest.db import make_engine
 from portfolio_digest.importers.base import FileProblem, RowProblem
 from portfolio_digest.importing import ImportFailure, undo_import
@@ -19,23 +23,113 @@ from portfolio_digest.manual import add_trade, prepare_trade
 from portfolio_digest.models import ImportRun, Income, Instrument, Portfolio, Price, Trade
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
 from portfolio_digest.returns_loader import first_activity_date
-from portfolio_digest.web.security import COOKIE, LIFETIME, Security
+from portfolio_digest.web.security import Security
 from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
 ROOT = Path(__file__).parent
+_RETURN_PATH_LIMIT = 2048
+
+
+def safe_return_path(value: object) -> str:
+    """Same-site path beginning with one slash, or `/` when the value is not.
+
+    Absolute URLs, protocol-relative URLs, backslashes, controls and encodings of
+    those forms are rejected. The check is repeated after decoding so a second
+    encoding cannot change the navigation origin.
+    """
+    if not isinstance(value, str):
+        return "/"
+    candidate = value
+    for _ in range(5):
+        if not _same_site(candidate):
+            return "/"
+        decoded = unquote(candidate)
+        if decoded == candidate:
+            return candidate
+        candidate = decoded
+    return "/"
+
+
+def _same_site(value: str) -> bool:
+    if not value or len(value) > _RETURN_PATH_LIMIT or not value.isascii():
+        return False
+    if not value.startswith("/") or value.startswith("//"):
+        return False
+    if any(char == "\\" or char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
+        return False
+    return "://" not in value.lower()
+
+
+def _current_target(request: Request) -> str:
+    """Path and query as the app received them. Host and forwarded headers are ignored."""
+    path = request.scope.get("path") or "/"
+    raw_query = request.scope.get("query_string", b"")
+    query = raw_query.decode("latin-1", "ignore") if isinstance(raw_query, bytes) else str(raw_query)
+    if query:
+        return f"{path}?{query}"
+    return path
+
+
+def see_other(location: str) -> Response:
+    return Response(status_code=303, headers={"location": location})
+
+
+def _login_location(request: Request) -> str:
+    target = safe_return_path(_current_target(request))
+    return "/login?next=" + quote(target, safe="/")
+
+
+def allowed_hosts(bind: str, hostnames: str) -> list[str]:
+    """Bind address, loopback names, and configured hostnames. Ports are not part of the name.
+
+    Starlette compares the host with IPv6 brackets preserved and the port removed, so an
+    IPv6 bind is also listed in brackets. The list is never widened to every IPv6 address.
+    """
+    hosts: list[str] = []
+
+    def add(value: str) -> None:
+        item = value.strip().lower()
+        if not item or any(char in item for char in "*/\\"):
+            return
+        if item not in hosts:
+            hosts.append(item)
+        literal = item[1:-1] if item.startswith("[") and item.endswith("]") else item
+        try:
+            address = ip_address(literal)
+        except ValueError:
+            return
+        if address.version == 6:
+            bracketed = f"[{literal}]"
+            if bracketed not in hosts:
+                hosts.append(bracketed)
+
+    add("127.0.0.1")
+    add("localhost")
+    add(bind)
+    for name in hostnames.split(","):
+        add(name)
+    return hosts
 
 
 def create_app(
     engine=None,
     password: str | None = None,
     *,
-    timezone="Pacific/Auckland",
+    timezone: str = "Pacific/Auckland",
     secure_cookie: bool = False,
+    bind: str = "127.0.0.1",
+    hostnames: str = "",
 ) -> FastAPI:
+    if password is None:
+        settings = get_settings()
+        secret = settings.dashboard_password
+        password = "" if secret is None else secret.get_secret_value()
+        timezone = settings.timezone
+        secure_cookie = settings.dashboard_secure_cookie
+        bind = settings.dashboard_bind
+        hostnames = settings.dashboard_hostnames
     engine = engine if engine is not None else make_engine()
-    security = Security(
-        password if password is not None else os.environ.get("DASHBOARD_PASSWORD", "")
-    )
+    security = Security(password, secure_cookie=secure_cookie)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.security = security
     templates = Jinja2Templates(directory=ROOT / "templates")
@@ -43,15 +137,34 @@ def create_app(
     templates.env.filters["quantity"] = lambda n: format(n.normalize(), "f")
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
+    def public(request: Request) -> bool:
+        path = request.url.path
+        method = request.method
+        if path == "/static" or path.startswith("/static/"):
+            return True
+        if path == "/login" and method in {"GET", "HEAD", "POST"}:
+            return True
+        return path == "/logout" and method == "POST"
+
     @app.middleware("http")
     async def headers(request: Request, call_next):
-        try:
-            if not request.url.path.startswith("/static/"):
+        path = request.url.path
+        static = path == "/static" or path.startswith("/static/")
+        # Static files must not create a session or refresh the idle timer.
+        denied = None
+        if not static:
+            try:
                 request.state.session_id, request.state.browser = security.browser(request)
-        except HTTPException as exc:
-            response = HTMLResponse(str(exc.detail), status_code=exc.status_code)
-        else:
+            except HTTPException as exc:
+                denied = HTMLResponse(str(exc.detail), status_code=exc.status_code)
+        if denied is not None:
+            response = denied
+        elif static or public(request) or request.state.browser.authenticated:
             response = await call_next(request)
+        elif request.method in {"GET", "HEAD"}:
+            response = see_other(_login_location(request))
+        else:
+            response = HTMLResponse("Sign in to continue.", status_code=401)
         response.headers.update(
             {
                 "Content-Security-Policy": "default-src 'self'; script-src 'self'; "
@@ -65,16 +178,27 @@ def create_app(
                 "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
             }
         )
-        if getattr(request.state, "session_id", ""):
+        session_id = getattr(request.state, "session_id", "")
+        browser = getattr(request.state, "browser", None)
+        if session_id and browser is not None:
             response.set_cookie(
-                COOKIE,
-                request.state.session_id,
-                max_age=LIFETIME,
+                security.cookie_name,
+                session_id,
+                max_age=security.cookie_max_age(browser),
                 httponly=True,
                 samesite="strict",
                 secure=secure_cookie,
+                path="/",
             )
         return response
+
+    # Added last so it runs before session handling. A rejected host does not redirect
+    # and does not reach the code that allocates a session. www_redirect stays off.
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=allowed_hosts(bind, hostnames),
+        www_redirect=False,
+    )
 
     @app.exception_handler(HTTPException)
     async def error(request, exc):
@@ -111,6 +235,15 @@ def create_app(
         security.csrf(request, str(data.get("csrf", "")))
         return data
 
+    def login_form(request: Request, nxt: str, status_code: int = 200, message: str = ""):
+        # No portfolio query: the sign-in page has no sidebar data.
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={"next": nxt, "message": message},
+            status_code=status_code,
+        )
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         with Session(engine) as session:
@@ -120,24 +253,36 @@ def create_app(
             return render(request, session, "empty.html")
 
     @app.get("/login", response_class=HTMLResponse)
-    def login_page(request: Request):
+    def login_page(request: Request, next: str = ""):
         request.state.session_id, request.state.browser = security.browser(request, create=True)
-        with Session(engine) as session:
-            return render(request, session, "login.html")
+        return login_form(request, safe_return_path(next))
 
     @app.post("/login")
     async def login(request: Request):
         data = await form(request, login=False)
-        security.login(request, str(data.get("password", "")))
-        return RedirectResponse("/", status_code=303)
+        nxt = safe_return_path(str(data.get("next", "")))
+        try:
+            security.login(request, str(data.get("password", "")))
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                return login_form(request, nxt, status_code=401, message=str(exc.detail))
+            raise
+        return see_other(nxt)
 
     @app.post("/logout")
     async def logout(request: Request):
         await form(request)
-        security.sessions.pop(request.state.session_id, None)
+        with security.lock:
+            security.sessions.pop(request.state.session_id, None)
         request.state.session_id, request.state.browser = security.browser(request)
-        response = RedirectResponse("/", status_code=303)
-        response.delete_cookie(COOKIE, httponly=True, samesite="strict", secure=secure_cookie)
+        response = see_other("/")
+        response.delete_cookie(
+            security.cookie_name,
+            path="/",
+            httponly=True,
+            samesite="strict",
+            secure=secure_cookie,
+        )
         return response
 
     @app.get("/p/{pid}", response_class=HTMLResponse)
@@ -331,14 +476,11 @@ def main():
     """Compose entry point, with one worker for shared sessions and throttling."""
     import uvicorn
 
-    from portfolio_digest.config import get_settings
     from portfolio_digest.web.binding import private_host
 
-    private_host(os.environ.get("DASHBOARD_BIND", "127.0.0.1"))
-    app = create_app(
-        timezone=get_settings().timezone,
-        secure_cookie=os.environ.get("DASHBOARD_SECURE_COOKIE", "false").lower() == "true",
-    )
+    settings = get_settings()
+    private_host(settings.dashboard_bind)
+    app = create_app()
     uvicorn.run(app, host="0.0.0.0", port=8000, proxy_headers=False, access_log=False)  # noqa: S104
 
 

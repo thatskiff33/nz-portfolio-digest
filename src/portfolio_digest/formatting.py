@@ -13,6 +13,12 @@ def display_number(value: Decimal) -> str:
         return f"{rounded:,.2f}"
 
 
+def display_signed_number(value: Decimal) -> str:
+    """`display_number` with an explicit sign, so a movement reads as +1.25 or -1.25."""
+    rendered = display_number(value)
+    return rendered if rendered.startswith("-") else f"+{rendered}"
+
+
 def display_quantity(value: Decimal) -> str:
     """Fixed-point units, trimmed, at most 8 decimal places, half even."""
     return _fixed_point(value, 8, ROUND_HALF_EVEN)

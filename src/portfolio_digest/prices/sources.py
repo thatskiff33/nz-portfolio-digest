@@ -12,6 +12,14 @@ from typing import Any, Protocol
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from portfolio_digest.models import (
+    MONEY_PRECISION,
+    MONEY_SCALE,
+    QUANTITY_PRECISION,
+    QUANTITY_SCALE,
+    RATE_PRECISION,
+    RATE_SCALE,
+)
 from portfolio_digest.prices.http import JsonFetcher, SourceError
 from portfolio_digest.prices.symbols import yahoo_symbol
 
@@ -138,7 +146,7 @@ class YahooSource:
             for event in (chart.get("events", {}).get("dividends", {}) or {}).values():
                 day = datetime.fromtimestamp(event["date"], tz).date()
                 amount = Decimal(event["amount"])
-                if not _fits_numeric(amount, 6, positive=True):
+                if not _fits_numeric(amount, MONEY_SCALE, positive=True):
                     raise SourceError("Yahoo sent an impossible dividend amount.")
                 if start <= day <= end:
                     events[day] = amount
@@ -149,7 +157,10 @@ class YahooSource:
     def rates(self, currency: str, base: str, start: date, end: date) -> dict[date, Decimal]:
         # USDNZD=X is NZ$ per US$, which is exactly how rates are stored.
         rates = self.history(f"{currency}{base}=X", start, end, currency=base).closes
-        if any(not _fits_numeric(rate, 10, positive=True) for rate in rates.values()):
+        if any(
+            not _fits_numeric(rate, RATE_SCALE, positive=True, precision=RATE_PRECISION)
+            for rate in rates.values()
+        ):
             raise SourceError(f"Yahoo sent an impossible {currency}/{base} rate.")
         return rates
 
@@ -181,7 +192,10 @@ def _parse_chart(data: Any, start: date, end: date, currency: str | None = None)
     for split in ((chart.get("events") or {}).get("splits") or {}).values():
         day = datetime.fromtimestamp(split["date"], tz).date()
         before, after = Decimal(str(split["denominator"])), Decimal(str(split["numerator"]))
-        if not all(_fits_numeric(side, 8, positive=True, precision=24) for side in (before, after)):
+        if not all(
+            _fits_numeric(side, QUANTITY_SCALE, positive=True, precision=QUANTITY_PRECISION)
+            for side in (before, after)
+        ):
             raise SourceError("Yahoo sent an impossible split ratio.")
         history.splits[day] = (before, after)
     closes = chart["indicators"]["quote"][0].get("close") or []
@@ -197,14 +211,14 @@ def _parse_chart(data: Any, start: date, end: date, currency: str | None = None)
             if day < split_day:
                 value = value * after / before
         value = _YAHOO_PRECISION.plus(value)
-        if not _fits_numeric(value, 6):
+        if not _fits_numeric(value, MONEY_SCALE):
             raise SourceError(f"Yahoo sent an out-of-range price for {day}.")
         history.closes[day] = value
     return history
 
 
 def _fits_numeric(
-    value: Decimal, scale: int, *, positive: bool = False, precision: int = 20
+    value: Decimal, scale: int, *, positive: bool = False, precision: int = MONEY_PRECISION
 ) -> bool:
     """Check Numeric(precision, scale) after PostgreSQL's rounding."""
     if not value.is_finite():
@@ -247,7 +261,10 @@ class FrankfurterSource:
             raise SourceError(
                 f"Frankfurter sent {currency}/{base} rates in an unexpected shape."
             ) from None
-        if any(not _fits_numeric(r, 10, positive=True) for r in rates.values()):
+        if any(
+            not _fits_numeric(r, RATE_SCALE, positive=True, precision=RATE_PRECISION)
+            for r in rates.values()
+        ):
             raise SourceError(f"Frankfurter sent an impossible {currency}/{base} rate.")
         # Frankfurter includes the working day before `start` when `start` is a holiday.
         return {day: rate for day, rate in rates.items() if start <= day <= end}

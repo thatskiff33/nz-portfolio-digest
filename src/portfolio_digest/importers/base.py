@@ -23,17 +23,19 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from portfolio_digest import markets
-from portfolio_digest.models import TradeType
+from portfolio_digest.models import (
+    MONEY_LIMIT,
+    MONEY_SCALE,
+    QUANTITY_LIMIT,
+    QUANTITY_SCALE,
+    RATE_LIMIT,
+    RATE_SCALE,
+    TradeType,
+)
 from portfolio_digest.validation import InvalidInput, contains_control_characters
 
 if TYPE_CHECKING:
     from portfolio_digest.income import ParsedIncome
-
-# Matches the database columns: Quantity is Numeric(24, 8), Money is Numeric(20, 6) and
-# Rate is Numeric(20, 10).
-QUANTITY_PLACES = 8
-MONEY_PLACES = 6
-RATE_PLACES = 10
 
 
 class FileProblem(Exception):
@@ -226,10 +228,10 @@ def parse_quantity(value: str, what: str = "quantity", *, allow_negative: bool =
     if number == 0 or (number < 0 and not allow_negative):
         requirement = "non-zero" if allow_negative else "more than zero"
         raise RowProblem(f"{what} must be {requirement}, not {value!r}.")
-    if number.copy_abs() >= Decimal("1e16"):
+    if number.copy_abs() >= QUANTITY_LIMIT:
         raise RowProblem(f"{what} is outside the supported quantity range.")
-    if _places(number) > QUANTITY_PLACES:
-        raise RowProblem(f"{what} {value!r} has more than {QUANTITY_PLACES} decimal places.")
+    if _places(number) > QUANTITY_SCALE:
+        raise RowProblem(f"{what} {value!r} has more than {QUANTITY_SCALE} decimal places.")
     return number
 
 
@@ -243,10 +245,10 @@ def parse_price(value: str, what: str = "price", *, currency: str | None = None)
     if number < 0:
         raise RowProblem(f"{what} cannot be negative ({value!r}).")
     try:
-        rounded = number.quantize(Decimal(1).scaleb(-MONEY_PLACES), rounding=ROUND_HALF_EVEN)
+        rounded = number.quantize(Decimal(1).scaleb(-MONEY_SCALE), rounding=ROUND_HALF_EVEN)
     except DecimalException:
         raise RowProblem(f"{what} is outside the supported price range.") from None
-    if rounded >= Decimal("1e14"):
+    if rounded >= MONEY_LIMIT:
         raise RowProblem(f"{what} is outside the supported price range.")
     return rounded
 
@@ -264,14 +266,14 @@ def parse_money(
             raise RowProblem(f"{what} cannot be negative ({value!r}).")
         # Some brokers show fees as negative cash. The sign carries no meaning for a fee.
         number = -number
-    if _places(number) > MONEY_PLACES:
-        raise RowProblem(f"{what} {value!r} has more than {MONEY_PLACES} decimal places.")
+    if _places(number) > MONEY_SCALE:
+        raise RowProblem(f"{what} {value!r} has more than {MONEY_SCALE} decimal places.")
     return number
 
 
 def checked_money(number: Decimal, what: str) -> Decimal:
     """Check a cash amount, including a calculated total, fits the money column range."""
-    if not number.is_finite() or number.copy_abs() >= Decimal("1e14"):
+    if not number.is_finite() or number.copy_abs() >= MONEY_LIMIT:
         raise RowProblem(f"{what} is outside the supported money range.")
     return number
 
@@ -296,10 +298,10 @@ def invert_rate(value: str, what: str = "exchange rate") -> Decimal:
     if rate <= 0:
         raise RowProblem(f"{what} must be more than zero, not {value!r}.")
     try:
-        inverted = (Decimal(1) / rate).quantize(Decimal(1).scaleb(-RATE_PLACES), ROUND_HALF_EVEN)
+        inverted = (Decimal(1) / rate).quantize(Decimal(1).scaleb(-RATE_SCALE), ROUND_HALF_EVEN)
     except DecimalException:
         raise RowProblem(f"{what} is outside the supported exchange rate range.") from None
-    if not Decimal(0) < inverted < Decimal("1e10"):
+    if not Decimal(0) < inverted < RATE_LIMIT:
         raise RowProblem(f"{what} is outside the supported exchange rate range.")
     return inverted
 

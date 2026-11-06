@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from portfolio_digest import cli, report_service
+from portfolio_digest import cli, pings, report_service
 from portfolio_digest.mailers import MailError, MailSettings
 from portfolio_digest.reports import Report, ValuePoint, render
 from portfolio_digest.returns import Components, Result, subtotal
@@ -196,7 +196,7 @@ def test_failed_monitoring_is_nonfatal_and_never_logs_secret_url(monkeypatch, ca
     def fail(*a, **kw):
         raise OSError("https://example.invalid/private-token")
 
-    monkeypatch.setattr(report_service, "urlopen", fail)
+    monkeypatch.setattr(pings._opener, "open", fail)
     report_service.ping_kuma(config)
     assert "monitoring push failed" in caplog.text
     assert "private-token" not in caplog.text

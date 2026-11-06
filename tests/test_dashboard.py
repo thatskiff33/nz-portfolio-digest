@@ -27,6 +27,7 @@ from portfolio_digest.returns import ReturnError, instrument_position
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.web.app import create_app
 from portfolio_digest.web.binding import private_host
+from portfolio_digest.web.security import COOKIE
 from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
 PASSWORD = "fictional-test-password-only"  # noqa: S105
@@ -161,6 +162,23 @@ def sign_in(client):
     response = client.post("/login", data={"csrf": csrf, "password": PASSWORD})
     assert response.status_code == 200
     return token(response)
+
+
+def test_healthz_returns_ok_without_a_session():
+    engine = create_engine("sqlite://")
+
+    def refuse_connection(*_args, **_kwargs):
+        raise AssertionError("health check touched the database")
+
+    engine.connect = refuse_connection
+    app = create_app(engine, PASSWORD)
+    with TestClient(app) as client:
+        client.cookies.set(COOKIE, "not-a-session")
+        response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.text == "ok"
+    assert COOKIE not in response.cookies
+    assert app.state.security.sessions == {}
 
 
 @pytest.mark.parametrize(

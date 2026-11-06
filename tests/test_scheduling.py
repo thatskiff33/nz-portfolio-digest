@@ -1,6 +1,7 @@
 """Calendar boundaries, DST, configuration validation and restart behaviour."""
 
 import json
+import os
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -416,3 +417,29 @@ def test_configuration_error_stops_scheduler_without_retry(tmp_path):
     with pytest.raises(ConfigError, match="Invalid configuration"):
         Scheduler(config, path).run(execute, now=lambda: due, sleep=stop)
     assert json.loads(path.read_text())["weekly:retry"]["failures"] == 0
+
+
+def test_scheduler_writes_its_heartbeat_each_cycle(tmp_path, monkeypatch):
+    config = ScheduleConfig(schedules=[weekly()])
+    heartbeat = tmp_path / "heartbeat"
+    monkeypatch.setenv("SCHEDULER_HEARTBEAT", str(heartbeat))
+    cycles = 0
+
+    def sleep(_):
+        nonlocal cycles
+        cycles += 1
+        assert heartbeat.is_file()
+        if cycles == 1:
+            aged = heartbeat.stat().st_mtime - 60
+            os.utime(heartbeat, (aged, aged))
+            return
+        raise StopLoop
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, tmp_path / "state.json").run(
+            lambda *_args: pytest.fail("No job is due this cycle"),
+            now=lambda: datetime(2026, 10, 25, 8, tzinfo=UTC),
+            sleep=sleep,
+        )
+    assert cycles == 2
+    assert heartbeat.stat().st_mtime > datetime.now().timestamp() - 30

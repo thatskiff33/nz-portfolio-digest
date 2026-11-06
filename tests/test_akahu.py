@@ -307,8 +307,15 @@ def test_cli_exit_and_kuma_only_on_match(local_engine, monkeypatch, capsys, rows
     monkeypatch.setattr(cli, "AkahuClient", lambda *args: sync_client(rows))
     push = Mock()
     monkeypatch.setattr(cli, "push_success", push)
+    notes = []
+    monkeypatch.setattr(
+        cli,
+        "note_outcome",
+        lambda config, job, *, failed, labels=(), now=None: notes.append((job, failed, labels)),
+    )
     assert cli.main(["akahu", "sync", "--portfolio", "Fictional"]) == exit_code
     assert push.call_count == (1 if exit_code == 0 else 0)
+    assert notes == [("akahu", exit_code != 0, ())]
     output = str(capsys.readouterr())
     assert APP not in output and USER not in output
 
@@ -495,6 +502,19 @@ def test_name_only_holding_can_be_mapped_manually(local_engine):
 def test_unusable_holdings_fail_safely(local_engine, row):
     with pytest.raises(AkahuError):
         sync(local_engine, "Fictional", sync_client([row]), [])
+
+
+def test_akahu_fetch_error_records_a_failure_notice(monkeypatch, capsys):
+    def fail():
+        raise AkahuError("Akahu fetch failed.")
+
+    monkeypatch.setattr(cli, "get_settings", fail)
+    monkeypatch.setattr(cli, "load_notice_config", lambda: "config")
+    notice = Mock()
+    monkeypatch.setattr(cli, "note_outcome", notice)
+    assert cli.main(["akahu", "sync", "--portfolio", "Fictional"]) == 1
+    notice.assert_called_once_with("config", "akahu", failed=True)
+    assert "Akahu fetch failed." in capsys.readouterr().err
 
 
 def test_sync_reconciles_rounded_registry_consolidation_and_keeps_raw_units(local_engine):

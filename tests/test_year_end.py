@@ -621,3 +621,46 @@ def test_year_end_and_email_agree_on_net_dividend_total_return(year_engine):
     assert (
         annual.total.resident + annual.total.foreign == email.returns.total.withholding_tax == D(11)
     )
+
+
+def test_split_day_fee_is_tax_cost_but_period_expense():
+    # Two historical lots: $100 and $400. After a 2:1 split the $30 fee
+    # allocates $10 and $20. Selling the first 20 units for $200 gains $90.
+    h = Holding(
+        "NZX",
+        "FERN",
+        "NZD",
+        (
+            trade("2024-05-01", "buy", "10", "10"),
+            trade("2024-06-01", "buy", "20", "20"),
+            trade("2025-05-01", "adjustment", "30", "0", "30"),
+            trade("2025-06-01", "sell", "20", "10"),
+        ),
+        (Observation(day("2025-03-31"), D(20)), Observation(day("2026-03-31"), D(10))),
+        splits=(SplitEvent(day("2025-05-01"), D(1), D(2)),),
+    )
+    result = calculate_year_end((h,), (), {}, 2026)
+    assert result.total.gains == D(90)
+    assert result.performance.total.amounts.capital == D(-30)
+    assert result.performance.total.purchases == D(30)
+    assert result.performance.total.closing == D(400)
+    assert result.performance.total.sales == D(200)
+
+
+def test_year_end_sales_include_31_march_and_exclude_1_april():
+    h = Holding(
+        "NZX",
+        "FERN",
+        "NZD",
+        (
+            trade("2024-05-01", "buy", "30", "10"),
+            trade("2025-03-31", "sell", "10", "11"),
+            trade("2025-04-01", "sell", "5", "12"),
+            trade("2026-03-31", "sell", "5", "13"),
+            trade("2026-04-01", "sell", "10", "99"),
+        ),
+        (Observation(day("2025-03-31"), D(11)), Observation(day("2026-03-31"), D(13))),
+    )
+    result = calculate_year_end((h,), (), {}, 2026)
+    assert result.total.gains == D(25)  # 5*(12-10) + 5*(13-10)
+    assert result.performance.total.units == D(10)

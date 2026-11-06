@@ -5,7 +5,7 @@ import io
 from html import escape
 
 from portfolio_digest.formatting import display_number
-from portfolio_digest.returns import _financial_math
+from portfolio_digest.parcels import financial_math
 from portfolio_digest.year_end import NOTES, YearEnd
 
 COLUMNS = (
@@ -24,7 +24,7 @@ def safe_cell(value: str) -> str:
     return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
 
 
-@_financial_math
+@financial_math
 def render_csv(report: YearEnd) -> str:
     output = io.StringIO(newline="")
     writer = csv.writer(output)
@@ -54,7 +54,7 @@ def render_csv(report: YearEnd) -> str:
     return output.getvalue()
 
 
-@_financial_math
+@financial_math
 def render_html(report: YearEnd, name: str) -> str:
     def table(headers, rows):
         head = "".join(

@@ -4,6 +4,7 @@ Secrets never live in the repo. See `.env.example` for the full list.
 """
 
 import json
+from datetime import date, datetime
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -18,9 +19,39 @@ class ConfigError(Exception):
     """Settings are missing or invalid. The message names the setting but never its value."""
 
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+class RuntimeSettings(BaseSettings):
+    """Calendar and scheduler settings available without database credentials."""
 
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    timezone: str = "Pacific/Auckland"
+    schedule_config: str = "schedules.toml"
+    scheduler_state: str = "state/scheduler.json"
+
+    @field_validator("timezone")
+    @classmethod
+    def _check_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("not a known timezone such as Pacific/Auckland") from None
+        return value
+
+    def today(self, now: datetime | None = None) -> date:
+        return (
+            (now or datetime.now(ZoneInfo(self.timezone)))
+            .astimezone(ZoneInfo(self.timezone))
+            .date()
+        )
+
+
+def runtime_settings() -> RuntimeSettings:
+    try:
+        return RuntimeSettings()
+    except ValidationError:
+        raise ConfigError("Invalid TIMEZONE or scheduler setting. See .env.example.") from None
+
+
+class Settings(RuntimeSettings):
     # Full SQLAlchemy URL, e.g. postgresql+psycopg://user:pass@db:5432/portfolio.
     # Kept as a secret so it is never printed in logs or error messages.
     database_url: SecretStr
@@ -35,9 +66,6 @@ class Settings(BaseSettings):
     # Every value is reported in this currency, and new portfolios use it by default.
     base_currency: str = "NZD"
 
-    # Timezone used for "today".
-    timezone: str = "Pacific/Auckland"
-
     # Where daily prices come from. Only "yahoo" for now; a paid source slots in later.
     price_source: str = "yahoo"
 
@@ -48,15 +76,6 @@ class Settings(BaseSettings):
     @classmethod
     def _check_currency(cls, value: str) -> str:
         return currency_code(value)
-
-    @field_validator("timezone")
-    @classmethod
-    def _check_timezone(cls, value: str) -> str:
-        try:
-            ZoneInfo(value)
-        except (ZoneInfoNotFoundError, ValueError):
-            raise ValueError("not a known timezone such as Pacific/Auckland") from None
-        return value
 
     @field_validator("price_source")
     @classmethod

@@ -1,16 +1,15 @@
 """Report orchestration, shared by the CLI and scheduler."""
 
 import logging
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import urlopen
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from portfolio_digest.config import ConfigError
+from portfolio_digest.config import ConfigError, runtime_settings
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
 from portfolio_digest.models import Portfolio
 from portfolio_digest.reports import ReportError, build_report, render
@@ -53,7 +52,7 @@ def run_report(
 ) -> None:
     _validate_preview(dry_run, out)
     schedule = config.named_report(schedule_name)
-    today = (now or datetime.now(UTC)).astimezone(ZoneInfo(config.timezone)).date()
+    today = runtime_settings().today(now)
     if schedule.period == "tax_year":
         from portfolio_digest.year_end_service import latest_ended_year, run_year_end
 

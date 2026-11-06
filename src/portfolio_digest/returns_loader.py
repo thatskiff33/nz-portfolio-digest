@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from portfolio_digest.config import get_settings
 from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
+from portfolio_digest.parcels import lookup
 from portfolio_digest.prices.calendars import FX
 from portfolio_digest.returns import (
     Holding,
@@ -20,7 +21,6 @@ from portfolio_digest.returns import (
     ReturnError,
     SplitEvent,
     Transaction,
-    _lookup,
     calculate_returns,
     period_range,
     subtotal,
@@ -160,7 +160,7 @@ def load_portfolio_inputs(
         # the same dated lookup and stale-data rules as every other engine input.
         with localcontext() as context:
             context.prec = max(context.prec, 80)
-            return value * _lookup(
+            return value * lookup(
                 rates.get(portfolio.base_currency, ()),
                 day,
                 f"{portfolio.base_currency}/{target_currency} FX",

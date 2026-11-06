@@ -2,10 +2,10 @@
 
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from portfolio_digest.config import runtime_settings
 from portfolio_digest.mailers import MailSettings
 from portfolio_digest.returns import ReturnError
 from portfolio_digest.returns_loader import load_inputs
@@ -37,9 +37,7 @@ def load_year_end(session: Session, name: str, year: int) -> YearEnd:
 
 
 def latest_ended_year(now: datetime | None = None) -> int:
-    local = (now or datetime.now(ZoneInfo("Pacific/Auckland"))).astimezone(
-        ZoneInfo("Pacific/Auckland")
-    )
+    local = runtime_settings().today(now)
     return local.year if local.month >= 4 else local.year - 1
 
 

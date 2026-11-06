@@ -443,3 +443,26 @@ def test_asb_contract_note_table_and_tabbed_fields(source):
     result = AsbEmailImporter().parse(content, ParseContext())
     assert result.errors == []
     assert result.trades == original.trades
+
+
+@pytest.mark.parametrize("content", [b"", b"\xef\xbb\xbf"])
+def test_csv_empty_and_bom_only_files_report_empty(content):
+    from portfolio_digest.importers.base import read_csv
+
+    with pytest.raises(FileProblem, match="empty"):
+        list(read_csv(content, {"code": ("Code",)}, {"code"}))
+
+
+def test_csv_utf8_bom_does_not_hide_first_header():
+    from portfolio_digest.importers.base import read_csv
+
+    assert list(read_csv(b"\xef\xbb\xbfCode\r\nFERN\r\n", {"code": ("Code",)}, {"code"})) == [
+        (2, {"code": "FERN"})
+    ]
+
+
+def test_csv_non_utf8_file_has_clear_error():
+    from portfolio_digest.importers.base import read_csv
+
+    with pytest.raises(FileProblem, match="not UTF-8"):
+        list(read_csv(b"Code\n\xff\n", {"code": ("Code",)}, {"code"}))

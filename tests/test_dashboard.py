@@ -136,7 +136,7 @@ def sample_engine(engine=None):
     return engine
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.database)])
 def engine_web(request):
     engine = sample_engine(
         request.getfixturevalue("engine") if request.param == "postgres" else None

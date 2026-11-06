@@ -150,7 +150,6 @@ class SharesiesImporter(Importer):
             currency=currency,
             fees=fees,
             fx_rate=fx_rate,
-            fx_base="NZD" if fx_rate is not None else None,
             external_ref=refs.ref(
                 row.get("order_id", ""), trade_date, kind, exchange, code, quantity, price
             ),

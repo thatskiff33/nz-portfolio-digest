@@ -7,13 +7,12 @@ from decimal import Decimal, localcontext
 from html import escape
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import func, select
 
-from portfolio_digest.config import ConfigError
+from portfolio_digest.config import ConfigError, runtime_settings
 from portfolio_digest.mailers import mail_settings, message, send
 from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.calendars import FX, for_exchange
@@ -89,7 +88,7 @@ def evaluate(session, portfolio, config, now):
     """Return known rule states. Missing valuation data leaves that rule unchanged."""
     rules = config.alerts
     states: dict[str, Trigger | None] = {}
-    today = now.astimezone(ZoneInfo(config.timezone)).date()
+    today = runtime_settings().today(now)
     instruments = session.scalars(
         select(Instrument).join(Trade).where(Trade.portfolio_id == portfolio.id).distinct()
     ).all()

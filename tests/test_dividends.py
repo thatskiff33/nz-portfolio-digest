@@ -29,7 +29,8 @@ from portfolio_digest.models import (
 )
 from portfolio_digest.prices.sources import YahooSource
 from portfolio_digest.reconcile import stored_units
-from portfolio_digest.returns import instrument_position, position, report
+from portfolio_digest.returns import instrument_position, position
+from portfolio_digest.returns_loader import load_returns
 
 D = Decimal
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -160,17 +161,28 @@ def seed(session):
     return portfolio, instrument
 
 
-def test_drp_link_exact_cost_and_gross_up_toggle(engine):
+def test_drp_link_exact_cost_and_gross_up_toggle(report_engine):
+    engine = report_engine
     with Session(engine) as session, session.begin():
         portfolio, instrument = seed(session)
         income, _ = store_income(session, portfolio.id, instrument.id, parsed(), "registry")
         session.flush()
         purchase = session.scalar(select(Trade).where(Trade.income_id == income.id))
         assert (purchase.quantity, purchase.consideration, purchase.price) == (3, 90, 30)
-        row = report(session, portfolio, PAID)[0]
-        assert (row.units, row.cost_base, row.dividends, row.total_return) == (103, 1090, 90, 30)
+        row = load_returns(session, portfolio.name, "all", today=PAID).holdings[0]
+        assert (row.units, row.purchases, row.amounts.dividends, row.amounts.total) == (
+            103,
+            1090,
+            90,
+            30,
+        )
         assert row.imputation_gross_up == 28
-        assert report(session, portfolio, PAID, gross_up=True)[0].total_return == 58
+        assert (
+            load_returns(session, portfolio.name, "all", today=PAID, gross_up=True)
+            .holdings[0]
+            .amounts.total
+            == 58
+        )
 
 
 def test_income_import_repeat_undo_preserves_independent_evidence_and_drp(engine):
@@ -201,11 +213,15 @@ def test_failed_income_import_rolls_back_prior_income_and_trades(engine, tmp_pat
         assert session.scalar(select(func.count()).select_from(Trade)) == 2
 
 
-def test_suggestions_never_affect_returns_until_confirmed_and_reject_is_sticky(engine):
+def test_suggestions_never_affect_returns_until_confirmed_and_reject_is_sticky(report_engine):
+    engine = report_engine
     with Session(engine) as session, session.begin():
         portfolio, instrument = seed(session)
         items = suggest(session, portfolio, instrument, {EX: D(1), PAID: D("0.5")})
-        assert report(session, portfolio, PAID)[0].dividends == 0
+        assert (
+            load_returns(session, portfolio.name, "all", today=PAID).holdings[0].amounts.dividends
+            == 0
+        )
         with pytest.raises(RowProblem, match="evidence"):
             decide(session, items[0].id)
         decide(
@@ -216,7 +232,10 @@ def test_suggestions_never_affect_returns_until_confirmed_and_reject_is_sticky(e
         )
         decide(session, items[1].id, reject=True)
         session.flush()
-        assert report(session, portfolio, PAID)[0].dividends == 90
+        assert (
+            load_returns(session, portfolio.name, "all", today=PAID).holdings[0].amounts.dividends
+            == 90
+        )
         assert [
             i.status for i in suggest(session, portfolio, instrument, {EX: D(1), PAID: D(1)})
         ] == ["confirmed", "rejected"]
@@ -232,8 +251,9 @@ def test_suggestions_never_affect_returns_until_confirmed_and_reject_is_sticky(e
     ],
 )
 def test_recorded_action_changes_holdings_cost_and_returns_once(
-    engine, kind, before, after, units, price
+    report_engine, kind, before, after, units, price
 ):
+    engine = report_engine
     with Session(engine) as session, session.begin():
         portfolio, instrument = seed(session)
         record_action(
@@ -241,8 +261,8 @@ def test_recorded_action_changes_holdings_cost_and_returns_once(
         )
         session.get(Price, (instrument.id, PAID)).close = D(price)
         session.flush()
-        row = report(session, portfolio, PAID)[0]
-        assert (row.units, row.cost_base, row.total_return) == (units, 1000, 0)
+        row = load_returns(session, portfolio.name, "all", today=PAID).holdings[0]
+        assert (row.units, row.purchases, row.amounts.total) == (units, 1000, 0)
         assert stored_units(session, portfolio.id)["NZX", "EXM"] == units
 
 
@@ -367,13 +387,17 @@ def test_registry_split_survives_yahoo_refresh_and_price_check_accepts_it(engine
     ],
 )
 def test_foreign_returns_use_actual_withholding_and_never_claim_franking(
-    engine, exchange, currency, net, tax, franking
+    report_engine, exchange, currency, net, tax, franking
 ):
+    engine = report_engine
     from portfolio_digest.models import FxRate
 
     with Session(engine) as session, session.begin():
         portfolio, instrument = seed(session)
         instrument.exchange, instrument.currency = exchange, currency
+        session.scalar(
+            select(Trade).where(Trade.instrument_id == instrument.id)
+        ).currency = currency
         income = parse_income(
             "fixture",
             {
@@ -391,7 +415,7 @@ def test_foreign_returns_use_actual_withholding_and_never_claim_franking(
         store_income(session, portfolio.id, instrument.id, income, "broker")
         session.add(
             FxRate(
-                rate_date=PAID,
+                rate_date=START,
                 currency=currency,
                 base_currency="NZD",
                 rate=D("1.5"),
@@ -399,8 +423,8 @@ def test_foreign_returns_use_actual_withholding_and_never_claim_franking(
             )
         )
         session.flush()
-        row = report(session, portfolio, PAID, gross_up=True)[0]
-        assert row.dividends == D(net) * D("1.5")
+        row = load_returns(session, portfolio.name, "all", today=PAID, gross_up=True).holdings[0]
+        assert row.amounts.dividends == D(net) * D("1.5")
         assert row.gross_dividends == 150
         assert row.withholding_tax == D(tax) * D("1.5")
         assert row.imputation_gross_up == 0
@@ -415,7 +439,8 @@ def test_reimport_old_code_after_rename_keeps_same_instrument(engine):
         assert find_or_create_instrument(session, "NZX", "EXM", "NZD").id == instrument.id
 
 
-def test_returns_carry_price_across_split_without_creating_gain(engine):
+def test_returns_carry_price_across_split_without_creating_gain(report_engine):
+    engine = report_engine
     with Session(engine) as session, session.begin():
         portfolio, instrument = seed(session)
         session.delete(session.get(Price, (instrument.id, PAID)))
@@ -423,7 +448,9 @@ def test_returns_carry_price_across_split_without_creating_gain(engine):
             Price(instrument_id=instrument.id, price_date=START, close=D(10), source="fixture")
         )
         record_action(session, instrument, EX, "split", "split", {"before": "1", "after": "2"})
-        assert report(session, portfolio, PAID)[0].total_return == 0
+        assert (
+            load_returns(session, portfolio.name, "all", today=PAID).holdings[0].amounts.total == 0
+        )
 
 
 def test_confirmation_links_existing_broker_income_without_mutating_import_fields(engine):
@@ -462,3 +489,18 @@ def test_income_without_broker_id_has_stable_reference_across_formatting():
         content.replace(b",100,10,10,", b",100.00,10.0,10.00,"), ParseContext()
     ).incomes[0]
     assert first.external_ref == second.external_ref
+
+
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.database)])
+def report_engine(request, monkeypatch):
+    if request.param == "postgres":
+        yield request.getfixturevalue("engine")
+        return
+    from test_returns_loader import _sqlite_engine
+
+    from portfolio_digest.config import get_settings
+
+    engine = _sqlite_engine(monkeypatch)
+    yield engine
+    engine.dispose()
+    get_settings.cache_clear()

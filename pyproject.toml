@@ -49,3 +49,4 @@ ignore = ["S101"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = ["posix: needs a POSIX shell", "database: needs a Postgres service"]

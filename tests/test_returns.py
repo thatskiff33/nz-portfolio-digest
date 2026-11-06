@@ -481,3 +481,16 @@ def test_holdings_sold_before_the_period_are_left_out():
     paid_after_sale = replace(gone, income=(Payment(MID, D(1), "NZD"),))
     report = calculate_returns((paid_after_sale,), START, END, {})
     assert report.total.amounts.dividends == 1
+
+
+def test_opening_sale_cannot_exceed_historical_holdings():
+    h = holding(trades=[trade(quantity="10"), trade(START, "sell", "11")])
+    with pytest.raises(ReturnError, match="sale exceeds held quantity"):
+        calculate_returns((h,), START, END, {})
+
+
+@pytest.mark.parametrize("kind", ["buy", "sell"])
+def test_base_currency_transaction_fx_must_be_one(kind):
+    h = holding(trades=[trade(), trade(MID, kind, "1", fx="1.1")])
+    with pytest.raises(ReturnError, match="Base-currency FX must be one"):
+        calculate_returns((h,), START, END, {})

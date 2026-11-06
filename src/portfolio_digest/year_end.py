@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 
-from portfolio_digest.prices.calendars import FX
+from portfolio_digest.parcels import DatedFx, ParcelLedger, financial_math
 from portfolio_digest.returns import (
     ZERO,
     Holding,
@@ -12,11 +12,9 @@ from portfolio_digest.returns import (
     Payment,
     Report,
     ReturnError,
-    _financial_math,
-    _lookup,
-    _matches_split,
-    _ordered_trades,
     calculate_returns,
+    matches_split,
+    ordered_trades,
 )
 
 NOTES = (
@@ -85,7 +83,7 @@ class YearEnd:
         return self.foreign_peak > Decimal(50000)
 
 
-@_financial_math
+@financial_math
 def calculate_year_end(
     holdings: tuple[Holding, ...],
     dividends: tuple[Dividend, ...],
@@ -110,36 +108,33 @@ def calculate_year_end(
     performance = calculate_returns(holdings, start, end, rates, "NZD")
     flags = set(performance.total.flags)
 
-    def fx(currency: str, day: date, explicit: Decimal | None) -> Decimal:
-        if currency == "NZD":
-            if explicit is not None and explicit != Decimal(1):
-                raise ReturnError("Base-currency FX must be one.")
-            return Decimal(1)
-        rate = (
-            explicit
-            if explicit is not None
-            else _lookup(rates.get(currency, ()), day, f"{currency}/NZD FX", flags, FX)
-        )
-        if not rate.is_finite() or rate <= ZERO:
-            raise ReturnError("FX must be positive and finite.")
-        return rate
+    fx = DatedFx(rates, "NZD", flags)
 
-    # Each parcel retains historical NZD cost, including acquisition fees.
-    parcels: dict[str, list[list[Decimal]]] = {}
-    quantities: dict[str, Decimal] = {}
     stats = {f"{h.exchange}:{h.code}": [ZERO] * 7 for h in holdings}
+    foreign = {f"{h.exchange}:{h.code}" for h in holdings if h.exchange != "NZX"}
+    peak, peak_day = replay_parcels(holdings, start, end, fx, stats, foreign)
+    aggregate_dividends(dividends, start, end, fx, stats, foreign)
+    active = {r.label for r in performance.holdings}
+    rows = tuple(TaxRow(k, *v) for k, v in sorted(stats.items()) if k in active or any(v))
+    total = TaxRow(
+        "Portfolio",
+        *(
+            sum((getattr(r, f) for r in rows), ZERO)
+            for f in ("gains", "losses", "gross", "imputation", "resident", "foreign", "net")
+        ),
+    )
+    return YearEnd(year, performance, rows, total, peak, peak_day, tuple(sorted(flags)))
+
+
+def parcel_events(holdings, start, end):
+    """Order split, addition and removal events across holdings for peak tracking."""
     events = []
-    foreign = set()
     for h in holdings:
         label = f"{h.exchange}:{h.code}"
-        parcels[label] = []
-        quantities[label] = ZERO
-        if h.exchange != "NZX":
-            foreign.add(label)
         splits = {s.day: s for s in h.splits}
         held = ZERO
         previous_day = None
-        ordered = _ordered_trades(h, end)
+        ordered = ordered_trades(h, end)
         # A completed position before the opening close contributes no tax cost.
         # Drop its history, including FX requirements, even if this holding is rebought.
         replay_from = 0
@@ -156,16 +151,35 @@ def calculate_year_end(
                 trade.day != previous_day
                 and trade.kind == "adjustment"
                 and split
-                and _matches_split(held, trade.quantity, split)
+                and matches_split(held, trade.quantity, split)
             )
             priority = 0 if is_split else (2 if trade.delta < ZERO else 1)
             events.append((trade.day, priority, label, index, h, trade, splits))
             held += trade.delta
             previous_day = trade.day
-    peak = ZERO
-    peak_day = start
+    return sorted(events, key=lambda e: e[:4])
+
+
+@dataclass
+class ForeignPeak:
+    start: date
+    value: Decimal = ZERO
+    day: date | None = None
+
+    def observe(self, day: date, current: Decimal) -> None:
+        if day <= self.start:
+            self.value, self.day = current, self.start
+        elif current > self.value:
+            self.value, self.day = current, day
+
+
+def replay_parcels(holdings, start, end, fx, stats, foreign):
+    """Historical FIFO costs and realised gains; track foreign cost after each event."""
+    parcels = {f"{h.exchange}:{h.code}": ParcelLedger(h.code) for h in holdings}
+    quantities = {label: ZERO for label in parcels}
+    peak = ForeignPeak(start)
     seen: set[tuple[str, date]] = set()
-    for day, _, label, _, h, trade, splits in sorted(events, key=lambda e: e[:4]):
+    for day, _, label, _, h, trade, splits in parcel_events(holdings, start, end):
         held = quantities[label]
         lots = parcels[label]
         split = splits.get(day)
@@ -175,50 +189,30 @@ def calculate_year_end(
             trade.kind == "adjustment"
             and split
             and first
-            and _matches_split(held, trade.quantity, split)
+            and matches_split(held, trade.quantity, split)
         ):
             new = held + trade.quantity
-            for lot in lots[:-1]:
-                lot[0] = lot[0] * new / held
-            lots[-1][0] = new - sum((p[0] for p in lots[:-1]), ZERO)
-            # Rare split fees are acquisition costs, allocated across surviving lots.
-            if trade.fees:
-                fee = trade.fees * fx(h.currency, day, trade.fx)
-                remaining = fee
-                for lot in lots[:-1]:
-                    share = fee * lot[0] / new
-                    lot[1] += share
-                    remaining -= share
-                lots[-1][1] += remaining
+            # Tax cost capitalises split fees; period performance expenses them.
+            fee = trade.fees * fx(h.currency, day, trade.fx) if trade.fees else ZERO
+            lots.rescale(new, fee)
         else:
             if trade.delta > ZERO:
                 rate = fx(h.currency, day, trade.fx)
-                lots.append([trade.quantity, (trade.quantity * trade.price + trade.fees) * rate])
+                lots.add(trade.quantity, (trade.quantity * trade.price + trade.fees) * rate)
             else:
-                units = -trade.delta
-                if units > held:
-                    raise ReturnError(f"{h.code}: sale exceeds held quantity.")
-                cost = ZERO
-                while units:
-                    lot = lots[0]
-                    taken = min(units, lot[0])
-                    part = lot[1] if taken == lot[0] else lot[1] * taken / lot[0]
-                    cost += part
-                    lot[0] -= taken
-                    lot[1] -= part
-                    units -= taken
-                    if not lot[0]:
-                        lots.pop(0)
+                cost = sum((parcel.cost for parcel in lots.remove(-trade.delta)), ZERO)
                 if trade.kind == "sell" and start < day <= end:
                     rate = fx(h.currency, day, trade.fx)
                     gain = (trade.quantity * trade.price - trade.fees) * rate - cost
                     stats[label][0 if gain >= ZERO else 1] += gain
         quantities[label] = held + trade.delta
-        current = sum((lot[1] for key in foreign for lot in parcels[key]), ZERO)
-        if day <= start:
-            peak, peak_day = current, start
-        elif current > peak:
-            peak, peak_day = current, day
+        current = sum((parcels[key].cost for key in foreign), ZERO)
+        peak.observe(day, current)
+    return peak.value, peak.day or start
+
+
+def aggregate_dividends(dividends, start, end, fx, stats, foreign):
+    """Aggregate cash and tax fields independently of parcel replay."""
     for payment in dividends:
         if not start < payment.day <= end:
             continue
@@ -231,13 +225,3 @@ def calculate_year_end(
         row[3] += payment.imputation * rate
         row[5 if payment.holding in foreign else 4] += payment.withholding * rate
         row[6] += payment.net * rate
-    active = {r.label for r in performance.holdings}
-    rows = tuple(TaxRow(k, *v) for k, v in sorted(stats.items()) if k in active or any(v))
-    total = TaxRow(
-        "Portfolio",
-        *(
-            sum((getattr(r, f) for r in rows), ZERO)
-            for f in ("gains", "losses", "gross", "imputation", "resident", "foreign", "net")
-        ),
-    )
-    return YearEnd(year, performance, rows, total, peak, peak_day, tuple(sorted(flags)))

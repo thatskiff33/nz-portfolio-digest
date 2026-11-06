@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from portfolio_digest.returns import ZERO, Result, ReturnError
 from portfolio_digest.returns import Report as ReturnsReport
-from portfolio_digest.returns_loader import load_combined_returns
+from portfolio_digest.returns_loader import combined_evaluator
 from portfolio_digest.returns_table import format_number as money
 
 
@@ -56,10 +56,9 @@ def build_report(session: Session, start: date, end: date) -> Report:
     span = (end - first).days
     days = sorted({first + timedelta(days=span * n // 7) for n in range(8)})
     try:
-        result = load_combined_returns(session, first, end)
-        history = tuple(
-            ValuePoint(day, load_combined_returns(session, day, day).total.closing) for day in days
-        )
+        evaluate = combined_evaluator(session, end)
+        result = evaluate(first, end)
+        history = tuple(ValuePoint(day, evaluate(day, day).total.closing) for day in days)
     except ReturnError:
         raise ReportError(
             "Report cannot be valued. Check trade history and run prices fetch --backfill."

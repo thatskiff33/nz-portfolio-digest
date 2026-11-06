@@ -912,3 +912,80 @@ def test_expired_authenticated_pool_allows_new_login(client, session_clock):
     session_clock[0] += 1800
     sign_in(client)
     assert len(security.sessions) == 1
+
+
+def test_overview_series_values_match_linear_lookup(engine_web, monkeypatch):
+    from portfolio_digest import returns
+
+    with Session(engine_web) as session:
+        dashboard = Dashboard(session, session.get(Portfolio, 1), DAY - timedelta(days=10), DAY)
+        actual = dashboard.series(DAY - timedelta(days=10), DAY)
+
+        def linear_lookup(points, day, label, flags, calendar):
+            point = max((p for p in points if p.day <= day), key=lambda p: p.day, default=None)
+            if point is None:
+                raise ReturnError(f"Missing {label} on or before {day}.")
+            if point.stale or returns._skips_trading_day(calendar, point.day, day):
+                flags.add(f"Carried forward {label} for {day} (source {point.day})")
+            return point.value
+
+        monkeypatch.setattr(returns, "_lookup", linear_lookup)
+        assert dashboard.series(DAY - timedelta(days=10), DAY) == actual
+
+
+def test_holding_bounds_chart_and_table_and_ignores_unrelated_bad_inputs(engine_web):
+    with Session(engine_web) as session:
+        # An unrelated invalid currency must not prevent this holding being valued.
+        session.scalar(select(Trade).where(Trade.instrument_id == 2)).currency = "AUD"
+        first = DAY - timedelta(days=500)
+        session.add_all(
+            Price(
+                instrument_id=1,
+                price_date=first + timedelta(days=n),
+                close=Decimal(n) / 100,
+                source="test",
+            )
+            for n in range(480)
+        )
+        session.commit()
+    with open_client(engine_web) as client:
+        sign_in(client)
+        response = client.get("/p/1/holding/1")
+    assert response.status_code == 200
+    series = response.context["series"]
+    assert len(series) == 180
+    assert series[0] == (first, Decimal(0))
+    assert series[-1] == (DAY, Decimal("5.25"))
+    assert response.context["result"].closing == Decimal("100.125") * Decimal("5.25")
+    assert response.text.count("data-chart-date=") == len(series)
+    assert response.context["returns_error"] is None
+
+
+def test_holding_input_error_is_explained(engine_web):
+    with Session(engine_web) as session:
+        session.scalar(select(Trade).where(Trade.instrument_id == 1)).currency = "AUD"
+        session.commit()
+    with open_client(engine_web) as client:
+        sign_in(client)
+        response = client.get("/p/1/holding/1")
+    assert response.status_code == 200
+    assert "Trade currency differs from instrument currency" in response.context["returns_error"]
+    assert response.context["result"] is None
+
+
+def test_holding_future_activity_does_not_invert_report_dates(engine_web):
+    today = datetime.now(ZoneInfo("Pacific/Auckland")).date()
+    with Session(engine_web) as session:
+        session.scalar(select(Trade).where(Trade.instrument_id == 2)).trade_date = (
+            today + timedelta(days=30)
+        )
+        session.commit()
+    with open_client(engine_web) as client:
+        sign_in(client)
+        response = client.get("/p/1/holding/2")
+    assert response.status_code == 200
+    assert response.context["start"] <= response.context["end"] == today
+    assert response.context["result"] is None
+    assert response.context["returns_error"] is None
+    # Future ledger rows remain visible, but are excluded from valuation inputs.
+    assert len(response.context["trades"]) == 1

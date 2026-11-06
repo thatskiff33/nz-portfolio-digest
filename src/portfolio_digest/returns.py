@@ -11,6 +11,7 @@ A parcel keeps its local cost (q * p0) when a split rescales its units.
 See docs/RETURNS.md for boundaries, income and missing-data conventions.
 """
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
@@ -58,6 +59,15 @@ class Observation:
     def __post_init__(self) -> None:
         if not isinstance(self.value, Decimal) or not self.value.is_finite() or self.value < ZERO:
             raise ReturnError("Observations must be finite, non-negative Decimals.")
+
+
+class ObservationSeries(tuple):
+    """Stable date ordering prepared once for logarithmic lookups."""
+
+    def __new__(cls, points=()):
+        if isinstance(points, cls):
+            return points
+        return super().__new__(cls, sorted(points, key=lambda p: p.day))
 
 
 @dataclass(frozen=True)
@@ -145,6 +155,9 @@ class Holding:
     income: tuple[Payment, ...] = ()
     splits: tuple[SplitEvent, ...] = ()
     name: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "prices", ObservationSeries(self.prices))
 
 
 @dataclass(frozen=True)
@@ -260,7 +273,13 @@ def _lookup(
     Flagged when stored as stale, or when a trading day passed without a fresh one.
     Using Friday's close on a weekend or a market holiday is normal and not flagged.
     """
-    point = max((p for p in points if p.day <= day), key=lambda p: p.day, default=None)
+    if not isinstance(points, ObservationSeries):
+        points = ObservationSeries(points)
+    index = bisect_right(points, day, key=lambda p: p.day) - 1
+    # Keep the original first-observation rule for duplicate dates.
+    point = (
+        points[bisect_left(points, points[index].day, key=lambda p: p.day)] if index >= 0 else None
+    )
     if point is None:
         raise ReturnError(f"Missing {label} on or before {day}.")
     if point.stale or _skips_trading_day(calendar, point.day, day):
@@ -440,7 +459,7 @@ def holding_return(
 
     def price_on(day: date) -> Decimal:
         close = _lookup(holding.prices, day, f"{holding.code} price", flags, calendar)
-        source = max(p.day for p in holding.prices if p.day <= day)
+        source = holding.prices[bisect_right(holding.prices, day, key=lambda p: p.day) - 1].day
         for split in holding.splits:
             if source < split.day <= day:
                 close = rescale_price(close, split.before, split.after)

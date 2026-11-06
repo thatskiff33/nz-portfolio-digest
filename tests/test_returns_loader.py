@@ -719,3 +719,47 @@ def test_named_and_portfolio_loaders_share_complete_inputs(returns_engine):
         assert named.start == start and named.end == end
         assert named.income and named.instruments and named.holdings and named.rates
         assert named.holdings[0].income[0].amount == D(4)
+
+
+@pytest.mark.parametrize("foreign_base", [False, True])
+def test_email_loads_history_once_and_renders_identically(returns_engine, foreign_base):
+    from datetime import timedelta
+
+    from sqlalchemy import event
+
+    from portfolio_digest.reports import Report, ValuePoint, build_report, render
+    from portfolio_digest.returns_loader import load_combined_returns
+
+    start, end = date(2026, 10, 13), date(2026, 10, 19)
+    first = start - timedelta(days=1)
+    if foreign_base:
+        with Session(returns_engine) as session:
+            session.get(Portfolio, 1).base_currency = "USD"
+            session.commit()
+    days = sorted({first + timedelta(days=(end - first).days * n // 7) for n in range(8)})
+    with Session(returns_engine) as session:
+        # The previous implementation queried independently for every sample.
+        expected = Report(
+            start,
+            end,
+            load_combined_returns(session, first, end),
+            tuple(
+                ValuePoint(day, load_combined_returns(session, day, day).total.closing)
+                for day in days
+            ),
+        )
+    reads = []
+
+    def record(connection, cursor, statement, parameters, context, executemany):
+        if "FROM prices" in statement or "FROM fx_rates" in statement:
+            reads.append(statement)
+
+    event.listen(returns_engine, "before_cursor_execute", record)
+    try:
+        with Session(returns_engine) as session:
+            actual = build_report(session, start, end)
+    finally:
+        event.remove(returns_engine, "before_cursor_execute", record)
+    assert actual == expected
+    assert render(actual) == render(expected)
+    assert len(reads) == 4  # One price and FX read per portfolio, regardless of samples.

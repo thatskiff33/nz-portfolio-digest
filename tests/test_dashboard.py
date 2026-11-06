@@ -246,6 +246,62 @@ def test_dashboard_equals_returns_engine(engine_web, period):
         assert "Returns engine has not landed" not in response.text
 
 
+def test_dashboard_counts_transfer_in_towards_denominator(engine_web):
+    """Invented QS-023 scenario: NZ$1,000 portfolio receives a NZ$100,000 transfer in."""
+    with Session(engine_web) as session:
+        portfolio = Portfolio(name="Transfer Fund")
+        keep = Instrument(exchange="NZX", code="KEEP", name="Keep", currency="NZD")
+        moved = Instrument(exchange="NZX", code="MOVED", name="Moved", currency="NZD")
+        session.add_all([portfolio, keep, moved])
+        session.flush()
+        for instrument, day, kind, quantity in (
+            (keep, date(2026, 10, 1), "buy", 100),
+            (moved, date(2026, 10, 15), "adjustment", 10000),
+        ):
+            session.add(
+                Trade(
+                    portfolio_id=portfolio.id,
+                    instrument_id=instrument.id,
+                    trade_date=day,
+                    trade_type=kind,
+                    quantity=Decimal(quantity),
+                    price=Decimal(10),
+                    currency="NZD",
+                    fees=Decimal(0),
+                    source="test",
+                    external_ref=f"transfer-{instrument.code}",
+                )
+            )
+        for instrument, day, close in (
+            (keep, date(2026, 10, 12), 10),
+            (keep, date(2026, 10, 19), 10),
+            (moved, date(2026, 10, 12), 10),
+            (moved, date(2026, 10, 19), 11),
+        ):
+            session.add(
+                Price(
+                    instrument_id=instrument.id,
+                    price_date=day,
+                    close=Decimal(close),
+                    source="test",
+                )
+            )
+        session.commit()
+        pid = portfolio.id
+        expected = load_returns(session, "Transfer Fund", "2026-10-12:2026-10-19", DAY)
+    rows = {r.label: r for r in expected.holdings}
+    assert rows["NZX:MOVED"].percentages.total == Decimal(10)
+    assert expected.markets[0].denominator == expected.total.denominator == Decimal(101000)
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        response = client.get(f"/p/{pid}?period=custom&start=2026-10-12&end=2026-10-19")
+    assert response.status_code == 200
+    assert response.context["report"] == expected
+    assert "10.00%" in response.text
+    assert "9.90%" in response.text
+    for result in (*expected.holdings, *expected.markets, expected.total):
+        assert f"{result.percentages.total:,.2f}%" in response.text
+
+
 def test_holding_detail_income_matches_engine(engine_web):
     with Session(engine_web) as session:
         expected = load_returns(

@@ -121,7 +121,8 @@ and closing 31 March values, and total return. CSV retains full calculation prec
 HTML displays amounts to two decimal places. Realised sales use **historical FIFO cost**,
 including acquisition fees and net of sale fees. Annual performance uses the existing
 returns engine, which starts from opening market value and includes net cash dividends.
-Its percentage denominator is opening value plus purchase outlays. Registry-recorded
+Its percentage denominator is opening value plus purchase outlays plus non-cash
+value moved in (transfers in, gifts, opening balances). Registry-recorded
 splits and consolidations need no extra quantity adjustment. A Yahoo-only split needs
 a matching quantity adjustment. Imported DRPs that include a DRP quantity create the
 linked buy. Add a purchase manually only for residual cash or a partial reinvestment.

@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, f
 from portfolio_digest.alert_config import AlertConfig
 from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import address
+from portfolio_digest.operations import THROTTLE, failure_text, recovery_text
 
 logger = logging.getLogger(__name__)
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
@@ -80,6 +81,8 @@ class ScheduleConfig(BaseModel):
     timezone: str = "Pacific/Auckland"
     recipients: list[str] = Field(default_factory=list)
     kuma_push_url: SecretStr | None = None
+    # Pinged only after a price fetch in which every instrument and rate succeeded.
+    prices_kuma_push_url: SecretStr | None = None
     schedules: list[Schedule]
     alerts: AlertConfig = Field(default_factory=AlertConfig)
 
@@ -122,7 +125,7 @@ class Scheduler:
     config: ScheduleConfig
     state_path: Path
 
-    def run(self, execute, *, now=None, sleep=clock.sleep) -> int:
+    def run(self, execute, *, now=None, sleep=clock.sleep, notify=None) -> int:
         now = now or (lambda: datetime.now(UTC))
         try:
             state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
@@ -139,6 +142,16 @@ class Scheduler:
             }
             if any(value.tzinfo is None for value in due.values()):
                 raise ValueError
+            # Same file as the pending runs, so a restart keeps the once-a-day throttle.
+            notices: dict[str, datetime] = {}
+            for schedule in self.config.schedules:
+                raw = state.get(schedule.name + ":notice")
+                if raw is None:
+                    continue
+                noticed = datetime.fromisoformat(raw)
+                if noticed.tzinfo is None:
+                    raise ValueError
+                notices[schedule.name] = noticed
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
         except (OSError, ValueError, TypeError):
             raise ConfigError("Cannot read scheduler state. Check the state volume.") from None
@@ -154,12 +167,40 @@ class Scheduler:
                                 s.name + ":config": s.model_dump_json() + self.config.timezone
                                 for s in self.config.schedules
                             },
+                            **{name + ":notice": stamp.isoformat() for name, stamp in notices.items()},
                         }
                     )
                 )
                 temporary.replace(self.state_path)
             except OSError:
                 raise ConfigError("Cannot write scheduler state. Check the state volume.") from None
+
+        def emit(text: str, *, recovered: bool) -> None:
+            try:
+                if notify is not None:
+                    notify(text)
+                else:
+                    from portfolio_digest.operations import deliver_operations_notice
+
+                    deliver_operations_notice(self.config, text, recovered=recovered)
+            except Exception:
+                logger.warning("Operations notice could not be delivered.")
+
+        def remember_failure(name: str, instant: datetime, labels: tuple[str, ...]) -> None:
+            last = notices.get(name)
+            if last is not None and instant < last + THROTTLE:
+                return
+            emit(
+                failure_text(name, instant, self.config.timezone, labels),
+                recovered=False,
+            )
+            notices[name] = instant
+
+        def remember_recovery(name: str, instant: datetime) -> None:
+            if name not in notices:
+                return
+            emit(recovery_text(name, instant, self.config.timezone), recovered=True)
+            del notices[name]
 
         # Persist pending occurrences before delivery, so restarts retry failed jobs.
         save()
@@ -169,10 +210,26 @@ class Scheduler:
                 scheduled = due[schedule.name]
                 if scheduled > instant:
                     continue
-                # One catch-up per schedule after downtime, retaining its original period.
-                if execute(schedule, scheduled) != 0:
+                try:
+                    outcome = execute(schedule, scheduled)
+                except Exception:
                     logger.error("Scheduled job failed (%s).", schedule.kind)
+                    remember_failure(schedule.name, instant, ())
+                    save()
+                    raise
+                if isinstance(outcome, tuple):
+                    code, labels = outcome
+                    if isinstance(labels, str):
+                        labels = (labels,)
+                else:
+                    code, labels = outcome, ()
+                # One catch-up per schedule after downtime, retaining its original period.
+                if code != 0:
+                    logger.error("Scheduled job failed (%s).", schedule.kind)
+                    remember_failure(schedule.name, instant, tuple(labels))
+                    save()
                     return 1
+                remember_recovery(schedule.name, instant)
                 due[schedule.name] = schedule.next_run(max(instant, now()), self.config.timezone)
                 save()
             sleep(20)

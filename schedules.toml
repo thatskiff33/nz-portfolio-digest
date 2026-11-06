@@ -4,6 +4,9 @@ timezone = "Pacific/Auckland"
 recipients = []
 # Optional private Uptime Kuma push URL. Keep it in the server copy only, never git.
 # kuma_push_url = "https://monitor.example.invalid/api/push/PRIVATE_TOKEN"
+# Optional push URL for price fetches. Pinged only when every instrument and rate
+# succeeded. Use a separate Push monitor with a 26-hour heartbeat.
+# prices_kuma_push_url = "https://monitor.example.invalid/api/push/PRIVATE_TOKEN"
 
 [[schedules]]
 name = "prices-morning"

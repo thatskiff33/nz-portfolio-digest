@@ -307,8 +307,15 @@ def test_cli_exit_and_kuma_only_on_match(local_engine, monkeypatch, capsys, rows
     monkeypatch.setattr(cli, "AkahuClient", lambda *args: sync_client(rows))
     push = Mock()
     monkeypatch.setattr(cli, "push_success", push)
+    notes = []
+    monkeypatch.setattr(
+        cli,
+        "note_outcome",
+        lambda config, job, *, failed, labels=(), now=None: notes.append((job, failed, labels)),
+    )
     assert cli.main(["akahu", "sync", "--portfolio", "Fictional"]) == exit_code
     assert push.call_count == (1 if exit_code == 0 else 0)
+    assert notes == [("akahu", exit_code != 0, ())]
     output = str(capsys.readouterr())
     assert APP not in output and USER not in output
 

@@ -44,6 +44,7 @@ from portfolio_digest.importing import (
 )
 from portfolio_digest.income import parse_income
 from portfolio_digest.mailers import MailError
+from portfolio_digest.operations import load_notice_config, note_outcome
 from portfolio_digest.manual import add_trade, prepare_trade
 from portfolio_digest.models import (
     PORTFOLIO_NAME_UNIQUE,
@@ -58,7 +59,7 @@ from portfolio_digest.prices.quality import check_data
 from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES, Listing, YahooSource
 from portfolio_digest.prices.symbols import clean_symbol
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
-from portfolio_digest.report_service import run_report
+from portfolio_digest.report_service import ping_monitor, run_report
 from portfolio_digest.reports import ReportError
 from portfolio_digest.returns import ReturnError, period_range
 from portfolio_digest.returns_loader import load_returns
@@ -142,6 +143,14 @@ def cmd_portfolio_list(_: argparse.Namespace) -> int:
 
 
 def cmd_akahu_sync(args: argparse.Namespace) -> int:
+    try:
+        return _cmd_akahu_sync(args)
+    except Exception:
+        note_outcome(load_notice_config(), "akahu", failed=True)
+        raise
+
+
+def _cmd_akahu_sync(args: argparse.Namespace) -> int:
     settings = get_settings()
     if not all(
         token and token.get_secret_value().strip()
@@ -160,10 +169,12 @@ def cmd_akahu_sync(args: argparse.Namespace) -> int:
     if unmapped:
         print(f"Unmapped holdings: {unmapped}. See snapshot report and docs/AKAHU.md.")
     if mismatches or unmapped:
+        note_outcome(load_notice_config(), "akahu", failed=True)
         return 1
     print("Holdings match the ledger.")
     if settings.uptime_kuma_push_url and settings.uptime_kuma_push_url.get_secret_value():
         push_success(settings.uptime_kuma_push_url)
+    note_outcome(load_notice_config(), "akahu", failed=False)
     return 0
 
 
@@ -238,7 +249,9 @@ def _instrument_label(value: str) -> str:
     return ":".join(parts)
 
 
-def cmd_prices_fetch(args: argparse.Namespace) -> int:
+def cmd_prices_fetch(
+    args: argparse.Namespace, *, for_scheduler: bool = False
+) -> int | tuple[int, tuple[str, ...]]:
     settings = get_settings()
     with make_client() as client:
         fetcher = JsonFetcher(client)
@@ -255,10 +268,16 @@ def cmd_prices_fetch(args: argparse.Namespace) -> int:
         )
     if not report.outcomes:
         print("No traded instruments found; nothing to fetch.")
-        return 0
+        return (0, ()) if for_scheduler else 0
     for outcome in report.outcomes:
         print(outcome.describe())
-    return 0 if report.ok else 1
+    labels = tuple(outcome.label for outcome in report.outcomes if outcome.error)
+    code = 0 if report.ok else 1
+    if for_scheduler:
+        return code, labels
+    if code != 0:
+        note_outcome(load_notice_config(), "prices", failed=True, labels=labels)
+    return code
 
 
 def cmd_prices_symbol(args: argparse.Namespace) -> int:
@@ -325,13 +344,18 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
 
     def execute(schedule, scheduled):
         if schedule.kind == "prices":
-            result = cmd_prices_fetch(
-                argparse.Namespace(backfill=False, start=None, instrument=None)
+            fetched = cmd_prices_fetch(
+                argparse.Namespace(backfill=False, start=None, instrument=None),
+                for_scheduler=True,
             )
+            code, labels = fetched if isinstance(fetched, tuple) else (fetched, ())
             # Even a partial fetch may leave a price stale. Evaluate the committed data.
             with session_scope(make_engine()) as session:
                 run_alerts(session, config)
-            return result
+            if code == 0:
+                ping_monitor(config.prices_kuma_push_url)
+                return 0
+            return code, labels
         with session_scope(make_engine()) as session:
             run_report(session, config, schedule.name, now=scheduled)
         return 0

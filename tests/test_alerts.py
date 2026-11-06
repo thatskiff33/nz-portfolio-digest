@@ -300,16 +300,140 @@ def test_scheduler_checks_alerts_after_success_or_partial_fetch(monkeypatch, fet
     monkeypatch.setattr(cli, "make_engine", lambda: None)
     monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext("session"))
     monkeypatch.setattr(
-        cli, "cmd_prices_fetch", lambda _: events.append("fetch committed") or fetch_result
+        cli,
+        "cmd_prices_fetch",
+        lambda *args, **kwargs: events.append("fetch committed") or fetch_result,
     )
     monkeypatch.setattr(cli, "run_alerts", lambda s, c: events.append((s, c)))
 
     def run(_, execute):
-        return execute(Schedule(name="prices", kind="prices", frequency="daily", at=time(18)), NOW)
+        outcome = execute(
+            Schedule(name="prices", kind="prices", frequency="daily", at=time(18)), NOW
+        )
+        return outcome[0] if isinstance(outcome, tuple) else outcome
 
     monkeypatch.setattr(cli.Scheduler, "run", run)
     assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == fetch_result
     assert events == ["fetch committed", ("session", rules)]
+
+
+def test_suppressed_portfolio_is_logged_and_listed_on_dry_run(sample, monkeypatch, caplog, capsys):
+    from contextlib import nullcontext
+
+    from portfolio_digest import cli
+
+    session, _, instrument = sample
+    price = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id, Price.price_date == date(2026, 10, 16)
+        )
+    )
+    price.is_stale = True
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext(session))
+    monkeypatch.setattr(cli, "read_config", lambda _: config())
+    run = alerts.run_alerts
+    monkeypatch.setattr(cli, "run_alerts", lambda *a, **kw: run(*a, **kw, now=NOW))
+    with caplog.at_level("WARNING", logger="portfolio_digest.alerts"):
+        assert cli.main(["alerts", "check", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "Suppressed rules | Imaginary" in out
+    assert "portfolio: valuation is incomplete or stale" in out
+    assert any(
+        record.message == "Alert rule skipped (portfolio): valuation is incomplete or stale."
+        for record in caplog.records
+    )
+    suppressed = [
+        line
+        for line in out.splitlines()
+        if line.startswith("Suppressed") or line.startswith("portfolio:")
+    ]
+    assert suppressed
+    assert not any(char.isdigit() for line in suppressed for char in line)
+    alerts.send.assert_not_called()
+
+
+def test_units_error_is_logged_and_listed_without_figures(sample, monkeypatch, caplog):
+    from portfolio_digest.returns import ReturnError
+
+    monkeypatch.setattr(
+        alerts,
+        "units_at",
+        lambda *a, **k: (_ for _ in ()).throw(ReturnError("held 99 units")),
+    )
+    session, _, _ = sample
+    with caplog.at_level("WARNING", logger="portfolio_digest.alerts"):
+        output = alerts.run_alerts(session, config(), dry_run=True, now=NOW)
+    assert "held 99 units" not in caplog.text
+    assert (
+        "Alert rule skipped (daily:NZX:MADEUP): holding units could not be calculated."
+        in caplog.text
+    )
+    assert (
+        "Alert rule skipped (stale:NZX:MADEUP): holding units could not be calculated."
+        in caplog.text
+    )
+    text = "\n".join(output)
+    assert "daily:NZX:MADEUP: holding units could not be calculated" in text
+    assert "stale:NZX:MADEUP: holding units could not be calculated" in text
+    assert "held 99" not in text
+
+
+def test_return_error_suppresses_portfolio_without_logging_figures(sample, monkeypatch, caplog):
+    from portfolio_digest.returns import ReturnError
+
+    monkeypatch.setattr(
+        alerts,
+        "load_returns",
+        lambda *a, **k: (_ for _ in ()).throw(ReturnError("missing price 123.45")),
+    )
+    session, _, _ = sample
+    with caplog.at_level("WARNING", logger="portfolio_digest.alerts"):
+        output = alerts.run_alerts(session, config(), dry_run=True, now=NOW)
+    assert "123.45" not in caplog.text
+    assert "Alert rule skipped (portfolio): valuation could not be calculated." in caplog.text
+    text = "\n".join(output)
+    assert "portfolio: valuation could not be calculated" in text
+    assert "123.45" not in text
+
+
+def test_price_monitor_pings_only_after_a_clean_fetch(monkeypatch):
+    from argparse import Namespace
+    from contextlib import nullcontext
+    from datetime import time
+
+    from pydantic import SecretStr
+
+    from portfolio_digest import cli
+    from portfolio_digest.scheduling import Schedule
+
+    url = SecretStr("https://monitor.example.invalid/prices-private")
+    rules = config()
+    rules.prices_kuma_push_url = url
+    pings = []
+    monkeypatch.setattr(cli, "read_config", lambda _: rules)
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext("session"))
+    monkeypatch.setattr(cli, "run_alerts", lambda *a: None)
+    monkeypatch.setattr(cli, "ping_monitor", pings.append)
+    outcomes = [(1, ("NZX:MADEUP",)), (0, ())]
+
+    def fetch(*_args, **_kwargs):
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(cli, "cmd_prices_fetch", fetch)
+
+    def run(_, execute):
+        return execute(Schedule(name="prices", kind="prices", frequency="daily", at=time(10, 30)), NOW)
+
+    monkeypatch.setattr(cli.Scheduler, "run", run)
+    assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == (
+        1,
+        ("NZX:MADEUP",),
+    )
+    assert pings == []
+    assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == 0
+    assert pings == [url]
 
 
 def test_portfolio_threshold_is_strict(sample):

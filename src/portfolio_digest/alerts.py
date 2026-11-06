@@ -76,7 +76,7 @@ def push(text: str) -> None:
             if response.status != 200:
                 raise ValueError
     except Exception:
-        logger.warning("Alert email sent, but the optional push failed.")
+        logger.warning("Optional push notification failed.")
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,13 @@ class Trigger:
     text: str
 
 
-def evaluate(session, portfolio, config, now):
+def _skip(skipped: list[tuple[str, str]] | None, key: str, reason: str) -> None:
+    logger.warning("Alert rule skipped (%s): %s.", key, reason)
+    if skipped is not None:
+        skipped.append((key, reason))
+
+
+def evaluate(session, portfolio, config, now, skipped: list[tuple[str, str]] | None = None):
     """Return known rule states. Missing valuation data leaves that rule unchanged."""
     rules = config.alerts
     states: dict[str, Trigger | None] = {}
@@ -124,6 +130,8 @@ def evaluate(session, portfolio, config, now):
         try:
             units = units_at(trades, splits, today)
         except ReturnError:
+            for key in (f"daily:{label}", f"stale:{label}"):
+                _skip(skipped, key, "holding units could not be calculated")
             continue
         if units <= 0:
             states[f"daily:{label}"] = states[f"stale:{label}"] = None
@@ -192,7 +200,11 @@ def evaluate(session, portfolio, config, now):
     try:
         report = load_returns(session, portfolio.name, f"{start}:{end}", today=today)
         total = report.total
-        if not total.flags and total.opening > 0:
+        if total.flags:
+            _skip(skipped, "portfolio", "valuation is incomplete or stale")
+        elif total.opening <= 0:
+            _skip(skipped, "portfolio", "opening value is not positive")
+        else:
             change = total.change / total.opening * Decimal(100)
             states["portfolio"] = (
                 Trigger(
@@ -205,7 +217,7 @@ def evaluate(session, portfolio, config, now):
                 else None
             )
     except ReturnError:
-        pass
+        _skip(skipped, "portfolio", "valuation could not be calculated")
     return states
 
 
@@ -229,7 +241,12 @@ def run_alerts(session, config, *, dry_run=False, now=None):
                     select(AlertState).where(AlertState.portfolio_id == portfolio.id)
                 )
             }
-            evaluated = evaluate(session, portfolio, config, now)
+            skipped: list[tuple[str, str]] = []
+            evaluated = evaluate(session, portfolio, config, now, skipped)
+            if dry_run and skipped:
+                lines = [f"Suppressed rules | {portfolio.name}"]
+                lines.extend(f"{key}: {reason}" for key, reason in skipped)
+                output.append("\n".join(lines))
             due = []
             for key, trigger in evaluated.items():
                 previous = states.get(key)

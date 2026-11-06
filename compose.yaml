@@ -28,6 +28,9 @@ services:
     command: ["migrate"]
     volumes:
       - ./schedules.toml:/app/schedules.toml:ro
+      # Shared with the scheduler so Akahu and manual price fetches can remember
+      # whether an operations notice was already sent today.
+      - scheduler-state:/app/state
     environment: &app_environment
       DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
       AKAHU_APP_TOKEN: ${AKAHU_APP_TOKEN:-}
@@ -97,6 +100,8 @@ services:
       PGPASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
       PGDATABASE: portfolio
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      # Optional Uptime Kuma push URL. Pinged only after a successful dump. Never log it.
+      BACKUP_PUSH_URL: ${BACKUP_PUSH_URL:-}
     volumes:
       - ./scripts/backup.sh:/scripts/backup.sh:ro
       # Refuse to start if BACKUP_DIR is missing, rather than Docker creating it owned by

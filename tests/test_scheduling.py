@@ -1,7 +1,8 @@
 """Calendar boundaries, DST, configuration validation and restart behaviour."""
 
 import json
-from datetime import UTC, date, datetime
+import re
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -72,6 +73,7 @@ def test_checked_in_config_shares_prices_and_reports():
         'timezone="private-token"\nschedules=[]',
         'recipients=["bad\\nprivate-token"]\nschedules=[]',
         'kuma_push_url="private-token"\nschedules="wrong"',
+        'prices_kuma_push_url="private-token"\nschedules="wrong"',
         '[[schedules]]\nname="x"\nkind="report"\nfrequency="daily"\nat="09:00:12"',
     ],
 )
@@ -206,3 +208,129 @@ def test_shared_scheduler_runs_every_configured_job_after_downtime(tmp_path):
     }
     state = json.loads(state_path.read_text())
     assert all(datetime.fromisoformat(state[s.name]) > due for s in config.schedules)
+
+
+class StopLoop(Exception):
+    pass
+
+
+def seeded_weekly(tmp_path):
+    schedule = weekly()
+    config = ScheduleConfig(schedules=[schedule])
+    path = tmp_path / "state.json"
+    due = datetime(2026, 11, 6, 6, tzinfo=UTC)
+    path.write_text(
+        json.dumps(
+            {
+                "weekly": due.isoformat(),
+                "weekly:config": schedule.model_dump_json() + config.timezone,
+            }
+        )
+    )
+    return config, path
+
+
+def digits_outside_dates(text: str) -> str:
+    return re.sub(r"\d{4}-\d{2}-\d{2}", "", text)
+
+
+def test_failing_job_notifies_once_a_day_and_once_when_it_recovers(tmp_path):
+    config, path = seeded_weekly(tmp_path)
+    sent = []
+    start = datetime(2026, 11, 6, 7, tzinfo=UTC)
+
+    def fail_at(when):
+        code = Scheduler(config, path).run(
+            lambda *a: (1, ("NZX:MADEUP", "https://monitor.example/secret-token")),
+            now=lambda: when,
+            sleep=lambda _: pytest.fail("slept after a failure"),
+            notify=sent.append,
+        )
+        assert code == 1
+
+    fail_at(start)
+    fail_at(start + timedelta(hours=1))
+    fail_at(start + timedelta(hours=23))
+    assert len(sent) == 1
+    assert "NZX:MADEUP" in sent[0]
+    assert "secret-token" not in sent[0]
+    assert "https://" not in sent[0]
+    stored = json.loads(path.read_text())
+    assert stored["weekly"] == datetime(2026, 11, 6, 6, tzinfo=UTC).isoformat()
+    assert "weekly:notice" in stored
+
+    fail_at(start + timedelta(hours=24))
+    assert len(sent) == 2
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: 0,
+            now=lambda: start + timedelta(hours=25),
+            sleep=lambda _: (_ for _ in ()).throw(StopLoop()),
+            notify=sent.append,
+        )
+    assert len(sent) == 3
+    assert "recovered" in sent[-1]
+    assert "NZX:MADEUP" not in sent[-1]
+    assert "weekly:notice" not in json.loads(path.read_text())
+    for note in sent:
+        assert not re.search(r"\d", digits_outside_dates(note))
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: 0,
+            now=lambda: start + timedelta(hours=26),
+            sleep=lambda _: (_ for _ in ()).throw(StopLoop()),
+            notify=sent.append,
+        )
+    assert len(sent) == 3
+
+
+def test_job_exception_notifies_without_the_error_text(tmp_path):
+    config, path = seeded_weekly(tmp_path)
+    sent = []
+
+    def explode(*_args):
+        raise RuntimeError("provider said 42")
+
+    with pytest.raises(RuntimeError, match="42"):
+        Scheduler(config, path).run(
+            explode,
+            now=lambda: datetime(2026, 11, 6, 7, tzinfo=UTC),
+            notify=sent.append,
+        )
+    assert sent == [
+        "The weekly job failed on 2026-11-06.\n\nIt will be retried.",
+    ]
+    assert not re.search(r"\d", digits_outside_dates(sent[0]))
+
+
+def test_notice_delivery_failure_does_not_stop_the_scheduler(tmp_path, caplog):
+    config, path = seeded_weekly(tmp_path)
+    calls = []
+    start = datetime(2026, 11, 6, 7, tzinfo=UTC)
+
+    def notify(text):
+        calls.append(text)
+        raise RuntimeError("mailbox down")
+
+    with caplog.at_level("WARNING"):
+        assert (
+            Scheduler(config, path).run(
+                lambda *a: 1,
+                now=lambda: start,
+                notify=notify,
+            )
+            == 1
+        )
+    assert len(calls) == 1
+    assert "could not be delivered" in caplog.text
+    assert (
+        Scheduler(config, path).run(
+            lambda *a: 1,
+            now=lambda: start + timedelta(hours=1),
+            notify=notify,
+        )
+        == 1
+    )
+    assert len(calls) == 1

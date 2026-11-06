@@ -933,3 +933,116 @@ def test_manual_partial_fetch_retains_failure_exit_and_output(monkeypatch, capsy
     assert cli.cmd_prices_fetch(Namespace()) == 1
     assert "NZX:MISSING: FAILED, No data" in capsys.readouterr().out
     assert report.scheduler_complete
+
+
+def test_rate_limit_storm_stops_source_after_three_instruments_and_resets_next_run(monkeypatch):
+    from portfolio_digest import db
+    from portfolio_digest.prices import fetch
+
+    first = date(2026, 10, 1)
+    holdings = [Holding(i, "NZX", f"TEST{i}", "NZD", None, first, first, True) for i in range(1, 7)]
+    session = MagicMock()
+    session.scalar.return_value = None
+    session.execute.return_value.all.return_value = []
+    session.get.return_value = Instrument(split_scanned_at=None)
+    monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: lambda: session)
+    monkeypatch.setattr(fetch, "held_instruments", lambda *args: holdings)
+    waits = []
+    monkeypatch.setattr(fetch.time, "sleep", waits.append)
+    for name in ("_save_prices", "_save_rates", "_save_splits"):
+        monkeypatch.setattr(fetch, name, MagicMock())
+    requests = []
+
+    def storm(request):
+        requests.append(request)
+        return httpx.Response(429, headers={"Retry-After": "60"})
+
+    with httpx.Client(transport=httpx.MockTransport(storm)) as client:
+        source = YahooSource(JsonFetcher(client, sleep=lambda _: pytest.fail("429 retried")))
+        for run in range(2):
+            report = run_fetch(
+                MagicMock(),
+                Sources(source, ()),
+                now=datetime(2026, 10, 3, 22, tzinfo=UTC),
+                base_currency="NZD",
+            )
+            assert len(requests) == 3 * (run + 1)
+            assert len(report.instrument_outcomes) == 6
+            assert all("HTTP 429" in o.error for o in report.instrument_outcomes[:3])
+            assert all("circuit open" in o.error for o in report.instrument_outcomes[3:])
+            assert not report.ok
+    assert waits == [0.1] * 10
+
+
+@pytest.mark.parametrize("hours", [0, 23, 24, 25])
+def test_full_split_scan_is_limited_to_once_in_24_hours(monkeypatch, hours):
+    from datetime import timedelta
+
+    from portfolio_digest.prices import fetch
+
+    first, recent = date(2020, 1, 1), date(2026, 10, 1)
+    scanned = datetime(2026, 10, 3, 12, tzinfo=UTC)
+    instrument = Instrument(split_scanned_at=scanned)
+    session = MagicMock()
+    session.get.return_value = instrument
+    session.scalar.side_effect = [recent, first, None]
+    session.execute.return_value.all.return_value = []
+    source = FakePriceSource({recent: Decimal("10")})
+    calls = []
+    history = source.history
+
+    def record(*args, **kwargs):
+        calls.append(kwargs["split_start"])
+        return history(*args, **kwargs)
+
+    source.history = record
+    for name in ("_save_prices", "_save_splits"):
+        monkeypatch.setattr(fetch, name, MagicMock())
+    holding = Holding(1, "NASDAQ", "INVENTED", "USD", None, first, first, True)
+    now = scanned + timedelta(hours=hours)
+    outcome = fetch._update_instrument(session, source, holding, now, False, None)
+    assert outcome.error is None
+    assert calls == [
+        first if hours >= 24 else fetch_start(first, recent, holding.last_day_needed(now))
+    ]
+    assert instrument.split_scanned_at == (now if hours >= 24 else scanned)
+    assert outcome.fetched == 1
+
+
+def test_source_circuit_counts_consecutive_rate_limits_only():
+    from portfolio_digest.prices.fetch import _RunSource
+    from portfolio_digest.prices.http import RateLimited
+
+    source = MagicMock(name="invented")
+    source.name = "invented"
+    source.history.side_effect = [
+        RateLimited("HTTP 429"),
+        RateLimited("HTTP 429"),
+        PriceHistory({}, {}),
+        RateLimited("HTTP 429"),
+        SourceError("HTTP 503"),
+        RateLimited("HTTP 429"),
+        RateLimited("HTTP 429"),
+        RateLimited("HTTP 429"),
+    ]
+    circuit = _RunSource(source)
+    for expected in (
+        RateLimited,
+        RateLimited,
+        None,
+        RateLimited,
+        SourceError,
+        RateLimited,
+        RateLimited,
+        RateLimited,
+    ):
+        if expected:
+            with pytest.raises(expected):
+                circuit.history("TEST", date(2026, 1, 1), date(2026, 1, 2))
+        else:
+            assert circuit.history("TEST", date(2026, 1, 1), date(2026, 1, 2)) == PriceHistory(
+                {}, {}
+            )
+    with pytest.raises(SourceError, match="circuit open"):
+        circuit.history("TEST", date(2026, 1, 1), date(2026, 1, 2))
+    assert source.history.call_count == 8

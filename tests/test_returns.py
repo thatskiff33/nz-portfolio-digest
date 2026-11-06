@@ -481,3 +481,42 @@ def test_holdings_sold_before_the_period_are_left_out():
     paid_after_sale = replace(gone, income=(Payment(MID, D(1), "NZD"),))
     report = calculate_returns((paid_after_sale,), START, END, {})
     assert report.total.amounts.dividends == 1
+
+
+def test_lookup_matches_linear_selection_with_logarithmic_work(monkeypatch):
+    from bisect import bisect_left, bisect_right
+    from datetime import timedelta
+
+    from portfolio_digest import returns
+    from portfolio_digest.prices.calendars import for_exchange
+
+    first = date(2000, 1, 1)
+    observations = [Observation(first + timedelta(days=n), D(n)) for n in range(10_000)]
+    # Stable ordering must keep the original first observation on a duplicate date.
+    observations.insert(4001, Observation(observations[4000].day, D(99999)))
+    points = returns.ObservationSeries(reversed(observations))
+    reads = 0
+
+    def counted(bisect):
+        def search(points, day, *, key):
+            def read(point):
+                nonlocal reads
+                reads += 1
+                return key(point)
+
+            return bisect(points, day, key=read)
+
+        return search
+
+    monkeypatch.setattr(returns, "bisect_left", counted(bisect_left))
+    monkeypatch.setattr(returns, "bisect_right", counted(bisect_right))
+    for n in range(180):
+        day = first + timedelta(days=9999 * n // 179)
+        flags = set()
+        expected = max((p for p in points if p.day <= day), key=lambda p: p.day)
+        assert returns._lookup(points, day, "price", flags, for_exchange("NZX")) == expected.value
+        assert flags == set()
+    # A linear scan would inspect 1.8 million observations for these samples.
+    assert 0 < reads < 30 * 180
+    with pytest.raises(ReturnError, match="Missing price"):
+        returns._lookup(points, first - timedelta(days=1), "price", set(), for_exchange("NZX"))

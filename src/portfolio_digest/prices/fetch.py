@@ -418,9 +418,9 @@ def _update_instrument(
             for day, ratio in registry_splits.items()
         ):
             raise SourceError("Yahoo split ratio conflicts with a recorded registry action.")
-        if {day: ratio for day, ratio in recorded_splits.items() if day >= scan_start} != {
-            day: ratio for day, ratio in history.splits.items() if day >= scan_start
-        }:
+        if begin > full_start and {
+            day: ratio for day, ratio in recorded_splits.items() if day >= scan_start
+        } != {day: ratio for day, ratio in history.splits.items() if day >= scan_start}:
             # Do not reconcile events until the full refresh succeeds.
             history = source.history(
                 symbol, full_start, end, currency=h.currency, split_start=full_start

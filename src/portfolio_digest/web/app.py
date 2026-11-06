@@ -227,16 +227,17 @@ def create_app(
             today = datetime.now(ZoneInfo(timezone)).date()
             activity = [t.trade_date for t in trades] + [i.paid_date for i in income]
             begin, finish = period_dates("all", today, min(activity))
-            data = load_portfolio_inputs(session, p, begin, finish, instrument_id=iid)
             result, error = None, None
+            prices = ()
             try:
+                data = load_portfolio_inputs(session, p, begin, finish, instrument_id=iid)
+                prices = data.holdings[0].prices if data.holdings else ()
                 if data.holdings:
                     result = holding_return(
                         data.holdings[0], begin, finish, data.rates, data.base_currency
                     )
             except ReturnError as exc:
                 error = str(exc)
-            prices = data.holdings[0].prices if data.holdings else ()
             count = len(prices)
             indices = sorted({(count - 1) * n // 179 for n in range(180)}) if count else []
             return render(

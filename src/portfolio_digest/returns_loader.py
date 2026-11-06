@@ -181,9 +181,19 @@ def load_portfolio_inputs(
                 FX,
             )
 
+    trades_by_id = defaultdict(list)
+    income_by_id = defaultdict(list)
+    splits_by_id = defaultdict(list)
+    for trade in trades:
+        trades_by_id[trade.instrument_id].append(trade)
+    for payment in income:
+        income_by_id[payment.instrument_id].append(payment)
+    for split in split_rows:
+        splits_by_id[split.instrument_id].append(split)
+
     holdings = []
     for instrument in instruments:
-        instrument_trades = [t for t in trades if t.instrument_id == instrument.id]
+        instrument_trades = trades_by_id[instrument.id]
         if any(t.currency != instrument.currency for t in instrument_trades):
             raise ReturnError(
                 "Trade currency differs from instrument currency; normalise it first."
@@ -215,15 +225,13 @@ def load_portfolio_inputs(
                         p.withholding_tax,
                         p.imputation_credits,
                     )
-                    for p in income
-                    if p.instrument_id == instrument.id
+                    for p in income_by_id[instrument.id]
                 ),
                 tuple(
                     SplitEvent(
                         s.split_date, s.shares_before, s.shares_after, s.source == "registry"
                     )
-                    for s in split_rows
-                    if s.instrument_id == instrument.id
+                    for s in splits_by_id[instrument.id]
                 ),
                 instrument.name,
             )

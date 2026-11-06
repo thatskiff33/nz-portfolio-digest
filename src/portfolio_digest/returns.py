@@ -65,6 +65,8 @@ class ObservationSeries(tuple):
     """Stable date ordering prepared once for logarithmic lookups."""
 
     def __new__(cls, points=()):
+        if isinstance(points, cls):
+            return points
         return super().__new__(cls, sorted(points, key=lambda p: p.day))
 
 

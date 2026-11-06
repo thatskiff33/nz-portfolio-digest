@@ -206,3 +206,86 @@ def test_shared_scheduler_runs_every_configured_job_after_downtime(tmp_path):
     }
     state = json.loads(state_path.read_text())
     assert all(datetime.fromisoformat(state[s.name]) > due for s in config.schedules)
+
+
+@pytest.mark.parametrize(
+    "report_time,price_time,price_frequency,price_options,warns",
+    [
+        ("08:00", "10:30", "daily", {}, True),
+        ("10:30", "10:30", "daily", {}, True),
+        ("19:00", "10:30", "daily", {}, False),
+        ("19:00", "10:30", "weekly", {"weekday": "monday"}, True),
+        ("19:00", "10:30", "monthly", {"day": 2}, True),
+        ("19:00", "10:30", "monthly", {"day": 1}, False),
+        ("19:00", "10:30", "yearly", {"day": 1, "month": 4}, True),
+    ],
+)
+def test_report_timing_warning_at_startup(
+    tmp_path, caplog, report_time, price_time, price_frequency, price_options, warns
+):
+    config = ScheduleConfig(
+        schedules=[
+            Schedule(name="monthly", kind="report", frequency="monthly", at=report_time),
+            Schedule(
+                name="prices",
+                kind="prices",
+                frequency=price_frequency,
+                at=price_time,
+                **price_options,
+            ),
+        ]
+    )
+
+    class StopLoop(Exception):
+        pass
+
+    def stop(_):
+        raise StopLoop
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, tmp_path / "state.json").run(
+            lambda *args: 0, now=lambda: datetime(2026, 11, 1, tzinfo=UTC), sleep=stop
+        )
+    assert ("Report monthly at" in caplog.text) == warns
+    if warns:
+        assert caplog.text.count("Report monthly at") == 1
+        assert report_time in caplog.text
+
+
+def test_default_report_times_and_startup_have_no_timing_warnings(tmp_path, caplog):
+    from datetime import time
+    from pathlib import Path
+
+    config = read_config(Path("schedules.toml"))
+    assert config.named_report("monthly").at == time(19)
+    assert config.named_report("year-end").at == time(19)
+    assert config.report_timing_warnings() == []
+
+    class StopLoop(Exception):
+        pass
+
+    def stop(_):
+        raise StopLoop
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, tmp_path / "state.json").run(
+            lambda *args: 0, now=lambda: datetime(2026, 11, 1, tzinfo=UTC), sleep=stop
+        )
+    assert not caplog.records
+
+
+def test_collective_weekly_fetches_cover_daily_reports():
+    from portfolio_digest.scheduling import WEEKDAYS
+
+    config = ScheduleConfig(
+        schedules=[
+            Schedule(name="daily", kind="report", frequency="daily", at="19:00"),
+            *(
+                Schedule(name=day, kind="prices", frequency="weekly", weekday=day, at="10:30")
+                for day in WEEKDAYS
+            ),
+        ]
+    )
+    assert config.report_timing_warnings() == []
+    config.schedules.pop()
+    assert config.report_timing_warnings()

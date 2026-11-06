@@ -118,9 +118,10 @@ class ScheduleConfig(BaseModel):
         for report in self.schedules:
             if report.kind != "report":
                 continue
-            if any(
-                _price_runs_on_every_report_day(price, report) and price.at < report.at
-                for price in prices
+            earlier = [price for price in prices if price.at < report.at]
+            weekly_days = {price.weekday for price in earlier if price.frequency == "weekly"}
+            if weekly_days == set(WEEKDAYS) or any(
+                _price_runs_on_every_report_day(price, report) for price in earlier
             ):
                 continue
             warnings.append(

@@ -143,6 +143,11 @@ state or committing the database can cause a duplicate. Partial recipient reject
 also fails the send; some recipients may already have received it. Check the provider
 before a manual retry. Keep the state volume and run only one scheduler replica.
 Inspect it with `docker compose logs scheduler`.
+The scheduler writes `/tmp/scheduler-heartbeat` every time around its loop. Compose
+reports it healthy while that file is less than 30 minutes old, so a slow price fetch
+does not look like a crash. The migrate, scheduler and web containers have a read-only
+root filesystem, no extra capabilities and a 512 MB memory cap. `/tmp` is writable, and
+so is the scheduler state volume.
 
 ## Email reports
 
@@ -335,7 +340,9 @@ password.
 ## Private dashboard over Tailscale
 
 The `web` service shares the app package and database. It runs FastAPI on container port
-8000 with one worker. Only its host binding is published; the database remains private.
+8000 with one worker. `GET /healthz` returns `ok` and does not open a session or read the
+database; Compose uses it as the web healthcheck. Only its host binding is published; the
+database remains private.
 The default is `127.0.0.1:8000`. Never publish it on a wildcard or public address, configure
 router forwarding, or use Tailscale Funnel.
 
@@ -369,7 +376,9 @@ ignored, including on a bracketed IPv6 bind. Any other Host is rejected. The all
 is not opened to every IPv6 address. Forwarded headers are not trusted, and redirects
 are relative paths on this site, never a URL built from the Host header.
 
-Every page needs a sign-in, including overview, holdings, imports and reconciliation.
+Every portfolio page needs a sign-in, including overview, holdings, imports and
+reconciliation. The liveness endpoint `/healthz` stays available without sign-in, but
+requires an allowed Host and never creates or refreshes a session.
 A signed-out visit returns to the sign-in form, then back to the path you asked for
 after a successful sign-in. That return path has to be a path on this site, beginning
 with a single slash. Anything else, including another site, a protocol-relative URL or

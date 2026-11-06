@@ -7,7 +7,7 @@ from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -141,6 +141,11 @@ def create_app(
     templates.env.filters["quantity"] = lambda n: format(n.normalize(), "f")
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
+    @app.get("/healthz")
+    def healthz() -> PlainTextResponse:
+        """Liveness only. Does not open a session or read the database."""
+        return PlainTextResponse("ok")
+
     def public(request: Request) -> bool:
         path = request.url.path
         method = request.method
@@ -154,16 +159,17 @@ def create_app(
     async def headers(request: Request, call_next):
         path = request.url.path
         static = path == "/static" or path.startswith("/static/")
-        # Static files must not create a session or refresh the idle timer.
+        health = path == "/healthz" and request.method in {"GET", "HEAD"}
+        # Static files and liveness checks must not create or refresh a session.
         denied = None
-        if not static:
+        if not static and not health:
             try:
                 request.state.session_id, request.state.browser = security.browser(request)
             except HTTPException as exc:
                 denied = HTMLResponse(str(exc.detail), status_code=exc.status_code)
         if denied is not None:
             response = denied
-        elif static or public(request) or request.state.browser.authenticated:
+        elif static or health or public(request) or request.state.browser.authenticated:
             response = await call_next(request)
         elif request.method in {"GET", "HEAD"}:
             response = see_other(_login_location(request))

@@ -170,6 +170,24 @@ def sign_in(client):
     return token(response)
 
 
+@pytest.mark.parametrize("secure_cookie", [False, True])
+def test_healthz_returns_ok_without_a_session(secure_cookie):
+    engine = create_engine("sqlite://")
+
+    def refuse_connection(*_args, **_kwargs):
+        raise AssertionError("health check touched the database")
+
+    engine.connect = refuse_connection
+    app = create_app(engine, PASSWORD, secure_cookie=secure_cookie)
+    with TestClient(app, base_url=BASE_URL) as client:
+        client.cookies.set(app.state.security.cookie_name, "not-a-session")
+        response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.text == "ok"
+    assert "set-cookie" not in response.headers
+    assert app.state.security.sessions == {}
+
+
 @pytest.mark.parametrize(
     "path,text",
     [
@@ -731,13 +749,15 @@ def test_signed_out_pages_redirect_before_loading_portfolios(client, engine_web,
         event.remove(engine_web, "before_cursor_execute", no_query)
 
 
-@pytest.mark.parametrize("path", ["/p/1/trade", "/p/1/reconcile", "/missing", "/logout"])
+@pytest.mark.parametrize(
+    "path", ["/p/1/trade", "/p/1/reconcile", "/missing", "/logout", "/healthz"]
+)
 def test_signed_out_writes_require_login(client, path):
     assert client.post(path, data={"csrf": ""}).status_code == 401
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD", "POST"])
-@pytest.mark.parametrize("path", PROTECTED_PATHS + ["/login", "/static/dashboard.css"])
+@pytest.mark.parametrize("path", PROTECTED_PATHS + ["/login", "/static/dashboard.css", "/healthz"])
 def test_untrusted_hosts_rejected_before_sessions(client, method, path):
     response = client.request(
         method, path, headers={"host": "evil.example:8000"}, follow_redirects=False
@@ -838,13 +858,16 @@ def test_anonymous_session_expires_at_ten_minutes(client, session_clock):
     assert first not in client.app.state.security.sessions
 
 
-def test_authenticated_idle_expiry_and_static_does_not_refresh(client, session_clock):
+@pytest.mark.parametrize("path", ["/static/dashboard.css", "/healthz"])
+def test_authenticated_idle_expiry_and_public_checks_do_not_refresh(client, session_clock, path):
     sign_in(client)
     ident = client.cookies.get("portfolio_session")
     session_clock[0] += 1799
     assert client.get("/p/1").status_code == 200
     session_clock[0] += 1799
-    assert client.get("/static/dashboard.css").status_code == 200
+    response = client.get(path)
+    assert response.status_code == 200
+    assert "set-cookie" not in response.headers
     session_clock[0] += 1
     response = client.get("/p/1", follow_redirects=False)
     assert response.status_code == 303

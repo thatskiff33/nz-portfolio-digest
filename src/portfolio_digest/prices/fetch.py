@@ -13,9 +13,10 @@ marked stale. A carried-forward row never replaces a real one.
 """
 
 import logging
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import Engine, delete, func, select
@@ -26,7 +27,7 @@ from sqlalchemy.orm import Session
 from portfolio_digest.db import session_scope
 from portfolio_digest.models import FxRate, Instrument, Price, Split, Trade
 from portfolio_digest.prices import calendars
-from portfolio_digest.prices.http import SourceError
+from portfolio_digest.prices.http import RateLimited, SourceError
 from portfolio_digest.prices.sources import FxSource, Listing, PriceSource, _fits_numeric
 from portfolio_digest.prices.symbols import UnknownSymbol
 from portfolio_digest.returns import units_at
@@ -239,6 +240,40 @@ def fetch_start(first_needed: date, last_good: date | None, last_needed: date) -
     )
 
 
+class _RunSource:
+    """Circuit state belongs to one source for one fetch run."""
+
+    def __init__(self, source):
+        self.source = source
+        self.name = source.name
+        self.consecutive_limits = 0
+
+    def symbol(self, listing):
+        return self.source.symbol(listing)
+
+    def _call(self, method, *args, **kwargs):
+        if self.consecutive_limits >= 3:
+            raise SourceError(
+                f"{self.name} skipped: circuit open after 3 consecutive HTTP 429 responses."
+            )
+        try:
+            result = method(*args, **kwargs)
+        except RateLimited:
+            self.consecutive_limits += 1
+            raise
+        except SourceError:
+            self.consecutive_limits = 0
+            raise
+        self.consecutive_limits = 0
+        return result
+
+    def history(self, *args, **kwargs):
+        return self._call(self.source.history, *args, **kwargs)
+
+    def rates(self, *args, **kwargs):
+        return self._call(self.source.rates, *args, **kwargs)
+
+
 def run_fetch(
     engine: Engine,
     sources: Sources,
@@ -256,6 +291,12 @@ def run_fetch(
     as it goes, so one failure never loses the rest.
     """
     report = FetchReport()
+    wrapped = {}
+
+    def wrap(source):
+        return wrapped.setdefault(id(source), _RunSource(source))
+
+    sources = Sources(wrap(sources.prices), tuple(wrap(source) for source in sources.fx))
     with session_scope(engine) as session:
         holdings = held_instruments(session, only)
     if only:
@@ -266,7 +307,9 @@ def run_fetch(
                 report.outcomes.append(outcome)
                 report.instrument_outcomes.append(outcome)
 
-    for holding in holdings:
+    for index, holding in enumerate(holdings):
+        if index:
+            time.sleep(0.1)
         try:
             with session_scope(engine) as session:
                 outcome = _update_instrument(
@@ -363,26 +406,36 @@ def _update_instrument(
             select(func.min(Price.price_date)).where(Price.instrument_id == h.instrument_id)
         )
         full_start = min(h.first_trade, first_stored or h.first_trade, begin)
-        history = source.history(symbol, begin, end, currency=h.currency, split_start=full_start)
+        instrument = session.get(Instrument, h.instrument_id)
+        scanned = instrument.split_scanned_at
+        if scanned is not None and scanned.tzinfo is None:
+            scanned = scanned.replace(tzinfo=UTC)
+        scan_due = scanned is None or now - scanned >= timedelta(days=1)
+        scan_start = full_start if scan_due else begin
+        history = source.history(symbol, begin, end, currency=h.currency, split_start=scan_start)
         if any(
             day in history.splits and history.splits[day] != ratio
             for day, ratio in registry_splits.items()
         ):
             raise SourceError("Yahoo split ratio conflicts with a recorded registry action.")
         if begin > full_start and {
-            day: ratio for day, ratio in recorded_splits.items() if day >= full_start
-        } != {day: ratio for day, ratio in history.splits.items() if day >= full_start}:
+            day: ratio for day, ratio in recorded_splits.items() if day >= scan_start
+        } != {day: ratio for day, ratio in history.splits.items() if day >= scan_start}:
             # Do not reconcile events until the full refresh succeeds.
             history = source.history(
                 symbol, full_start, end, currency=h.currency, split_start=full_start
             )
             begin = full_start
+            scan_start = full_start
+            scan_due = True
         closes = {d: c for d, c in history.closes.items() if begin <= d <= end}
         splits = history.splits | registry_splits
-        _save_splits(session, h.instrument_id, splits, source.name, full_start)
+        _save_splits(session, h.instrument_id, splits, source.name, scan_start)
         recorded_splits = {
-            day: ratio for day, ratio in recorded_splits.items() if day < full_start
+            day: ratio for day, ratio in recorded_splits.items() if day < scan_start
         } | splits
+        if scan_due:
+            instrument.split_scanned_at = now
     except (SourceError, UnknownSymbol) as exc:
         outcome.error = str(exc)
         log.warning("%s: %s", h.label, exc)

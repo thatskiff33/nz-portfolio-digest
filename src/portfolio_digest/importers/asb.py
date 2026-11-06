@@ -232,7 +232,7 @@ def parse_contract_note(raw: bytes, where: str) -> ParsedTrade:
         where=where,
         exchange=exchange,
         code=code,
-        trade_date=parse_date(fields["date"], "Trade date"),
+        trade_date=parse_date(fields["date"], "Trade date", allow_two_digit_year=True),
         trade_type=_direction(fields, body),
         quantity=quantity,
         price=price,

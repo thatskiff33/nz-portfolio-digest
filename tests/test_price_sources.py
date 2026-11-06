@@ -63,7 +63,7 @@ def test_json_fetcher_stops_after_its_attempt_limit():
 
     with (
         httpx.Client(transport=httpx.MockTransport(handler)) as client,
-        pytest.raises(SourceError, match="gave up after 2 attempts"),
+        pytest.raises(SourceError, match="HTTP 429"),
     ):
         JsonFetcher(client, attempts=2, backoff=0, sleep=lambda _: None).get(
             "https://example.test/prices"

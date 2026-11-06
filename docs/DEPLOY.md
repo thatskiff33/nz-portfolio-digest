@@ -126,11 +126,23 @@ autumn time runs once, at its first occurrence.
 
 Pending runs live in the `scheduler-state` volume. First startup schedules future jobs;
 restarts run one catch-up per schedule for a missed occurrence, retaining its original
-report period, then resume future runs. Failed jobs exit non-zero, are logged and are retried
-by Compose on restart. Mail delivery is at least once: a crash after provider acceptance
-but before saving state can cause a duplicate. Partial recipient rejection also fails the
-send; some recipients may already have received it. Check the provider before a manual retry.
-Run only one scheduler replica. Inspect it with `docker compose logs scheduler`.
+report period, then resume future runs. Intervening skipped occurrences are logged.
+Each failed job stays pending while other schedules continue. Retries start 30 minutes
+after the failed attempt finishes, then wait 60, 120, 240 and at most 360 minutes.
+Retry times, failure counts and successful portfolio deliveries are saved in the existing
+JSON file and survive restarts. A partial instrument price fetch advances with warnings;
+if every instrument fails, the price job retries even when FX succeeds. No holdings counts
+as success. Alerts still evaluate committed data after partial fetches.
+Only configuration or scheduler-state errors stop the process with a non-zero exit.
+State writes flush and sync the temporary file before replacing the saved state.
+Changing a schedule's timing or kind, or removing it, discards its pending occurrence
+with a log entry; unrelated configuration fields preserve it.
+
+Mail delivery is at least once: a crash after provider acceptance but before saving
+state or committing the database can cause a duplicate. Partial recipient rejection
+also fails the send; some recipients may already have received it. Check the provider
+before a manual retry. Keep the state volume and run only one scheduler replica.
+Inspect it with `docker compose logs scheduler`.
 The scheduler writes `/tmp/scheduler-heartbeat` every time around its loop. Compose
 reports it healthy while that file is less than 30 minutes old, so a slow price fetch
 does not look like a crash. The migrate, scheduler and web containers have a read-only
@@ -229,9 +241,12 @@ removed; the deploy script disables an installed legacy year-end timer before re
 the scheduler. On a manual upgrade, run the disable commands above.
 
 Annual catch-up retains the due occurrence's tax year, even if the scheduler restarts
-in a later year. Delivery stops on the first failed portfolio. A retry may resend
-earlier portfolios, so check the provider after a partial send. Monitoring is pinged
-only after every portfolio succeeds. US closing data may not yet be stored at 09:00 NZDT
+in a later year. Delivery continues after a failed portfolio and records each successful
+portfolio in the scheduler JSON file, scoped to the schedule and original due time.
+Retries skip recorded portfolios; these records are cleared when the occurrence advances.
+Monitoring is pinged only after every portfolio succeeds. Manual reruns send again.
+Check the provider after an uncertain send, since a crash before checkpointing or partial
+recipient acceptance can still cause duplicate email. US closing data may not yet be stored at 09:00 NZDT
 on 1 April; inspect carried-forward flags and refresh through 31 March before a manual
 rerun if needed.
 
@@ -448,10 +463,15 @@ valuations suppress that evaluation rather than inventing figures.
 
 Emails list the triggering figures and a reminder to open the private dashboard over
 Tailscale. They reuse `MAILER`, sender and `recipients` (or `MAIL_OWNER` when empty).
-Delivery state lives in the database and survives scheduler restarts. Each portfolio
-and rule sends once until a successful evaluation clears it; optional `cooldown_hours`
-allows repeats while it remains triggered. Failed email delivery is retried without
-recording a sent alert. A process failure after email delivery but before the database
+Delivery state lives in the database and survives scheduler restarts. Each portfolio is
+locked, evaluated and committed separately. Successful sends and rule clears commit
+before moving to the next portfolio, so a later failure cannot roll them back.
+Scheduled checks also checkpoint each completed portfolio in the scheduler JSON file
+and skip it on retries of that occurrence. Dry runs neither commit nor checkpoint.
+Each portfolio and rule sends once until a successful evaluation clears it; optional
+`cooldown_hours` allows repeats while it remains triggered on later checks.
+Failed email delivery is retried without recording a sent alert; other portfolios
+continue before the overall failure is reported. A process failure after email delivery but before the database
 commit can cause a duplicate on retry, since email and the database cannot commit
 atomically.
 

@@ -5,7 +5,8 @@ import logging
 import os
 import time as clock
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Literal
@@ -129,6 +130,89 @@ def read_config(path: Path) -> ScheduleConfig:
         ) from None
 
 
+class SchedulerStateError(ConfigError):
+    """A state failure must stop delivery, including inside portfolio handlers."""
+
+
+@dataclass
+class DeliveryCheckpoint:
+    """Successful portfolios for one schedule and its original due instant."""
+
+    delivered: set[int]
+    save: Callable[[], None]
+
+    def complete(self, portfolio_id: int) -> None:
+        self.delivered.add(portfolio_id)
+        self.save()
+
+
+def _identity(config: dict, timezone: str) -> dict:
+    keys = ["name", "kind", "frequency", "at"]
+    frequency = config["frequency"]
+    if frequency == "weekly":
+        keys.append("weekday")
+    if frequency in {"monthly", "yearly"}:
+        keys.append("day")
+    if frequency == "yearly":
+        keys.append("month")
+    return {**{key: config[key] for key in keys}, "timezone": timezone}
+
+
+def _stored_identity(value) -> dict:
+    if isinstance(value, str):
+        # Legacy state appended the timezone directly to the serialised model.
+        config, end = json.JSONDecoder().raw_decode(value)
+        return _identity(config, value[end:])
+    if not isinstance(value, dict):
+        raise ValueError
+    return _identity(value, value["timezone"])
+
+
+def _timestamp(value) -> datetime:
+    result = datetime.fromisoformat(value)
+    if result.tzinfo is None:
+        raise ValueError
+    return result.astimezone(UTC)
+
+
+@dataclass
+class Pending:
+    due: datetime
+    failures: int = 0
+    retry_at: datetime | None = None
+    delivered: set[int] = field(default_factory=set)
+
+    @classmethod
+    def load(cls, due, retry):
+        if not isinstance(retry, dict):
+            raise ValueError
+        failures = retry.get("failures", 0)
+        delivered = retry.get("delivered", [])
+        retry_at = retry.get("retry_at")
+        if (
+            type(failures) is not int
+            or failures < 0
+            or not isinstance(delivered, list)
+            or any(type(value) is not int or value <= 0 for value in delivered)
+            or len(set(delivered)) != len(delivered)
+            or bool(failures) != (retry_at is not None)
+        ):
+            raise ValueError
+        return cls(
+            _timestamp(due),
+            failures,
+            _timestamp(retry_at) if retry_at is not None else None,
+            set(delivered),
+        )
+
+    def retry_state(self):
+        return {
+            "failures": self.failures,
+            "retry_at": self.retry_at.isoformat() if self.retry_at else None,
+            "delivered": sorted(self.delivered),
+        }
+
+
 @dataclass
 class Scheduler:
     config: ScheduleConfig
@@ -137,56 +221,93 @@ class Scheduler:
     def run(self, execute, *, now=None, sleep=clock.sleep) -> int:
         now = now or (lambda: datetime.now(UTC))
         heartbeat = Path(os.environ.get("SCHEDULER_HEARTBEAT", str(HEARTBEAT_PATH)))
+        identities = {
+            s.name: _identity(s.model_dump(mode="json"), self.config.timezone)
+            for s in self.config.schedules
+        }
         try:
             state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
             if not isinstance(state, dict):
                 raise ValueError
-            due = {
-                s.name: datetime.fromisoformat(state[s.name])
-                if (
-                    s.name in state
-                    and state.get(s.name + ":config") == s.model_dump_json() + self.config.timezone
-                )
-                else s.next_run(now(), self.config.timezone)
-                for s in self.config.schedules
-            }
-            if any(value.tzinfo is None for value in due.values()):
-                raise ValueError
+            for key in state:
+                if ":" in key:
+                    name, suffix = key.split(":", 1)
+                    if name not in state or suffix not in {"config", "retry"}:
+                        raise ValueError
+            pending = {}
+            for name in state:
+                if ":" in name:
+                    continue
+                saved = Pending.load(state[name], state.get(name + ":retry", {}))
+                identity = _stored_identity(state[name + ":config"])
+                if name in identities and identity == identities[name]:
+                    pending[name] = saved
+                else:
+                    logger.warning(
+                        "Discarded pending scheduler occurrence after configuration change."
+                    )
+            for schedule in self.config.schedules:
+                if schedule.name not in pending:
+                    pending[schedule.name] = Pending(schedule.next_run(now(), self.config.timezone))
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        except (OSError, ValueError, TypeError):
-            raise ConfigError("Cannot read scheduler state. Check the state volume.") from None
+        except (OSError, ValueError, TypeError, KeyError, OverflowError):
+            raise SchedulerStateError(
+                "Cannot read scheduler state. Check the state volume."
+            ) from None
 
         def save():
             try:
                 temporary = self.state_path.with_suffix(".new")
-                temporary.write_text(
-                    json.dumps(
+                with temporary.open("w", encoding="utf-8") as stream:
+                    json.dump(
                         {
-                            **{name: day.isoformat() for name, day in due.items()},
+                            **{name: item.due.isoformat() for name, item in pending.items()},
+                            **{name + ":config": identity for name, identity in identities.items()},
                             **{
-                                s.name + ":config": s.model_dump_json() + self.config.timezone
-                                for s in self.config.schedules
+                                name + ":retry": item.retry_state()
+                                for name, item in pending.items()
                             },
-                        }
+                        },
+                        stream,
                     )
-                )
+                    stream.flush()
+                    os.fsync(stream.fileno())
                 temporary.replace(self.state_path)
             except OSError:
-                raise ConfigError("Cannot write scheduler state. Check the state volume.") from None
+                raise SchedulerStateError(
+                    "Cannot write scheduler state. Check the state volume."
+                ) from None
 
-        # Persist pending occurrences before delivery, so restarts retry failed jobs.
         save()
         while True:
             _write_heartbeat(heartbeat)
-            instant = now()
             for schedule in self.config.schedules:
-                scheduled = due[schedule.name]
-                if scheduled > instant:
+                item = pending[schedule.name]
+                instant = now()
+                if item.due > instant or (item.retry_at and item.retry_at > instant):
                     continue
-                # One catch-up per schedule after downtime, retaining its original period.
-                if execute(schedule, scheduled) != 0:
-                    logger.error("Scheduled job failed (%s).", schedule.kind)
-                    return 1
-                due[schedule.name] = schedule.next_run(max(instant, now()), self.config.timezone)
+                checkpoint = DeliveryCheckpoint(item.delivered, save)
+                try:
+                    failed = execute(schedule, item.due, checkpoint) != 0
+                except ConfigError:
+                    raise
+                except Exception:
+                    # Job exceptions may contain portfolio figures or provider secrets.
+                    failed = True
+                finished = now()
+                if failed:
+                    item.failures += 1
+                    delay = min(30 * 2 ** min(item.failures - 1, 4), 360)
+                    item.retry_at = finished + timedelta(minutes=delay)
+                    logger.warning("Scheduled job failed (%s); retry deferred.", schedule.kind)
+                else:
+                    next_due = schedule.next_run(item.due, self.config.timezone)
+                    if next_due <= finished:
+                        logger.warning(
+                            "Skipped intervening missed scheduler occurrences (%s).", schedule.kind
+                        )
+                    pending[schedule.name] = Pending(
+                        schedule.next_run(max(instant, finished), self.config.timezone)
+                    )
                 save()
             sleep(20)

@@ -771,9 +771,7 @@ def test_withholding_uses_stored_components_then_exchange_fallback():
     html = render_html(report, "Invented")
     csv_rows = list(csv.reader(io.StringIO(render_csv(report))))
     header = next(
-        index
-        for index, row in enumerate(csv_rows)
-        if row[:2] == ["Holding", "Realised gains"]
+        index for index, row in enumerate(csv_rows) if row[:2] == ["Holding", "Realised gains"]
     )
     body = []
     for row in csv_rows[header + 1 :]:
@@ -818,9 +816,7 @@ def test_withholding_components_cannot_exceed_the_combined_amount():
             2026,
         )
     with pytest.raises(ReturnError, match="non-negative"):
-        calculate_year_end(
-            (holding,), (dividend(resident_withholding_tax=D("-0.01")),), {}, 2026
-        )
+        calculate_year_end((holding,), (dividend(resident_withholding_tax=D("-0.01")),), {}, 2026)
     with pytest.raises(ReturnError, match="finite"):
         calculate_year_end((holding,), (dividend(foreign_withholding_tax=D("NaN")),), {}, 2026)
 
@@ -894,7 +890,12 @@ def test_notes_and_readme_state_withholding_drp_and_split_rules():
     notes = " ".join(" ".join(NOTES).split())
     for rule in rules:
         assert rule in notes
-        assert rule in readme
+        readme_rule = (
+            "This summary is information, not tax advice."
+            if rule == "This is information, not tax advice."
+            else rule
+        )
+        assert readme_rule in readme
     assert "This is information, not tax advice." in notes
     assert "Splits require a matching quantity adjustment" not in notes
     assert "recorded combined withholding field" not in notes
@@ -948,7 +949,7 @@ def test_csv_decimals_keep_full_fixed_point_precision():
     assert "e" not in format(tiny, "f").lower()
     assert "e" not in format(scaled_zero, "f").lower()
     rows = list(csv.reader(io.StringIO(rendered)))
-    peak = next(row for row in rows if row[0] == "Peak foreign historical cost")
+    peak = next(row for row in rows if row and row[0] == "Peak foreign historical cost")
     assert D(peak[1]) == scaled_zero
     percentages = [
         row[4] for row in rows if row and row[0] in {"NZX:TINY", "NZX:NONE"} and len(row) == 5

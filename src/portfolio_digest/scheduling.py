@@ -20,6 +20,9 @@ from portfolio_digest.mailers import address
 
 logger = logging.getLogger(__name__)
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+# Compose marks the scheduler unhealthy when this file is older than 30 minutes.
+# It lives on the container's /tmp tmpfs, so a restart does not keep a stale beat.
+HEARTBEAT_PATH = Path("/tmp/scheduler-heartbeat")  # noqa: S108 - private container tmpfs
 
 
 class Schedule(BaseModel):
@@ -108,6 +111,14 @@ class ScheduleConfig(BaseModel):
             if schedule.name == name and schedule.kind == "report":
                 return schedule
         raise ConfigError("Unknown report schedule. Check the schedule configuration.")
+
+
+def _write_heartbeat(path: Path) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    except OSError:
+        logger.warning("Could not write the scheduler heartbeat.")
 
 
 def read_config(path: Path) -> ScheduleConfig:
@@ -209,6 +220,7 @@ class Scheduler:
 
     def run(self, execute, *, now=None, sleep=clock.sleep) -> int:
         now = now or (lambda: datetime.now(UTC))
+        heartbeat = Path(os.environ.get("SCHEDULER_HEARTBEAT", str(HEARTBEAT_PATH)))
         identities = {
             s.name: _identity(s.model_dump(mode="json"), self.config.timezone)
             for s in self.config.schedules
@@ -268,6 +280,7 @@ class Scheduler:
 
         save()
         while True:
+            _write_heartbeat(heartbeat)
             for schedule in self.config.schedules:
                 item = pending[schedule.name]
                 instant = now()

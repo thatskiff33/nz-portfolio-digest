@@ -81,6 +81,12 @@ agent does the GitHub steps.
 - **Never:** push to `main` directly, force-push, or commit secrets, `.env` files, broker
   exports or real portfolio data.
 
+## Dependabot
+
+Dependabot opens weekly pull requests for GitHub Actions, container images and Python
+packages (`.github/dependabot.yml`). Do not merge those pull requests directly. Turn each
+one into a Sekreton task so the commits stay authored by sekreton[bot].
+
 ## Migrations when tasks run in parallel
 
 Two tasks that each add an Alembic revision on the same parent will clash. Whichever merges

@@ -107,6 +107,44 @@ class ScheduleConfig(BaseModel):
                 return schedule
         raise ConfigError("Unknown report schedule. Check the schedule configuration.")
 
+    def report_timing_warnings(self) -> list[str]:
+        """Reports that are not strictly after a same-day price fetch.
+
+        Equal times do not count: the fetch and the email would be due together,
+        and the email can run first. This checks the configured order only.
+        """
+        prices = [item for item in self.schedules if item.kind == "prices"]
+        warnings = []
+        for report in self.schedules:
+            if report.kind != "report":
+                continue
+            if any(
+                _price_runs_on_every_report_day(price, report) and price.at < report.at
+                for price in prices
+            ):
+                continue
+            warnings.append(
+                f"Report {report.name} at {report.at.strftime('%H:%M')} has no earlier "
+                "price fetch on the same day. Move it to after a prices schedule that "
+                "runs that day, so the report includes that day's closes."
+            )
+        return warnings
+
+
+def _price_runs_on_every_report_day(price: Schedule, report: Schedule) -> bool:
+    """True when `price` is due on every local day `report` is due.
+
+    A fetch on a different cadence does not count. The report would sometimes
+    be built on a day that fetch does not run.
+    """
+    if price.frequency == "daily":
+        return True
+    if price.frequency == "weekly":
+        return report.frequency == "weekly" and price.weekday == report.weekday
+    if price.frequency == "monthly":
+        return report.frequency in {"monthly", "yearly"} and price.day == report.day
+    return report.frequency == "yearly" and price.month == report.month and price.day == report.day
+
 
 def read_config(path: Path) -> ScheduleConfig:
     try:
@@ -123,6 +161,8 @@ class Scheduler:
     state_path: Path
 
     def run(self, execute, *, now=None, sleep=clock.sleep) -> int:
+        for warning in self.config.report_timing_warnings():
+            logger.warning("%s", warning)
         now = now or (lambda: datetime.now(UTC))
         try:
             state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}

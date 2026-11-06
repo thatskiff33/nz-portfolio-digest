@@ -152,7 +152,8 @@ def create_app(
     ):
         with Session(engine) as session:
             p = portfolio(session, pid)
-            today = datetime.now(ZoneInfo(timezone)).date()
+            as_of = datetime.now(ZoneInfo(timezone))
+            today = as_of.date()
             first = first_activity_date(session, pid, today) or today
             try:
                 begin, finish = period_dates(period, today, first, start, end)
@@ -160,7 +161,7 @@ def create_app(
                 raise HTTPException(
                     400, "Choose a valid period and dates ending no later than today."
                 ) from None
-            values = Dashboard(session, p, begin, finish)
+            values = Dashboard(session, p, begin, finish, as_of=as_of)
             if sort not in {"code", "name", "quantity", "price", "value"} or direction not in {
                 "asc",
                 "desc",
@@ -223,11 +224,12 @@ def create_app(
                     select(Price).where(Price.instrument_id == iid).order_by(Price.price_date)
                 )
             )
-            today = datetime.now(ZoneInfo(timezone)).date()
+            as_of = datetime.now(ZoneInfo(timezone))
+            today = as_of.date()
             begin, finish = period_dates(
                 "all", today, first_activity_date(session, pid, today) or today
             )
-            values = Dashboard(session, p, begin, finish)
+            values = Dashboard(session, p, begin, finish, as_of=as_of)
             result = next((row.result for row in values.holdings if row.instrument.id == iid), None)
             return render(
                 request,

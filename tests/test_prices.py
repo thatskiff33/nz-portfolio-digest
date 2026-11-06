@@ -105,6 +105,8 @@ def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, ru
     ]
     sessions = [MagicMock() for _ in range(4)]
     for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
+    for session in sessions:
         session.scalar.return_value = None
         session.execute.return_value.all.return_value = []
     factory = MagicMock(side_effect=sessions)
@@ -204,6 +206,8 @@ def test_old_sold_holdings_and_fx_skip_only_when_complete(
     )
     sessions = [MagicMock() for _ in range(3)]
     for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
+    for session in sessions:
         session.execute.return_value.all.return_value = []
     inactive_check = (
         not (still_held or options)
@@ -256,6 +260,8 @@ def test_sold_out_completion_uses_each_markets_last_trading_day(
     first = date(2023, 3, 1)
     holding = Holding(1, "NZX", "SOLD", "AUD", None, first, sale, still_held)
     sessions = [MagicMock() for _ in range(3)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     for session in sessions:
         session.execute.return_value.all.return_value = []
     price_terminal = price_day if price_day == holding.calendar.last_trading_day(sale) else None
@@ -357,6 +363,8 @@ def test_takeover_skips_prices_and_sold_only_fx_with_a_carried_final_value(
     first, last_close, sale = date(2023, 3, 1), date(2023, 3, 3), date(2023, 3, 8)
     holding = Holding(1, "NZX", "OLD", "AUD", None, first, sale, False)
     sessions = [MagicMock() for _ in range(3)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     last_good = last_close if fresh_present else None
     terminal = [sale if terminal_present else None] if fresh_present else []
     for session in sessions:
@@ -472,6 +480,8 @@ def test_carried_price_overflow_does_not_stop_next_instrument_or_fx(monkeypatch)
         for i, code in enumerate(["AAA", "BBB"], 1)
     ]
     sessions = [MagicMock() for _ in range(4)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     for session, value in zip(sessions[1:], ["50", "10", "1.7"], strict=True):
         session.scalar.side_effect = [first, first, None] if value != "1.7" else [None, None]
         rows = MagicMock()
@@ -527,6 +537,8 @@ def test_database_failure_rolls_back_and_continues(monkeypatch, failure_stage, f
         for i, (code, currency) in enumerate([("AAA", "AUD"), ("BBB", "USD")], 1)
     ]
     sessions = [MagicMock() for _ in range(5)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     failed_index = 1 if failed_item == "instrument" else 3
     factory = MagicMock(side_effect=sessions)
     monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
@@ -729,6 +741,7 @@ def test_quality_compares_fresh_closes_across_gaps_unless_a_split_intervenes(gap
         rows.append((middle, Decimal("10"), True))
     rows.append((last, Decimal("100"), False))
     session = MagicMock()
+    session.get.return_value = Instrument(split_scanned_at=None)
     session.execute.return_value.all.return_value = rows
     session.scalars.side_effect = lambda statement: (
         ([] if split_day is None else [split_day])
@@ -757,6 +770,7 @@ def test_new_split_refreshes_full_stored_history_once(monkeypatch):
     first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
     holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
     session = MagicMock()
+    session.get.return_value = Instrument(split_scanned_at=None)
     source = FakePriceSource(
         {first: Decimal("40"), recent: Decimal("40"), split_day: Decimal("10")},
         {split_day: (Decimal("1"), Decimal("4"))},
@@ -811,6 +825,7 @@ def test_withdrawn_split_refreshes_history_and_does_not_scale_stale_prices(monke
     holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
     source = FakePriceSource({recent: Decimal("40")})
     session = MagicMock()
+    session.get.return_value = Instrument(split_scanned_at=None)
     session.scalar.side_effect = [recent, first, None]
     session.execute.side_effect = [
         [(split_day, Decimal("1"), Decimal("4"))],
@@ -854,6 +869,7 @@ def test_failed_split_refresh_preserves_recorded_events(monkeypatch):
     source = MagicMock(name="yahoo")
     source.history.side_effect = [PriceHistory(), SourceError("refresh failed")]
     session = MagicMock()
+    session.get.return_value = Instrument(split_scanned_at=None)
     session.scalar.side_effect = [recent, first, None]
     session.execute.side_effect = [
         [(split_day, Decimal("1"), Decimal("4"))],

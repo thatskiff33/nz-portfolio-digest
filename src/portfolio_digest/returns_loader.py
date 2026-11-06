@@ -1,5 +1,6 @@
 """Database boundary for the pure returns engine. No writes or remote price fetching."""
 
+from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import localcontext
@@ -14,6 +15,7 @@ from portfolio_digest.prices.calendars import FX
 from portfolio_digest.returns import (
     Holding,
     Observation,
+    ObservationSeries,
     Payment,
     Report,
     Result,
@@ -107,17 +109,24 @@ def load_portfolio_inputs(
     end: date,
     *,
     base_currency: str | None = None,
+    instrument_id: int | None = None,
+    raw_fx: bool = False,
 ) -> PortfolioInputs:
     """Load stored inputs once for reports and sampled dashboard valuations."""
     target_currency = base_currency or portfolio.base_currency
     trades = session.scalars(
         select(Trade)
-        .where(Trade.portfolio_id == portfolio.id, Trade.trade_date <= end)
+        .where(
+            Trade.portfolio_id == portfolio.id,
+            Trade.trade_date <= end,
+            True if instrument_id is None else Trade.instrument_id == instrument_id,
+        )
         .order_by(Trade.trade_date, Trade.id)
     ).all()
     income = session.scalars(
         select(Income).where(
             Income.portfolio_id == portfolio.id,
+            True if instrument_id is None else Income.instrument_id == instrument_id,
             Income.paid_date > start,
             Income.paid_date <= end,
             Income.kind.in_(("dividend", "distribution")),
@@ -140,15 +149,19 @@ def load_portfolio_inputs(
             FxRate.rate_date <= end,
         )
     ).all()
-    rates: dict[str, tuple[Observation, ...]] = {}
-    for currency in {r.currency for r in fx_rows}:
-        rates[currency] = tuple(
-            Observation(r.rate_date, r.rate, r.is_stale) for r in fx_rows if r.currency == currency
+    prices_by_id = defaultdict(list)
+    for price in prices:
+        prices_by_id[price.instrument_id].append(
+            Observation(price.price_date, price.close, price.is_stale)
         )
+    rates_by_currency = defaultdict(list)
+    for row in fx_rows:
+        rates_by_currency[row.currency].append(Observation(row.rate_date, row.rate, row.is_stale))
+    rates = {currency: ObservationSeries(points) for currency, points in rates_by_currency.items()}
     conversion_flags: set[str] = set()
 
     def recorded_fx(value, day, currency):
-        if target_currency == portfolio.base_currency:
+        if raw_fx or target_currency == portfolio.base_currency:
             return value
         if day <= start or value is None:
             return None
@@ -191,11 +204,7 @@ def load_portfolio_inputs(
                     )
                     for t in instrument_trades
                 ),
-                tuple(
-                    Observation(p.price_date, p.close, p.is_stale)
-                    for p in prices
-                    if p.instrument_id == instrument.id
-                ),
+                ObservationSeries(prices_by_id[instrument.id]),
                 tuple(
                     Payment(
                         p.paid_date,
@@ -245,6 +254,10 @@ def load_combined_returns(session: Session, start: date, end: date) -> Report:
         load_returns(session, p.name, f"{start}:{end}", base_currency="NZD")
         for p in session.scalars(select(Portfolio).order_by(Portfolio.id))
     ]
+    return combine_reports(reports, start, end)
+
+
+def combine_reports(reports, start: date, end: date) -> Report:
     rows = [r for report in reports for r in report.holdings]
     combined = []
     for label in sorted({r.label for r in rows}):
@@ -260,3 +273,55 @@ def load_combined_returns(session: Session, start: date, end: date) -> Report:
             )
         )
     return _combined_report(tuple(combined), start, end, "NZD")
+
+
+def combined_evaluator(session: Session, start: date, end: date):
+    """Read history once, preserving each sample's dated broker FX conversion."""
+    inputs = [
+        (
+            p.base_currency,
+            load_portfolio_inputs(session, p, date.min, end, base_currency="NZD", raw_fx=True),
+        )
+        for p in session.scalars(select(Portfolio).order_by(Portfolio.id))
+    ]
+
+    def evaluate(first: date, last: date) -> Report:
+        reports = []
+        for origin, data in inputs:
+            flags = set()
+
+            def convert(value, day, currency, origin=origin, data=data, flags=flags):
+                if origin == "NZD":
+                    return value
+                if day <= first or value is None or currency == "NZD":
+                    return None
+                with localcontext() as context:
+                    context.prec = max(context.prec, 80)
+                    return value * _lookup(
+                        data.rates.get(origin, ()), day, f"{origin}/NZD FX", flags, FX
+                    )
+
+            holdings = tuple(
+                replace(
+                    h,
+                    trades=tuple(
+                        replace(t, fx=convert(t.fx, t.day, h.currency))
+                        for t in h.trades
+                        if t.day <= last
+                    ),
+                    income=tuple(
+                        replace(p, fx=convert(p.fx, p.day, p.currency))
+                        for p in h.income
+                        if first < p.day <= last
+                    ),
+                )
+                for h in data.holdings
+            )
+            report = calculate_returns(holdings, first, last, data.rates, "NZD")
+            rows = tuple(
+                replace(r, flags=tuple(sorted(set(r.flags) | flags))) for r in report.holdings
+            )
+            reports.append(_combined_report(rows, first, last, "NZD"))
+        return combine_reports(reports, first, last)
+
+    return evaluate

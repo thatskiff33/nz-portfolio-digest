@@ -79,7 +79,7 @@ def push(text: str) -> None:
             if response.status != 200:
                 raise ValueError
     except Exception:
-        logger.warning("Alert email sent, but the optional push failed.")
+        logger.warning("Optional push notification failed.")
 
 
 # Close dates appended to a daily-move key: daily:{exchange}:{code}:{previous}:{latest}.
@@ -94,7 +94,13 @@ class Trigger:
     close_dates: tuple[date, date] | None = None
 
 
-def evaluate(session, portfolio, config, now):
+def _skip(skipped: list[tuple[str, str]] | None, key: str, reason: str) -> None:
+    logger.warning("Alert rule skipped (%s): %s.", key, reason)
+    if skipped is not None:
+        skipped.append((key, reason))
+
+
+def evaluate(session, portfolio, config, now, skipped: list[tuple[str, str]] | None = None):
     """Return known rule states. Missing valuation data leaves that rule unchanged."""
     rules = config.alerts
     states: dict[str, Trigger | None] = {}
@@ -133,6 +139,8 @@ def evaluate(session, portfolio, config, now):
         try:
             units = units_at(trades, splits, today)
         except ReturnError:
+            for key in (f"daily:{label}", f"stale:{label}"):
+                _skip(skipped, key, "holding units could not be calculated")
             continue
         if units <= 0:
             states[f"daily:{label}"] = states[f"stale:{label}"] = None
@@ -166,6 +174,12 @@ def evaluate(session, portfolio, config, now):
                 )
                 if abs(movement) > limits.daily_percent
                 else None
+            )
+        else:
+            _skip(
+                skipped,
+                f"daily:{label}",
+                "adjacent closing prices are missing, stale or not positive",
             )
         fresh = session.scalar(
             select(func.max(Price.price_date)).where(
@@ -202,7 +216,11 @@ def evaluate(session, portfolio, config, now):
     try:
         report = load_returns(session, portfolio.name, f"{start}:{end}", today=today)
         total = report.total
-        if not total.flags and total.opening > 0:
+        if total.flags:
+            _skip(skipped, "portfolio", "valuation is incomplete or stale")
+        elif total.opening <= 0:
+            _skip(skipped, "portfolio", "opening value is not positive")
+        else:
             change = total.change / total.opening * Decimal(100)
             states["portfolio"] = (
                 Trigger(
@@ -215,7 +233,7 @@ def evaluate(session, portfolio, config, now):
                 else None
             )
     except ReturnError:
-        pass
+        _skip(skipped, "portfolio", "valuation could not be calculated")
     return states
 
 
@@ -329,7 +347,13 @@ def _run_portfolio(session, portfolio, config, now, dry_run):
         s.rule_key: s
         for s in session.scalars(select(AlertState).where(AlertState.portfolio_id == portfolio.id))
     }
-    evaluated = evaluate(session, portfolio, config, now)
+    skipped: list[tuple[str, str]] = []
+    evaluated = evaluate(session, portfolio, config, now, skipped)
+    suppressed = ""
+    if dry_run and skipped:
+        lines = [f"Suppressed rules | {portfolio.name}"]
+        lines.extend(f"{key}: {reason}" for key, reason in skipped)
+        suppressed = "\n".join(lines)
     due = []
     for key, trigger in evaluated.items():
         if trigger is None:
@@ -340,11 +364,11 @@ def _run_portfolio(session, portfolio, config, now, dry_run):
         if _is_due(states, trigger, config.alerts.cooldown_hours, now):
             due.append(trigger)
     if not due:
-        return None
+        return suppressed or None
     text = f"Portfolio alerts | {portfolio.name}\n\n" + "\n".join(t.text for t in due)
     text += "\n\nOpen your dashboard over Tailscale for details."
     if dry_run:
-        return text
+        return "\n\n".join(part for part in (suppressed, text) if part)
     settings = mail_settings()
     recipients = config.recipients or ([settings.mail_owner] if settings.mail_owner else [])
     html = (

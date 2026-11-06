@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,19 +20,24 @@ from portfolio_digest.scheduling import DeliveryCheckpoint, ScheduleConfig, Sche
 logger = logging.getLogger(__name__)
 
 
-def ping_kuma(config: ScheduleConfig) -> None:
-    if not config.kuma_push_url:
+def ping_monitor(url: SecretStr | None) -> None:
+    """Ping an Uptime Kuma push URL. The URL is never logged."""
+    if url is None or not url.get_secret_value():
         return
     try:
-        url = config.kuma_push_url.get_secret_value()
-        if urlsplit(url).scheme not in {"https", "http"}:
+        raw = url.get_secret_value()
+        if urlsplit(raw).scheme not in {"https", "http"}:
             raise ValueError
         # urllib does not emit HTTP request URLs (the push URL contains a secret).
-        with urlopen(url, timeout=10) as response:  # noqa: S310
+        with urlopen(raw, timeout=10) as response:  # noqa: S310
             if response.status != 200:
                 raise ValueError
     except Exception:
-        logger.warning("Report sent, but the monitoring push failed.")
+        logger.warning("The monitoring push failed.")
+
+
+def ping_kuma(config: ScheduleConfig) -> None:
+    ping_monitor(config.kuma_push_url)
 
 
 def _validate_preview(dry_run: bool, out: Path | None) -> None:

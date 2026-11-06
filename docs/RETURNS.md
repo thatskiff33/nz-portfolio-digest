@@ -170,3 +170,19 @@ For example, WATTLE capital is `10 × (9 - 8) × 1.25 = 12.50`; currency is
 `10 × 9 × (1.20 - 1.25) = -4.50`. Its closing value is NZ$108 and its NZ$2
 dividend gives NZ$10 total return. Portfolio closing value is NZ$438; adding
 NZ$5 dividends to the NZ$38 value increase gives NZ$43.
+
+## Shared parcel ledger
+
+`portfolio_digest.parcels` provides FIFO addition and removal, split rescaling,
+and dated FX lookup for period and year-end calculations. Trade ordering and
+split matching are public helpers in `returns`.
+
+Period parcels reset to opening market value and expense acquisition and split
+fees immediately. Year-end parcels retain historical NZD acquisition cost,
+including purchase fees and split-day fees allocated by surviving units. Sale
+fees reduce proceeds in both reports. These fee treatments serve different
+reporting purposes and must remain explicit when changing parcel replay.
+
+The quantity summary returned by `position` retains its existing weighted-average
+`cost_base` for compatibility. This scalar summary is separate from the FIFO
+parcels used for period attribution and year-end realised gains.

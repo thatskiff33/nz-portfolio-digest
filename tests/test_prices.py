@@ -763,39 +763,42 @@ def test_quality_compares_fresh_closes_across_gaps_unless_a_split_intervenes(gap
 
 
 def test_new_split_refreshes_full_stored_history_once(monkeypatch):
-    from unittest.mock import MagicMock
+    from sqlalchemy.orm import Session
+    from test_returns_loader import _sqlite_engine
 
-    from portfolio_digest.prices import fetch
-
+    engine = _sqlite_engine(monkeypatch)
+    instrument_id = _seed_trade(engine)
     first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
-    holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
-    session = MagicMock()
-    session.get.return_value = Instrument(split_scanned_at=None)
+    with Session(engine) as session, session.begin():
+        session.scalar(select(Trade)).trade_date = first
+        session.add(
+            Price(
+                instrument_id=instrument_id,
+                price_date=recent,
+                close=Decimal("40"),
+                source="fixture",
+            )
+        )
     source = FakePriceSource(
         {first: Decimal("40"), recent: Decimal("40"), split_day: Decimal("10")},
         {split_day: (Decimal("1"), Decimal("4"))},
     )
-    saved = []
-    monkeypatch.setattr(fetch, "_save_prices", lambda *args, **kwargs: saved.append((args, kwargs)))
-    monkeypatch.setattr(fetch, "_save_splits", lambda *args: None)
-
-    def run(recorded):
-        session.scalar.side_effect = [recent, first, None]
-        split_rows = MagicMock()
-        split_rows.__iter__.return_value = iter(recorded)
-        existing_rows = MagicMock()
-        existing_rows.all.return_value = list(source.closes.items())
-        session.execute.side_effect = [split_rows, existing_rows]
-        return fetch._update_instrument(
-            session, source, holding, datetime(2026, 10, 3, 12, tzinfo=UTC), False, None
+    for expected in ([date(2026, 9, 1), first], [date(2026, 9, 1)]):
+        source.calls.clear()
+        result = run_fetch(
+            engine,
+            Sources(source, []),
+            base_currency="USD",
+            now=datetime(2026, 10, 3, 12, tzinfo=UTC),
         )
-
-    assert run([]).error is None
-    assert [call[1] for call in source.calls] == [date(2026, 9, 1), first]
-    assert saved[0][0][2][first] == Decimal("40")
-    source.calls.clear()
-    assert run([(split_day, Decimal("1"), Decimal("4"))]).error is None
-    assert [call[1] for call in source.calls] == [date(2026, 9, 1)]
+        assert result.ok
+        assert [call[1] for call in source.calls] == expected
+        with Session(engine) as session:
+            assert session.get(Price, (instrument_id, first)).close == Decimal("40")
+            assert session.get(Price, (instrument_id, split_day)).close == Decimal("10")
+            split = session.scalars(select(Split)).one()
+            assert (split.split_date, split.shares_after) == (split_day, Decimal("4"))
+    engine.dispose()
 
 
 def test_raw_carry_forward_changes_units_on_split_date():
@@ -817,31 +820,41 @@ def test_raw_carry_forward_changes_units_on_split_date():
 
 
 def test_withdrawn_split_refreshes_history_and_does_not_scale_stale_prices(monkeypatch):
-    from unittest.mock import MagicMock
+    from sqlalchemy.orm import Session
+    from test_returns_loader import _sqlite_engine
 
-    from portfolio_digest.prices import fetch
-
+    engine = _sqlite_engine(monkeypatch)
+    instrument_id = _seed_trade(engine)
     first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
-    holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
+    with Session(engine) as session, session.begin():
+        session.scalar(select(Trade)).trade_date = first
+        session.add(
+            Price(
+                instrument_id=instrument_id,
+                price_date=recent,
+                close=Decimal("40"),
+                source="fixture",
+            )
+        )
+        session.add(
+            Split(
+                instrument_id=instrument_id,
+                split_date=split_day,
+                shares_before=Decimal(1),
+                shares_after=Decimal(4),
+                source="mock-price",
+            )
+        )
     source = FakePriceSource({recent: Decimal("40")})
-    session = MagicMock()
-    session.get.return_value = Instrument(split_scanned_at=None)
-    session.scalar.side_effect = [recent, first, None]
-    session.execute.side_effect = [
-        [(split_day, Decimal("1"), Decimal("4"))],
-        MagicMock(all=lambda: [(recent, Decimal("40"))]),
-    ]
-    saved, scans = [], []
-    monkeypatch.setattr(fetch, "_save_prices", lambda *args, **kwargs: saved.append((args, kwargs)))
-    monkeypatch.setattr(fetch, "_save_splits", lambda *args: scans.append(args))
-    result = fetch._update_instrument(
-        session, source, holding, datetime(2026, 10, 3, 12, tzinfo=UTC), False, None
+    result = run_fetch(
+        engine, Sources(source, []), base_currency="USD", now=datetime(2026, 10, 3, 12, tzinfo=UTC)
     )
-    assert result.error is None
+    assert result.ok
     assert [call[1] for call in source.calls] == [date(2026, 9, 1), first]
-    assert scans[0][2] == {}
-    assert scans[0][4] == first
-    assert saved[-1][0][2][split_day] == Decimal("40")
+    with Session(engine) as session:
+        assert session.scalars(select(Split)).all() == []
+        assert session.get(Price, (instrument_id, split_day)).close == Decimal("40")
+    engine.dispose()
 
 
 def test_split_scan_removes_withdrawn_or_moved_rows(engine):
@@ -860,31 +873,49 @@ def test_split_scan_removes_withdrawn_or_moved_rows(engine):
 
 
 def test_failed_split_refresh_preserves_recorded_events(monkeypatch):
-    from unittest.mock import MagicMock
+    from sqlalchemy.orm import Session
+    from test_returns_loader import _sqlite_engine
 
-    from portfolio_digest.prices import fetch
-
+    engine = _sqlite_engine(monkeypatch)
+    instrument_id = _seed_trade(engine)
     first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
-    holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
-    source = MagicMock(name="yahoo")
-    source.history.side_effect = [PriceHistory(), SourceError("refresh failed")]
-    session = MagicMock()
-    session.get.return_value = Instrument(split_scanned_at=None)
-    session.scalar.side_effect = [recent, first, None]
-    session.execute.side_effect = [
-        [(split_day, Decimal("1"), Decimal("4"))],
-        MagicMock(all=lambda: [(recent, Decimal("40"))]),
-    ]
-    save_splits = MagicMock()
-    saved = []
-    monkeypatch.setattr(fetch, "_save_splits", save_splits)
-    monkeypatch.setattr(fetch, "_save_prices", lambda *args, **kwargs: saved.append((args, kwargs)))
-    result = fetch._update_instrument(
-        session, source, holding, datetime(2026, 10, 3, 12, tzinfo=UTC), False, None
+    with Session(engine) as session, session.begin():
+        session.scalar(select(Trade)).trade_date = first
+        session.add(
+            Price(
+                instrument_id=instrument_id,
+                price_date=recent,
+                close=Decimal("40"),
+                source="fixture",
+            )
+        )
+        session.add(
+            Split(
+                instrument_id=instrument_id,
+                split_date=split_day,
+                shares_before=Decimal(1),
+                shares_after=Decimal(4),
+                source="mock-price",
+            )
+        )
+
+    class FailingRefresh(FakePriceSource):
+        def history(self, symbol, start, end, **kwargs):
+            if start == first:
+                raise SourceError("refresh failed")
+            return super().history(symbol, start, end, **kwargs)
+
+    result = run_fetch(
+        engine,
+        Sources(FailingRefresh(), []),
+        base_currency="USD",
+        now=datetime(2026, 10, 3, 12, tzinfo=UTC),
     )
-    assert result.error == "refresh failed"
-    save_splits.assert_not_called()
-    assert saved[-1][0][2][split_day] == Decimal("10")
+    assert result.outcomes[0].error == "refresh failed"
+    with Session(engine) as session:
+        assert session.scalars(select(Split)).one().shares_after == Decimal(4)
+        assert session.get(Price, (instrument_id, split_day)).close == Decimal("10")
+    engine.dispose()
 
 
 @pytest.mark.parametrize(

@@ -121,7 +121,6 @@ class SharesightCsvImporter(Importer):
             currency=currency,
             fees=fees,
             fx_rate=fx_rate,
-            fx_base=base if fx_rate is not None else None,
             external_ref=refs.ref(trade_date, kind, exchange, code, quantity, price, fees),
             notes=checked_text(" ".join(row.get("comments", "").split()), "Comments") or None,
         )

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from portfolio_digest.config import get_settings
 from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
+from portfolio_digest.parcels import financial_math, lookup
 from portfolio_digest.prices.calendars import FX
 from portfolio_digest.returns import (
     Holding,
@@ -22,8 +23,6 @@ from portfolio_digest.returns import (
     ReturnError,
     SplitEvent,
     Transaction,
-    _financial_math,
-    _lookup,
     calculate_returns,
     period_range,
     subtotal,
@@ -65,7 +64,7 @@ def load_returns(
     return report
 
 
-@_financial_math
+@financial_math
 def load_inputs(
     session: Session,
     name: str,
@@ -112,10 +111,10 @@ def _recorded_fx(value, day, currency, origin, target, start, rates, flags):
         return None
     with localcontext() as context:
         context.prec = max(context.prec, 80)
-        return value * _lookup(rates.get(origin, ()), day, f"{origin}/{target} FX", flags, FX)
+        return value * lookup(rates.get(origin, ()), day, f"{origin}/{target} FX", flags, FX)
 
 
-@_financial_math
+@financial_math
 def load_portfolio_inputs(
     session: Session,
     portfolio: Portfolio,

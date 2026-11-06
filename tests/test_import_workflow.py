@@ -357,32 +357,56 @@ def test_asb_statement_and_email_share_fee_basis(engine, tmp_path, capsys, gst_c
         assert session.scalars(select(Trade)).one().fees == Decimal("34.50")
 
 
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.database)])
+def failure_engine(request, monkeypatch):
+    if request.param == "postgres":
+        yield request.getfixturevalue("engine")
+        return
+    from test_returns_loader import _sqlite_engine
+
+    from portfolio_digest import cli
+    from portfolio_digest.config import get_settings
+
+    engine = _sqlite_engine(monkeypatch)
+    monkeypatch.setattr(cli, "make_engine", lambda: engine)
+    yield engine
+    engine.dispose()
+    get_settings.cache_clear()
+
+
 @pytest.mark.parametrize("phase", ["file_parse", "gmail_fetch", "file_store", "gmail_store"])
 @pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt, SystemExit])
-def test_unexpected_import_exception_marks_run_failed(engine, monkeypatch, capsys, phase, failure):
-    from portfolio_digest import cli, importing
+def test_unexpected_import_exception_marks_run_failed(
+    failure_engine, monkeypatch, capsys, phase, failure, request
+):
+    engine = failure_engine
+    from sqlalchemy import event
+
+    from portfolio_digest import cli
     from portfolio_digest.config import GmailSettings
 
     def broken(*args, **kwargs):
-        if phase.endswith("store"):
-            args[0].add(Instrument(exchange="NZX", code="AIR", name="Made-up", currency="NZD"))
-            args[0].flush()
         raise failure("made-up private contents must not appear")
 
     gmail = phase.startswith("gmail")
     if phase.endswith("store"):
-        monkeypatch.setattr(importing, "_store_result", broken)
+        event.listen(Instrument, "before_insert", broken)
+        request.addfinalizer(lambda: event.remove(Instrument, "before_insert", broken))
     elif gmail:
         monkeypatch.setattr(cli.AsbGmailImporter, "fetch", broken)
     else:
-        monkeypatch.setattr(importing.FILE_IMPORTERS["sharesies"], "parse", broken)
+        monkeypatch.setattr(cli.FILE_IMPORTERS["sharesies"], "parse", broken)
     if gmail:
         monkeypatch.setattr(cli, "GmailClient", lambda settings: None)
         monkeypatch.setattr(cli, "get_gmail_settings", lambda: GmailSettings(label="Made-up"))
         if phase.endswith("store"):
-            from portfolio_digest.importers.base import ParseResult
+            from portfolio_digest.importers.base import ParseContext
 
-            monkeypatch.setattr(cli.AsbGmailImporter, "fetch", lambda self: ParseResult())
+            result = cli.FILE_IMPORTERS["sharesies"].parse(
+                (FIXTURES / "sharesies-transactions.csv").read_bytes(),
+                ParseContext(),
+            )
+            monkeypatch.setattr(cli.AsbGmailImporter, "fetch", lambda self: result)
     assert main(["portfolio", "add", "Personal"]) == 0
     args = (
         ["import", "asb-gmail"]

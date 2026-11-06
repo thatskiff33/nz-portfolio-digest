@@ -65,9 +65,8 @@ class ParsedTrade:
     currency: str
     external_ref: str
     fees: Decimal = Decimal(0)
-    # 1 unit of `currency` is worth `fx_rate` units of `fx_base`, as the broker reported it.
+    # Broker FX: portfolio base currency per unit of trade currency.
     fx_rate: Decimal | None = None
-    fx_base: str | None = None
     # The instrument's name when the file gives one; otherwise its code is used.
     name: str | None = None
     notes: str | None = None

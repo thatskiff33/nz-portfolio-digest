@@ -3,7 +3,7 @@
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import delete, func, select, update
@@ -89,6 +89,20 @@ def _new_run(
     filename: str | None,
     content_sha256: str | None,
 ) -> ImportRun:
+    now = datetime.now(UTC)
+    session.execute(
+        update(ImportRun)
+        .where(
+            ImportRun.portfolio_id == portfolio.id,
+            ImportRun.status == ImportStatus.RUNNING.value,
+            ImportRun.started_at < now - timedelta(hours=1),
+        )
+        .values(
+            status=ImportStatus.FAILED.value,
+            finished_at=now,
+            notes="Interrupted; marked failed at next import",
+        )
+    )
     run = ImportRun(
         portfolio_id=portfolio.id,
         source=source,
@@ -117,10 +131,10 @@ def _mark_run_failed(session: Session, run_id: int) -> None:
         _fail_run(session, run, "Import could not be completed; no trades imported.")
 
 
-def find_or_create_instrument(
-    session: Session, exchange: str, code: str, currency: str, name: str | None = None
-) -> Instrument:
-    """Return one canonical listing, creating it when this is its first trade."""
+def _find_instrument(
+    session: Session, exchange: str, code: str, currency: str
+) -> Instrument | None:
+    """Look up a canonical listing, including former codes, without creating one."""
     instrument = session.scalar(
         select(Instrument).where(Instrument.exchange == exchange, Instrument.code == code)
     )
@@ -142,6 +156,18 @@ def find_or_create_instrument(
             raise ImportFailure("Former instrument code is ambiguous; check instrument history.")
         if matches:
             instrument = session.get(Instrument, matches.pop())
+    if instrument is not None and instrument.currency != currency:
+        raise ImportFailure(
+            f"{code} on {exchange} is already stored in {instrument.currency}, not {currency}."
+        )
+    return instrument
+
+
+def find_or_create_instrument(
+    session: Session, exchange: str, code: str, currency: str, name: str | None = None
+) -> Instrument:
+    """Return one canonical listing, creating it when this is its first trade."""
+    instrument = _find_instrument(session, exchange, code, currency)
     if instrument is None:
         instrument = Instrument(
             exchange=exchange,
@@ -151,10 +177,6 @@ def find_or_create_instrument(
         )
         session.add(instrument)
         session.flush()
-    elif instrument.currency != currency:
-        raise ImportFailure(
-            f"{code} on {exchange} is already stored in {instrument.currency}, not {currency}."
-        )
     return instrument
 
 
@@ -167,7 +189,11 @@ def _store_result(
     *,
     skip_conflicts: bool = False,
 ) -> ImportOutcome:
-    references = [trade.external_ref for trade in result.trades]
+    references = [
+        reference
+        for trade in result.trades
+        for reference in (trade.external_ref, *trade.reference_aliases)
+    ]
     existing = (
         {
             trade.external_ref: (trade, instrument)
@@ -213,8 +239,12 @@ def _store_result(
                 f"Reference {parsed.external_ref!r} is repeated (first at "
                 f"{previous.where}) with different trade fields.",
             )
-        match = existing.get(parsed.external_ref)
-        if match is not None:
+        matches = [
+            existing[reference]
+            for reference in (parsed.external_ref, *parsed.reference_aliases)
+            if reference in existing
+        ]
+        for match in matches:
             trade, instrument = match
             stored = (
                 trade.trade_date,
@@ -229,10 +259,8 @@ def _store_result(
             )
             parsed_fields = fields(parsed)
             if instrument.code != parsed.code:
-                canonical = find_or_create_instrument(
-                    session, parsed.exchange, parsed.code, parsed.currency
-                )
-                if canonical.id == instrument.id:
+                canonical = _find_instrument(session, parsed.exchange, parsed.code, parsed.currency)
+                if canonical is not None and canonical.id == instrument.id:
                     parsed_fields = (*parsed_fields[:3], instrument.code, *parsed_fields[4:])
             if stored != parsed_fields:
                 conflict = RowError(
@@ -246,6 +274,8 @@ def _store_result(
             else:
                 result.errors.append(conflict)
             continue
+        if matches:
+            existing[parsed.external_ref] = matches[0]
         seen[parsed.external_ref] = parsed
         accepted.append(parsed)
 

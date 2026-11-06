@@ -22,8 +22,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 
+from portfolio_digest.akahu import NoRedirect
 from portfolio_digest.config import GmailSettings
 from portfolio_digest.importers.asb import TRADE_SOURCE, NotAContractNote, parse_contract_note
 from portfolio_digest.importers.base import FileProblem, ParseResult, RowError, RowProblem
@@ -57,7 +58,7 @@ def urllib_http(method: str, url: str, headers: dict[str, str], body: bytes | No
         raise GmailError("Refusing to talk to Google over an unencrypted connection.")
     request = Request(url, data=body, headers=headers, method=method)  # noqa: S310 - https only
     try:
-        with urlopen(request, timeout=30) as response:  # noqa: S310 - https only
+        with build_opener(NoRedirect()).open(request, timeout=30) as response:
             return json.load(response)
     except HTTPError as exc:
         raise GmailError(
@@ -239,22 +240,47 @@ class _Server(HTTPServer):
         self.timed_out = True
 
 
+def _check_token_output(path: Path, *, force: bool) -> None:
+    if path.is_symlink():
+        raise GmailError("Refusing to replace a symlinked token file.")
+    if path.exists() and not force:
+        raise GmailError(
+            "The token output file already exists. Choose another path or use --force."
+        )
+
+
 def save_refresh_token(path: Path, token: str, *, force: bool = False) -> None:
-    """Create a private token file, refusing symlinks even when replacement is requested."""
+    """Write privately before replacing the destination, always refusing symlinks."""
+    temporary: Path | None = None
+    fd: int | None = None
     try:
-        if force:
-            if path.is_symlink():
-                raise GmailError("Refusing to replace a symlinked token file.")
-            path.unlink(missing_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w") as handle:
+        _check_token_output(path, force=force)
+        candidate = path.with_name(f".{path.name}.{secrets.token_hex(16)}.tmp")
+        fd = os.open(
+            candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
+        temporary = candidate
+        handle = os.fdopen(fd, "w")
+        fd = None  # The file object now owns the descriptor.
+        with handle:
             handle.write(f"GMAIL_REFRESH_TOKEN={token}\n")
+        _check_token_output(path, force=force)
+        if force:
+            os.replace(temporary, path)
+        else:
+            # Publish the completed file without overwriting a concurrent writer.
+            os.link(temporary, path)
     except FileExistsError:
         raise GmailError(
             "The token output file already exists. Choose another path or use --force."
         ) from None
     except OSError:
         raise GmailError("Cannot save the token file. Check its path and permissions.") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def authorise(
@@ -269,6 +295,7 @@ def authorise(
 ) -> None:
     """Signs in to Google once and saves a read-only refresh token to `output`."""
     settings.require("client_id", "client_secret")
+    _check_token_output(output, force=force)
     server = _Server(("127.0.0.1", port), BaseHTTPRequestHandler)
     server.timeout = timeout
     try:

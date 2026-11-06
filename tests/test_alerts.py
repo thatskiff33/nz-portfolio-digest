@@ -119,12 +119,126 @@ def test_dry_run_sends_nothing_and_does_not_suppress_real_delivery(sample):
 def test_cooldown_repeats_only_when_elapsed(sample):
     session, _, _ = sample
     rules = config(cooldown_hours=2)
-    alerts.run_alerts(session, rules, now=NOW)
+    first = alerts.run_alerts(session, rules, now=NOW)
+    assert "moved" in first[0]
+    assert "Portfolio value changed" in first[0]
     session.flush()
     session.expire_all()
     assert not alerts.run_alerts(session, rules, now=NOW + timedelta(hours=1))
-    assert alerts.run_alerts(session, rules, now=NOW + timedelta(hours=2))
+    second = alerts.run_alerts(session, rules, now=NOW + timedelta(hours=2))
+    assert "Portfolio value changed" in second[0]
+    assert "moved" not in second[0]
     assert alerts.send.call_count == 2
+
+
+@pytest.mark.parametrize("cooldown_hours", [None, 100])
+def test_consecutive_qualifying_daily_moves_both_send(sample, cooldown_hours):
+    session, portfolio, instrument = sample
+    session.add(
+        Price(
+            instrument_id=instrument.id,
+            price_date=date(2026, 10, 19),
+            close=D("7"),
+            source="made_up",
+            is_stale=False,
+        )
+    )
+    session.commit()
+    # Test the default and a cooldown longer than the gap between the two closes.
+    rules = config(cooldown_hours=cooldown_hours, portfolio_drop_percent=D("99"))
+    friday = alerts.run_alerts(session, rules, now=NOW)
+    monday = alerts.run_alerts(session, rules, now=datetime(2026, 10, 19, 7, tzinfo=UTC))
+    assert "2026-10-15 to 2026-10-16" in friday[0]
+    assert "-20.00%" in friday[0]
+    assert "2026-10-16 to 2026-10-19" in monday[0]
+    assert "-12.50%" in monday[0]
+    assert alerts.send.call_count == 2
+    assert session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-15:2026-10-16")) is None
+    assert (
+        session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-16:2026-10-19"))
+        is not None
+    )
+
+
+def test_same_daily_pair_does_not_resend_later_that_day_or_over_the_weekend(sample):
+    session, portfolio, _ = sample
+    rules = config(cooldown_hours=1, portfolio_drop_percent=D("99"))
+    friday = alerts.run_alerts(session, rules, now=NOW)
+    assert "2026-10-15 to 2026-10-16" in friday[0]
+    alerts.send.reset_mock()
+    for now in (
+        NOW + timedelta(hours=2),
+        datetime(2026, 10, 17, 7, tzinfo=UTC),
+        datetime(2026, 10, 18, 7, tzinfo=UTC),
+    ):
+        assert alerts.run_alerts(session, rules, now=now) == []
+    alerts.send.assert_not_called()
+    assert (
+        session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-15:2026-10-16"))
+        is not None
+    )
+
+
+def test_cooldown_still_repeats_a_stale_price(sample):
+    session, _, instrument = sample
+    latest = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id, Price.price_date == date(2026, 10, 16)
+        )
+    )
+    session.delete(latest)
+    session.commit()
+    rules = config(cooldown_hours=2, stale_trading_days=0, portfolio_drop_percent=D("99"))
+    first = alerts.run_alerts(session, rules, now=NOW)
+    assert "price stale" in first[0]
+    assert "moved" not in first[0]
+    assert not alerts.run_alerts(session, rules, now=NOW + timedelta(hours=1))
+    second = alerts.run_alerts(session, rules, now=NOW + timedelta(hours=2))
+    assert "price stale" in second[0]
+    assert alerts.send.call_count == 2
+
+
+def test_under_threshold_clears_the_recorded_daily_pair(sample):
+    session, portfolio, _ = sample
+    rules = config(portfolio_drop_percent=D("99"))
+    alerts.run_alerts(session, rules, now=NOW)
+    pair = "daily:NZX:MADEUP:2026-10-15:2026-10-16"
+    assert session.get(AlertState, (portfolio.id, pair)) is not None
+    widened = config(daily_percent=D("25"), portfolio_drop_percent=D("99"))
+    alerts.run_alerts(session, widened, now=NOW)
+    assert session.get(AlertState, (portfolio.id, pair)) is None
+
+
+def test_missing_close_keeps_the_recorded_daily_pair(sample):
+    session, portfolio, instrument = sample
+    rules = config(portfolio_drop_percent=D("99"))
+    alerts.run_alerts(session, rules, now=NOW)
+    price = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id, Price.price_date == date(2026, 10, 16)
+        )
+    )
+    price.is_stale = True
+    session.commit()
+    assert not alerts.run_alerts(session, rules, now=NOW)
+    assert (
+        session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-15:2026-10-16"))
+        is not None
+    )
+
+
+def test_undated_daily_row_does_not_suppress_the_current_pair(sample):
+    session, portfolio, _ = sample
+    session.add(AlertState(portfolio_id=portfolio.id, rule_key="daily:NZX:MADEUP", sent_at=NOW))
+    session.commit()
+    rules = config(portfolio_drop_percent=D("99"))
+    sent = alerts.run_alerts(session, rules, now=NOW)
+    assert "2026-10-15 to 2026-10-16" in sent[0]
+    assert session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP")) is None
+    assert (
+        session.get(AlertState, (portfolio.id, "daily:NZX:MADEUP:2026-10-15:2026-10-16"))
+        is not None
+    )
 
 
 def test_clear_rearms_rule_and_unknown_data_does_not_clear(sample, monkeypatch):
@@ -343,7 +457,7 @@ def test_dry_run_does_not_clear_sent_state(sample, monkeypatch):
     session.commit()
     monkeypatch.setattr(alerts, "evaluate", lambda *a: {"daily:NZX:MADEUP": None})
     assert not alerts.run_alerts(session, config(), dry_run=True, now=NOW)
-    assert session.get(AlertState, (1, "daily:NZX:MADEUP")) is not None
+    assert session.get(AlertState, (1, "daily:NZX:MADEUP:2026-10-15:2026-10-16")) is not None
     assert alerts.send.call_count == 1
 
 

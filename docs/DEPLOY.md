@@ -463,7 +463,8 @@ daily_percent = "10"
 portfolio_drop_percent = "5"
 period_days = 7
 stale_trading_days = 3
-# Optional repeat interval while a rule remains triggered:
+# Optional. Repeats portfolio-drop and stale rules while they stay triggered.
+# Daily moves send once per pair of close dates and do not use this interval.
 # cooldown_hours = 24
 
 [alerts.holdings."NZX:EXAMPLE"]
@@ -474,7 +475,12 @@ daily_percent = "15"
 Threshold comparisons are strict: exactly 10% does not exceed a 10% rule. Daily
 movement compares fresh closes on adjacent completed trading days in the holding's
 listing currency, adjusted for splits. Fees, trades and currency movements do not
-change this price comparison. Missing closes leave its suppression state unchanged.
+change this price comparison. The delivery row records the pair of close dates that
+triggered it. That pair sends once: a second fetch the same day, or a weekend check
+of Friday's closes, does not send again. A later qualifying pair sends even when the
+earlier move never fell back under the threshold. Missing closes leave its
+suppression state unchanged. A daily row recorded before close dates were stored has
+no pair, so the next check can send the current move once and then records the dates.
 Staleness counts completed exchange trading days, excluding weekends and exchange
 holidays. If no fresh price exists, it counts from the first trade. Sold holdings do
 not trigger holding alerts.
@@ -494,8 +500,11 @@ locked, evaluated and committed separately. Successful sends and rule clears com
 before moving to the next portfolio, so a later failure cannot roll them back.
 Scheduled checks also checkpoint each completed portfolio in the scheduler JSON file
 and skip it on retries of that occurrence. Dry runs neither commit nor checkpoint.
-Each portfolio and rule sends once until a successful evaluation clears it; optional
-`cooldown_hours` allows repeats while it remains triggered on later checks.
+Each portfolio-drop and stale rule sends once until a successful evaluation clears
+it. Optional `cooldown_hours` repeats those rules while they remain triggered. A
+daily move ignores that cooldown and sends again only for a new pair of close dates.
+Clearing a daily move, because it no longer exceeds the threshold or the holding is
+sold, removes the recorded pair so a later qualifying pair can send.
 Failed email delivery is retried without recording a sent alert; other portfolios
 continue before the overall failure is reported. A process failure after email delivery but before the database
 commit can cause a duplicate on retry, since email and the database cannot commit

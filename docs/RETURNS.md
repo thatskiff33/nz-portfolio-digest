@@ -164,3 +164,7 @@ fees immediately. Year-end parcels retain historical NZD acquisition cost,
 including purchase fees and split-day fees allocated by surviving units. Sale
 fees reduce proceeds in both reports. These fee treatments serve different
 reporting purposes and must remain explicit when changing parcel replay.
+
+The quantity summary returned by `position` retains its existing weighted-average
+`cost_base` for compatibility. This scalar summary is separate from the FIFO
+parcels used for period attribution and year-end realised gains.

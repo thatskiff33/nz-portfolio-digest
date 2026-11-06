@@ -504,3 +504,21 @@ def report_engine(request, monkeypatch):
     yield engine
     engine.dispose()
     get_settings.cache_clear()
+
+
+def test_position_preserves_weighted_average_cost_after_partial_sale():
+    result = position(
+        [
+            trade(START, "10", "10"),
+            trade(EX, "10", "20"),
+            trade(PAID, "10", "30", "sell"),
+        ],
+        [],
+        PAID,
+    )
+    assert (result.units, result.cost_base, result.purchases, result.proceeds) == (
+        D(10),
+        D(150),
+        D(300),
+        D(300),
+    )

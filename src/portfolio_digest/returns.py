@@ -509,13 +509,12 @@ def units_at(trades, splits, end: date) -> Decimal:
 
 @financial_math
 def position(trades, splits, end: date, *, before_trades: bool = False) -> Position:
-    """Replay dated trades and registry actions without counting splits twice."""
+    """Replay units and the compatible weighted-average position cost summary."""
     trades = list(trades)
     if before_trades:
         trades = [t for t in trades if t.trade_date < end]
     ordered, split_days, originals = _ledger_events(trades, splits, end)
     result = Position()
-    ledger = ParcelLedger("Holding")
     seen_days = set()
     for row in ordered:
         split = split_days.get(row.day)
@@ -527,9 +526,8 @@ def position(trades, splits, end: date, *, before_trades: bool = False) -> Posit
             and split is not None
             and matches_split(result.units, row.quantity, split)
         ):
-            ledger.rescale(result.units + row.quantity, row.fees)
-            result.units = ledger.units
-            result.cost_base = ledger.cost
+            result.units += row.quantity
+            result.cost_base += row.fees
             result.purchases += row.fees
             continue
         original = originals.get(id(row))
@@ -544,14 +542,12 @@ def position(trades, splits, end: date, *, before_trades: bool = False) -> Posit
                 raise ImportFailure(
                     "Units removed exceed holdings; check trades and corporate actions."
                 )
-            ledger.remove(removed)
-            result.cost_base = ledger.cost
+            result.cost_base -= result.cost_base * removed / result.units
             result.units -= removed
             result.proceeds += amount - row.fees if row.kind == "sell" else ZERO
         else:
             result.units += row.quantity
-            ledger.add(row.quantity, amount + row.fees)
-            result.cost_base = ledger.cost
+            result.cost_base += amount + row.fees
             result.purchases += amount + row.fees
     return result
 

@@ -139,6 +139,13 @@ class SharesiesImporter(Importer):
         if currency != "NZD" and row.get("rate"):
             fx_rate = invert_rate(row["rate"], "Exchange rate")
         method = row.get("method", "")
+        legacy_ref = refs.ref(
+            row.get("order_id", ""), trade_date, kind, exchange, code, quantity, price
+        )
+        order_id = checked_text(row.get("order_id", ""), "Order ID")
+        reference = refs.counted_ref(f"order:{order_id}") if order_id else legacy_ref
+        if len(reference) > 128:
+            raise RowProblem("Order ID is too long for a trade reference.")
         return ParsedTrade(
             where=where,
             exchange=exchange,
@@ -151,8 +158,7 @@ class SharesiesImporter(Importer):
             fees=fees,
             fx_rate=fx_rate,
             fx_base="NZD" if fx_rate is not None else None,
-            external_ref=refs.ref(
-                row.get("order_id", ""), trade_date, kind, exchange, code, quantity, price
-            ),
+            external_ref=reference,
+            reference_aliases=(legacy_ref,) if order_id else (),
             notes=None if method.upper() in ("", "ORDER") else f"Sharesies: {method}",
         )

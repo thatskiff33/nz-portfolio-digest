@@ -71,6 +71,8 @@ class ParsedTrade:
     # The instrument's name when the file gives one; otherwise its code is used.
     name: str | None = None
     notes: str | None = None
+    # Previous reference formats accepted when looking up already stored trades.
+    reference_aliases: tuple[str, ...] = ()
 
 
 @dataclass
@@ -350,5 +352,9 @@ class Fingerprinter:
     def ref(self, *fields: object) -> str:
         digest = hashlib.sha256("\x1f".join(_canonical(f) for f in fields).encode()).hexdigest()
         key = digest[:40]
+        return self.counted_ref(key)
+
+    def counted_ref(self, key: str) -> str:
+        """Distinguish repeated references within one file."""
         self._seen[key] += 1
         return f"{key}-{self._seen[key]}"

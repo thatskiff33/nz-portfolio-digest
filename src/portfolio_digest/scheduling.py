@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import time as clock
 import tomllib
 from dataclasses import dataclass
@@ -18,6 +19,9 @@ from portfolio_digest.mailers import address
 
 logger = logging.getLogger(__name__)
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+# Compose marks the scheduler unhealthy when this file is older than 30 minutes.
+# It lives on the container's /tmp tmpfs, so a restart does not keep a stale beat.
+HEARTBEAT_PATH = Path("/tmp/scheduler-heartbeat")  # noqa: S108 - private container tmpfs
 
 
 class Schedule(BaseModel):
@@ -108,6 +112,14 @@ class ScheduleConfig(BaseModel):
         raise ConfigError("Unknown report schedule. Check the schedule configuration.")
 
 
+def _write_heartbeat(path: Path) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    except OSError:
+        logger.warning("Could not write the scheduler heartbeat.")
+
+
 def read_config(path: Path) -> ScheduleConfig:
     try:
         return ScheduleConfig.model_validate(tomllib.loads(path.read_text()))
@@ -124,6 +136,7 @@ class Scheduler:
 
     def run(self, execute, *, now=None, sleep=clock.sleep) -> int:
         now = now or (lambda: datetime.now(UTC))
+        heartbeat = Path(os.environ.get("SCHEDULER_HEARTBEAT", str(HEARTBEAT_PATH)))
         try:
             state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
             if not isinstance(state, dict):
@@ -164,6 +177,7 @@ class Scheduler:
         # Persist pending occurrences before delivery, so restarts retry failed jobs.
         save()
         while True:
+            _write_heartbeat(heartbeat)
             instant = now()
             for schedule in self.config.schedules:
                 scheduled = due[schedule.name]

@@ -5,7 +5,8 @@ name: portfolio-digest
 
 services:
   db:
-    image: postgres:18-alpine
+    # postgres:18-alpine
+    image: postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
@@ -25,10 +26,20 @@ services:
   migrate:
     build: .
     restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
     command: ["migrate"]
     volumes:
       - ./schedules.toml:/app/schedules.toml:ro
     environment: &app_environment
+      HOME: /tmp
+      SCHEDULER_HEARTBEAT: /tmp/scheduler-heartbeat
       DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
       AKAHU_APP_TOKEN: ${AKAHU_APP_TOKEN:-}
       AKAHU_USER_TOKEN: ${AKAHU_USER_TOKEN:-}
@@ -69,11 +80,30 @@ services:
     build: .
     restart: unless-stopped
     init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
     command: ["scheduler"]
     environment: *app_environment
     volumes:
       - ./schedules.toml:/app/schedules.toml:ro
       - scheduler-state:/app/state
+    # Fresh while the loop has run in the last 30 minutes. A price fetch can be slow.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - 'import os,sys,time; p=os.environ.get("SCHEDULER_HEARTBEAT","/tmp/scheduler-heartbeat"); sys.exit(0 if os.path.isfile(p) and time.time()-os.path.getmtime(p)<1800 else 1)'
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -81,7 +111,8 @@ services:
   # Nightly compressed dump of the portfolio database, pruned after BACKUP_KEEP_DAYS.
   # Take one on demand with: docker compose run --rm backup --once
   backup:
-    image: postgres:18-alpine
+    # postgres:18-alpine
+    image: postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/scripts/backup.sh"]
     # A small init process, so `docker compose stop backup` ends the script straight away
@@ -120,15 +151,34 @@ services:
   web:
     build: .
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
     entrypoint: ["python", "-m", "portfolio_digest.web.app"]
     ports:
       - "${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-8000}:8000"
     environment:
+      HOME: /tmp
       DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
       DASHBOARD_BIND: ${DASHBOARD_BIND:-127.0.0.1}
       DASHBOARD_SECURE_COOKIE: ${DASHBOARD_SECURE_COOKIE:-false}
       TIMEZONE: ${TIMEZONE:-Pacific/Auckland}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - 'import urllib.request; r=urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=3); raise SystemExit(0 if r.status==200 and r.read()==b"ok" else 1)'
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     depends_on:
       db:
         condition: service_healthy

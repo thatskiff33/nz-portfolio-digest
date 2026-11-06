@@ -206,3 +206,24 @@ def test_shared_scheduler_runs_every_configured_job_after_downtime(tmp_path):
     }
     state = json.loads(state_path.read_text())
     assert all(datetime.fromisoformat(state[s.name]) > due for s in config.schedules)
+
+
+def test_scheduler_writes_its_heartbeat_each_cycle(tmp_path, monkeypatch):
+    schedule = weekly()
+    config = ScheduleConfig(schedules=[schedule])
+    heartbeat = tmp_path / "heartbeat"
+    monkeypatch.setenv("SCHEDULER_HEARTBEAT", str(heartbeat))
+
+    class StopLoop(Exception):
+        pass
+
+    def sleep(_):
+        raise StopLoop
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, tmp_path / "state.json").run(
+            lambda *_args: pytest.fail("No job is due this cycle"),
+            now=lambda: datetime(2026, 10, 25, 8, tzinfo=UTC),
+            sleep=sleep,
+        )
+    assert heartbeat.is_file()

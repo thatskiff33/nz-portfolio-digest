@@ -298,8 +298,7 @@ def _is_due(saved: dict[str, AlertState], trigger: Trigger, cooldown_hours, now)
     Portfolio-drop and stale rules send once until they clear, then follow cooldown.
     """
     if trigger.close_dates is not None:
-        delivered = _delivery_key(trigger)
-        return all(row.rule_key != delivered for row in _saved_for_rule(saved, trigger.key))
+        return _delivery_key(trigger) not in saved
     previous = saved.get(trigger.key)
     if previous is None:
         return True

@@ -56,7 +56,7 @@ def build_report(session: Session, start: date, end: date) -> Report:
     span = (end - first).days
     days = sorted({first + timedelta(days=span * n // 7) for n in range(8)})
     try:
-        evaluate = combined_evaluator(session, first, end)
+        evaluate = combined_evaluator(session, end)
         result = evaluate(first, end)
         history = tuple(ValuePoint(day, evaluate(day, day).total.closing) for day in days)
     except ReturnError:

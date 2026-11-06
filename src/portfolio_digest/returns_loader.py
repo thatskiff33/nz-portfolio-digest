@@ -102,6 +102,17 @@ def first_activity_date(session: Session, portfolio_id: int, end: date) -> date 
     return min((day for day in (first_trade, first_income) if day is not None), default=None)
 
 
+def _recorded_fx(value, day, currency, origin, target, start, rates, flags):
+    """Translate broker FX using the report's dates and target currency."""
+    if origin == target:
+        return value
+    if day <= start or value is None or currency == target:
+        return None
+    with localcontext() as context:
+        context.prec = max(context.prec, 80)
+        return value * _lookup(rates.get(origin, ()), day, f"{origin}/{target} FX", flags, FX)
+
+
 def load_portfolio_inputs(
     session: Session,
     portfolio: Portfolio,
@@ -161,25 +172,18 @@ def load_portfolio_inputs(
     conversion_flags: set[str] = set()
 
     def recorded_fx(value, day, currency):
-        if raw_fx or target_currency == portfolio.base_currency:
+        if raw_fx:
             return value
-        if day <= start or value is None:
-            return None
-        if currency == target_currency:
-            # Native target-currency amounts need no conversion. Broker FX and
-            # market cross-rates need not be exact reciprocals.
-            return None
-        # Broker FX is relative to the portfolio base. Translate that base using
-        # the same dated lookup and stale-data rules as every other engine input.
-        with localcontext() as context:
-            context.prec = max(context.prec, 80)
-            return value * _lookup(
-                rates.get(portfolio.base_currency, ()),
-                day,
-                f"{portfolio.base_currency}/{target_currency} FX",
-                conversion_flags,
-                FX,
-            )
+        return _recorded_fx(
+            value,
+            day,
+            currency,
+            portfolio.base_currency,
+            target_currency,
+            start,
+            rates,
+            conversion_flags,
+        )
 
     trades_by_id = defaultdict(list)
     income_by_id = defaultdict(list)
@@ -283,7 +287,7 @@ def combine_reports(reports, start: date, end: date) -> Report:
     return _combined_report(tuple(combined), start, end, "NZD")
 
 
-def combined_evaluator(session: Session, start: date, end: date):
+def combined_evaluator(session: Session, end: date):
     """Read history once, preserving each sample's dated broker FX conversion."""
     inputs = [
         (
@@ -299,15 +303,7 @@ def combined_evaluator(session: Session, start: date, end: date):
             flags = set()
 
             def convert(value, day, currency, origin=origin, data=data, flags=flags):
-                if origin == "NZD":
-                    return value
-                if day <= first or value is None or currency == "NZD":
-                    return None
-                with localcontext() as context:
-                    context.prec = max(context.prec, 80)
-                    return value * _lookup(
-                        data.rates.get(origin, ()), day, f"{origin}/NZD FX", flags, FX
-                    )
+                return _recorded_fx(value, day, currency, origin, "NZD", first, data.rates, flags)
 
             holdings = tuple(
                 replace(

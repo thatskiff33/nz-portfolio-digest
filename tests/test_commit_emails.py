@@ -159,6 +159,8 @@ def test_accepts_noreply_and_allow_listed_trailers(repo, email):
         f"Invented change\n\nContact {BAD} for details.",
         f"Invented change\n\nReviewed-by: Invented <{BAD}>",
         f"Invented change mentioning {GOOD}.evil.invalid",
+        f"Invented {GOOD}.evil.invalid\n\nCo-authored-by: {GOOD}",
+        "Invented change\n\nContact invented@under_score.invalid",
     ],
 )
 def test_rejects_address_elsewhere_in_message(repo, message):

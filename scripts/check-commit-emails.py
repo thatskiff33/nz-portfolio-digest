@@ -19,7 +19,8 @@ import sys
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 MAILBOX = re.compile(r"[^\s@<>]+@users\.noreply\.github\.com")
 # Deliberately broad so that anything resembling an address is inspected (fail closed).
-EMAIL = re.compile(r"[^\s@<>()\"',;:]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+EMAIL = re.compile(r"[^\s@<>()\"',;:]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}")
+CO_AUTHOR = re.compile(r"co-authored-by:(.*)", re.IGNORECASE)
 # Fixed co-author identities used by coding tools; none of them belongs to a person.
 TOOL_IDENTITIES = frozenset(
     {
@@ -60,11 +61,16 @@ def commit_problems(commit: str) -> list[str]:
     if has_disallowed(trailers):
         problems.append("non-noreply email in trailer")
     message = git("show", "-s", "--format=%B", commit)
-    # Remove the trailer values already reported so each address is counted once.
-    for line in trailers.splitlines():
-        if line.strip():
-            message = message.replace(line.strip(), "")
-    if has_disallowed(message):
+    # Skip whole trailer lines already checked so each address is reported once. Matching
+    # whole lines, not substrings, keeps an address that merely starts with a trailer value
+    # in view.
+    values = {line.strip() for line in trailers.splitlines()}
+    rest = [
+        line
+        for line in message.splitlines()
+        if not ((m := CO_AUTHOR.fullmatch(line.strip())) and m[1].strip() in values)
+    ]
+    if has_disallowed("\n".join(rest)):
         problems.append("non-noreply email in message")
     return problems
 

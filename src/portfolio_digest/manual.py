@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from portfolio_digest.actions import validate_split_adjustments
 from portfolio_digest.importers.base import (
     ParsedTrade,
     checked_text,
@@ -18,7 +19,6 @@ from portfolio_digest.importers.base import (
 )
 from portfolio_digest.importing import find_or_create_instrument, portfolio_named
 from portfolio_digest.models import Instrument, Trade, TradeType
-from portfolio_digest.actions import validate_split_adjustments
 from portfolio_digest.returns import Transaction
 
 
@@ -68,7 +68,9 @@ def add_trade(session: Session, portfolio_name: str, entry: ParsedTrade) -> Trad
     session.get(Instrument, instrument.id, with_for_update=True)
     if entry.trade_type == TradeType.ADJUSTMENT:
         validate_split_adjustments(
-            session, instrument.id, portfolio_id=portfolio.id,
+            session,
+            instrument.id,
+            portfolio_id=portfolio.id,
             adjustment=Transaction(entry.trade_date, "adjustment", entry.quantity, entry.price),
         )
     trade = Trade(

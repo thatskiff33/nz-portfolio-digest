@@ -11,8 +11,6 @@ from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from portfolio_digest.splits import rescale_price
-
 from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError
@@ -22,6 +20,7 @@ from portfolio_digest.prices.calendars import FX, for_exchange
 from portfolio_digest.returns import ReturnError, units_at
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.returns_table import format_number as money
+from portfolio_digest.splits import rescale_price
 
 logger = logging.getLogger(__name__)
 

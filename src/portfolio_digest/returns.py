@@ -7,7 +7,7 @@ The cross-term belongs to currency. Their sum is q * (p1*f1 - p0*f0).
 Fees reduce capital. All percentages share opening value plus purchase outlays
 as denominator. Sales are withdrawals, not a reduction in capital put at risk.
 Non-split adjustments move units in or out at their recorded price without cash.
-A parcel keeps its local cost (q * p0), so a split rescales units exactly.
+A parcel keeps its local cost (q * p0) when a split rescales its units.
 See docs/RETURNS.md for boundaries, income and missing-data conventions.
 """
 
@@ -25,7 +25,6 @@ from sqlalchemy.orm import Session
 from portfolio_digest.importing import ImportFailure
 from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.calendars import FX, TradingCalendar, for_exchange
-
 from portfolio_digest.splits import rescale_price, split_change, split_warning
 
 ZERO = Decimal(0)
@@ -297,12 +296,16 @@ def _ordered_trades(holding: Holding, end: date) -> list[Transaction]:
                 for t in daily
             ):
                 if change:
-                    daily.insert(0, Transaction(day, "adjustment", change, ZERO, registry_split=True))
+                    daily.insert(
+                        0, Transaction(day, "adjustment", change, ZERO, registry_split=True)
+                    )
             else:
                 daily = [
                     replace(t, registry_split=True)
-                    if t.kind == "adjustment" and registry_adjustment_matches(held, t.quantity, split)
-                    else t for t in daily
+                    if t.kind == "adjustment"
+                    and registry_adjustment_matches(held, t.quantity, split)
+                    else t
+                    for t in daily
                 ]
         matching = next(
             (
@@ -394,9 +397,13 @@ def holding_history_flags(holding: Holding, end: date) -> tuple[str, ...]:
                 )
             continue
         held = holding_units_at(holding, split.day - timedelta(days=1))
-        if held > ZERO and not any(
-            t.day == split.day and is_split_trade(t, held, split) for t in holding.trades
-        ) and not any(s.automatic and s.day == split.day for s in holding.splits):
+        if (
+            held > ZERO
+            and not any(
+                t.day == split.day and is_split_trade(t, held, split) for t in holding.trades
+            )
+            and not any(s.automatic and s.day == split.day for s in holding.splits)
+        ):
             flags.add(split_warning(split.day))
     return tuple(sorted(flags))
 
@@ -692,7 +699,12 @@ def position(trades, splits, end: date, *, before_trades: bool = False) -> Posit
                 raise ImportFailure(
                     "Units removed exceed holdings; check trades and corporate actions."
                 )
-            result.cost_base -= result.cost_base * removed / result.units
+            # A full exit consumes the cost exactly, without a multiply/divide residual.
+            result.cost_base = (
+                ZERO
+                if removed == result.units
+                else result.cost_base - result.cost_base * removed / result.units
+            )
             result.units -= removed
             result.proceeds += amount - row.fees if row.kind == "sell" else ZERO
         else:

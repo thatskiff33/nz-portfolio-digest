@@ -18,8 +18,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from portfolio_digest.splits import rescale_price
-
 from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -32,6 +30,7 @@ from portfolio_digest.prices.http import SourceError
 from portfolio_digest.prices.sources import FxSource, Listing, PriceSource, _fits_numeric
 from portfolio_digest.prices.symbols import UnknownSymbol
 from portfolio_digest.returns import units_at
+from portfolio_digest.splits import rescale_price
 
 log = logging.getLogger(__name__)
 

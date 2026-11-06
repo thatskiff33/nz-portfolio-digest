@@ -218,7 +218,9 @@ def render(report: Report) -> tuple[str, str]:
         )
         text += ["", market, " | ".join(headers)]
         for row in rows:
-            label = row.label.split(":", 1)[1] + (" (stale)" if any(not f.startswith("Split on ") for f in row.flags) else "")
+            label = row.label.split(":", 1)[1] + (
+                " (stale)" if any(not f.startswith("Split on ") for f in row.flags) else ""
+            )
             cells = [
                 label,
                 f"{money(row.price)} {row.currency}" if row.price is not None else "",
@@ -243,7 +245,8 @@ def render(report: Report) -> tuple[str, str]:
                     text.append(message)
                     parts.append(
                         '<tr><td colspan="7" style="padding:10px;background:#fff0cb">'
-                        + escape(message) + "</td></tr>"
+                        + escape(message)
+                        + "</td></tr>"
                     )
         market_result = next(r for r in report.returns.markets if r.label == market)
         subtotal = total_row("Subtotal", market_result)

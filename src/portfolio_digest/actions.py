@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -13,9 +14,12 @@ from portfolio_digest.importing import ImportFailure
 from portfolio_digest.markets import instrument_code
 from portfolio_digest.models import CorporateAction, Instrument, Portfolio, Split, Trade
 from portfolio_digest.returns import (
-    SplitEvent, Transaction, instrument_position, ledger_holding, matching_registry_adjustments,
+    SplitEvent,
+    Transaction,
+    instrument_position,
+    ledger_holding,
+    matching_registry_adjustments,
 )
-from dataclasses import replace
 
 KINDS = (
     "split",
@@ -156,8 +160,12 @@ DUPLICATE_SPLIT = (
 
 
 def validate_split_adjustments(
-    session: Session, instrument_id: int, candidate: SplitEvent | None = None,
-    *, portfolio_id: int | None = None, adjustment: Transaction | None = None,
+    session: Session,
+    instrument_id: int,
+    candidate: SplitEvent | None = None,
+    *,
+    portfolio_id: int | None = None,
+    adjustment: Transaction | None = None,
 ) -> None:
     """Called under the instrument lock in either recording order."""
     trades = list(session.scalars(select(Trade).where(Trade.instrument_id == instrument_id)))
@@ -176,6 +184,7 @@ def validate_split_adjustments(
             holding = replace(holding, trades=holding.trades + (adjustment,))
             if any(
                 adjustment in matching_registry_adjustments(holding, split)
-                for split in holding.splits if split.automatic
+                for split in holding.splits
+                if split.automatic
             ):
                 raise ImportFailure(DUPLICATE_SPLIT)

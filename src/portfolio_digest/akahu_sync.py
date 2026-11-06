@@ -5,8 +5,6 @@ from datetime import UTC, datetime
 from decimal import Decimal, localcontext
 from typing import Any
 
-from portfolio_digest.splits import round_units
-
 from sqlalchemy import Engine, func, select
 
 from portfolio_digest import markets
@@ -14,8 +12,8 @@ from portfolio_digest.akahu import AkahuClient, AkahuError, exact_units
 from portfolio_digest.db import session_scope
 from portfolio_digest.models import AkahuMapping, AkahuSnapshot, Instrument, Portfolio
 from portfolio_digest.reconcile import Mismatch, ledger_units, reconcile
+from portfolio_digest.splits import round_units
 from portfolio_digest.validation import InvalidInput
-
 
 
 def _text(item: dict, *keys: str) -> str | None:

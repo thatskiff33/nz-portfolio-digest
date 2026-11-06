@@ -3,7 +3,7 @@
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 
-UNIT_SCALE = Decimal('0.00000001')
+UNIT_SCALE = Decimal("0.00000001")
 
 
 def round_units(units: Decimal) -> Decimal:
@@ -31,4 +31,4 @@ def rescale_price(price: Decimal, before: Decimal, after: Decimal) -> Decimal:
 
 
 def split_warning(day: date) -> str:
-    return f'Split on {day} not yet recorded; add the adjustment'
+    return f"Split on {day} not yet recorded; add the adjustment"

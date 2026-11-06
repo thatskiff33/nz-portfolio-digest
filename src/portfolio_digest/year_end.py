@@ -14,9 +14,9 @@ from portfolio_digest.returns import (
     ReturnError,
     _financial_math,
     _lookup,
-    is_split_trade,
     _ordered_trades,
     calculate_returns,
+    is_split_trade,
 )
 
 NOTES = (
@@ -171,12 +171,7 @@ def calculate_year_end(
         split = splits.get(day)
         first = (label, day) not in seen
         seen.add((label, day))
-        if (
-            trade.kind == "adjustment"
-            and split
-            and first
-            and is_split_trade(trade, held, split)
-        ):
+        if trade.kind == "adjustment" and split and first and is_split_trade(trade, held, split):
             new = held + trade.quantity
             for lot in lots[:-1]:
                 lot[0] = lot[0] * new / held

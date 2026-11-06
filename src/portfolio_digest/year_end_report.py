@@ -24,6 +24,11 @@ def safe_cell(value: str) -> str:
     return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
 
 
+def _fixed_point(value) -> str:
+    """Write a Decimal in full, without scientific notation."""
+    return format(value, "f")
+
+
 @_financial_math
 def render_csv(report: YearEnd) -> str:
     output = io.StringIO(newline="")
@@ -31,7 +36,9 @@ def render_csv(report: YearEnd) -> str:
     writer.writerow(["Year ending 31 March", report.year, "Currency", "NZD"])
     writer.writerow(["Holding", *(title for _, title in COLUMNS)])
     for row in (*report.rows, report.total):
-        writer.writerow([safe_cell(row.label), *(getattr(row, f) for f, _ in COLUMNS)])
+        writer.writerow(
+            [safe_cell(row.label), *(_fixed_point(getattr(row, f)) for f, _ in COLUMNS)]
+        )
     writer.writerow([])
     writer.writerow(["Holding", "Opening value", "Closing value", "Total return", "Return %"])
     for row in (*report.performance.holdings, report.performance.total):
@@ -39,14 +46,18 @@ def render_csv(report: YearEnd) -> str:
         writer.writerow(
             [
                 safe_cell(row.label),
-                row.opening,
-                row.closing,
-                row.amounts.total,
-                pct.total if pct else "N/A",
+                _fixed_point(row.opening),
+                _fixed_point(row.closing),
+                _fixed_point(row.amounts.total),
+                _fixed_point(pct.total) if pct else "N/A",
             ]
         )
     writer.writerow(
-        ["Peak foreign historical cost", report.foreign_peak, report.foreign_peak_day.isoformat()]
+        [
+            "Peak foreign historical cost",
+            _fixed_point(report.foreign_peak),
+            report.foreign_peak_day.isoformat(),
+        ]
     )
     writer.writerow(["Over NZ$50,000 FIF threshold", "Yes" if report.fif_exceeded else "No"])
     for note in (*NOTES, *report.flags):

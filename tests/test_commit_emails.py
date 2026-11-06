@@ -1,4 +1,4 @@
-"""The PR check covers every new commit without disclosing rejected identities."""
+"""The PR checks cover every new commit and the PR text without disclosing addresses."""
 
 import os
 import shutil
@@ -30,7 +30,7 @@ def repo(tmp_path):
 
     git("init", "-q")
 
-    def commit(author=GOOD, committer=GOOD):
+    def commit(author=GOOD, committer=GOOD, message="Invented"):
         env = dict(
             os.environ,
             GIT_AUTHOR_NAME="Invented",
@@ -38,7 +38,7 @@ def repo(tmp_path):
             GIT_AUTHOR_EMAIL=author,
             GIT_COMMITTER_EMAIL=committer,
         )
-        git("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "Invented", env=env)
+        git("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", message, env=env)
         return git("rev-parse", "HEAD")
 
     def check(base, head):
@@ -51,6 +51,17 @@ def repo(tmp_path):
         )
 
     return commit, check
+
+
+def check_pr_text(title, body):
+    env = dict(os.environ, PR_TITLE=title, PR_BODY=body)
+    return subprocess.run(  # noqa: S603
+        [sys.executable, str(SCRIPT), "--pr-text"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
 
 
 @pytest.mark.parametrize(
@@ -101,3 +112,100 @@ def test_missing_revision_fails_closed_without_git_error_output(repo, missing_he
     result = check(head, "0" * 40) if missing_head else check("0" * 40, head)
     assert result.returncode != 0
     assert result.stderr.strip() == "Cannot inspect commit range."
+
+
+def trailer(email):
+    return f"Invented change\n\nCo-authored-by: Invented Person <{email}>"
+
+
+def test_rejects_personal_co_author_trailer_on_noreply_commit(repo):
+    commit, check = repo
+    base = commit()
+    head = commit(message=trailer(BAD))
+    result = check(base, head)
+    assert result.returncode == 1
+    assert result.stdout.strip() == f"{head} non-noreply email in trailer"
+    assert BAD not in result.stdout + result.stderr
+
+
+def test_trailer_key_is_case_insensitive(repo):
+    commit, check = repo
+    base = commit()
+    head = commit(message=f"Invented change\n\nCo-Authored-By: Invented <{BAD}>")
+    assert check(base, head).stdout.strip() == f"{head} non-noreply email in trailer"
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        GOOD,
+        "334046780+sekreton[bot]@users.noreply.github.com",
+        "noreply@github.com",
+        "noreply@anthropic.com",
+        "cursoragent@cursor.com",
+    ],
+)
+def test_accepts_noreply_and_allow_listed_trailers(repo, email):
+    commit, check = repo
+    base = commit()
+    head = commit(message=trailer(email))
+    result = check(base, head)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        f"Invented change\n\nContact {BAD} for details.",
+        f"Invented change\n\nReviewed-by: Invented <{BAD}>",
+        f"Invented change mentioning {GOOD}.evil.invalid",
+        f"Invented {GOOD}.evil.invalid\n\nCo-authored-by: {GOOD}",
+        "Invented change\n\nContact invented@under_score.invalid",
+    ],
+)
+def test_rejects_address_elsewhere_in_message(repo, message):
+    commit, check = repo
+    base = commit()
+    head = commit(message=message)
+    result = check(base, head)
+    assert result.returncode == 1
+    assert result.stdout.strip() == f"{head} non-noreply email in message"
+    assert BAD not in result.stdout + result.stderr
+
+
+def test_reports_identity_trailer_and_message_separately(repo):
+    commit, check = repo
+    base = commit()
+    head = commit(BAD, message=f"Invented {BAD}\n\nCo-authored-by: Invented <{BAD}>")
+    result = check(base, head)
+    assert result.stdout.splitlines() == [
+        f"{head} non-noreply email",
+        f"{head} non-noreply email in trailer",
+        f"{head} non-noreply email in message",
+    ]
+    assert BAD not in result.stdout + result.stderr
+
+
+def test_accepts_pr_text_with_only_noreply_and_tool_addresses():
+    body = f"Invented change.\n\nCo-authored-by: Invented <{GOOD}>\nnoreply@anthropic.com"
+    result = check_pr_text("Invented title", body)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "title,body,expected",
+    [
+        (f"Invented {BAD}", "", ["pull request title non-noreply email"]),
+        ("Invented", f"Co-authored-by: Invented <{BAD}>", ["pull request body non-noreply email"]),
+        (
+            BAD,
+            BAD,
+            ["pull request title non-noreply email", "pull request body non-noreply email"],
+        ),
+    ],
+)
+def test_rejects_pr_text_address_without_disclosing_it(title, body, expected):
+    result = check_pr_text(title, body)
+    assert result.returncode == 1
+    assert result.stdout.splitlines() == expected
+    assert BAD not in result.stdout + result.stderr

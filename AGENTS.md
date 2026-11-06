@@ -75,12 +75,17 @@ agent does the GitHub steps.
 - **If someone ever has to open a PR as `thatskiff33-agents`:** first check that the
   account's GitHub setting "Keep my email addresses private" is on. Do not merge it
   otherwise; note it on the epic.
-- **Before merging:** the `commit-emails` CI check must pass. It checks author and
-  committer addresses for every PR commit and the actual PR head, without printing addresses.
-  Keep using squash merges and the post-merge checks below.
+- **Before merging:** the `commit-emails` and `pr-text-emails` CI checks must pass.
+  `commit-emails` checks the author, committer, `Co-authored-by` trailers and message of
+  every PR commit and the actual PR head. `pr-text-emails` checks the PR title and body,
+  which GitHub can use for the squash message. Neither prints an address. Keep using squash
+  merges and the post-merge checks below.
 - **After every merge:** check both `git log origin/main -1 --format=%ae` and
   `git log origin/main -1 --format=%ce`. Each must be a `users.noreply.github.com`
-  address or GitHub's `noreply@github.com` address.
+  address or GitHub's `noreply@github.com` address. Also read
+  `git log origin/main -1 --format=%B`: squash merges add a `Co-authored-by` trailer for
+  every other commit author, and each trailer address must be noreply too (or a coding
+  tool's fixed identity on the allow-list in `scripts/check-commit-emails.py`).
 - **Never:** push to `main` directly, force-push, or commit secrets, `.env` files, broker
   exports or real portfolio data.
 

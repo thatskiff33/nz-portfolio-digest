@@ -22,6 +22,7 @@ from portfolio_digest.returns import (
     ReturnError,
     SplitEvent,
     Transaction,
+    _financial_math,
     _lookup,
     calculate_returns,
     period_range,
@@ -64,6 +65,7 @@ def load_returns(
     return report
 
 
+@_financial_math
 def load_inputs(
     session: Session,
     name: str,
@@ -113,6 +115,7 @@ def _recorded_fx(value, day, currency, origin, target, start, rates, flags):
         return value * _lookup(rates.get(origin, ()), day, f"{origin}/{target} FX", flags, FX)
 
 
+@_financial_math
 def load_portfolio_inputs(
     session: Session,
     portfolio: Portfolio,

@@ -23,17 +23,22 @@ NOTES = (
     "Historical FIFO cost, including purchase fees; sale fees reduce proceeds. "
     "The returns engine also uses FIFO, but resets performance parcels to opening market value.",
     "NZ generally does not tax capital gains for long-term investors. Exceptions apply. "
-    "This is information, not tax advice.",
-    "Gross dividends exclude imputation credits. Withholding is classified as resident for "
-    "NZX holdings and foreign otherwise, using the recorded combined withholding field. "
+    "This is information, not tax advice. Tax points are to confirm with a tax specialist.",
+    "Gross dividends exclude imputation credits. Resident and foreign withholding follow "
+    "the components stored from broker or registry evidence. Any unclassified remainder "
+    "is resident withholding for an NZX holding and foreign withholding otherwise. "
+    "The report names each holding where that remainder was used. "
     "Check this classification against your tax statements.",
     "Foreign cost conservatively includes all non-NZX holdings, including Australian shares. "
     "Exemptions may apply. The NZ$50,000 FIF threshold is assessed per person across portfolios; "
     "this report covers this portfolio only and does not calculate FIF income. "
     "Without execution times, same-day additions precede sales for a conservative peak.",
-    "DRP income is included; reinvested units must also have a recorded buy or adjustment. "
-    "Splits require a matching quantity adjustment. Missing acquisition history uses the "
-    "recorded opening-balance or transfer value, which may differ from tax cost.",
+    "Imported DRPs that include a DRP quantity create the linked buy. "
+    "Add a purchase manually only for residual cash or a partial reinvestment. "
+    "Registry-recorded splits and consolidations need no extra quantity adjustment. "
+    "A Yahoo-only split needs a matching quantity adjustment. "
+    "Missing acquisition history uses the recorded opening-balance or transfer value, "
+    "which may differ from tax cost.",
     "Total return uses net cash dividends, as in email reports, and the returns engine's "
     "opening value plus purchase outlays denominator. "
     "Carried-forward prices and FX are listed below.",
@@ -56,6 +61,8 @@ class Dividend:
     withholding: Decimal
     net: Decimal
     fx: Decimal | None = None
+    resident_withholding_tax: Decimal = ZERO
+    foreign_withholding_tax: Decimal = ZERO
 
 
 @dataclass(frozen=True)
@@ -214,18 +221,45 @@ def calculate_year_end(
             peak, peak_day = current, start
         elif current > peak:
             peak, peak_day = current, day
+    # Stored components keep the broker's own split. Only the gap between combined
+    # withholding and those components still uses the NZX / non-NZX fallback.
+    fallback_holdings: set[str] = set()
     for payment in dividends:
         if not start < payment.day <= end:
             continue
-        values = (payment.gross, payment.imputation, payment.withholding, payment.net)
-        if any(not isinstance(v, Decimal) or not v.is_finite() or v < ZERO for v in values):
+        amounts = (
+            payment.gross,
+            payment.imputation,
+            payment.withholding,
+            payment.net,
+            payment.resident_withholding_tax,
+            payment.foreign_withholding_tax,
+        )
+        if any(
+            not isinstance(amount, Decimal) or not amount.is_finite() or amount < ZERO
+            for amount in amounts
+        ):
             raise ReturnError("Dividend amounts must be finite non-negative Decimals.")
+        classified = payment.resident_withholding_tax + payment.foreign_withholding_tax
+        if classified > payment.withholding:
+            raise ReturnError(
+                f"{payment.holding}: withholding components exceed combined withholding."
+            )
         row = stats.setdefault(payment.holding, [ZERO] * 7)
         rate = fx(payment.currency, payment.day, payment.fx)
         row[2] += payment.gross * rate
         row[3] += payment.imputation * rate
-        row[5 if payment.holding in foreign else 4] += payment.withholding * rate
+        row[4] += payment.resident_withholding_tax * rate
+        row[5] += payment.foreign_withholding_tax * rate
+        remainder = (payment.withholding - classified) * rate
+        if remainder:
+            row[5 if payment.holding in foreign else 4] += remainder
+            fallback_holdings.add(payment.holding)
         row[6] += payment.net * rate
+    flags.update(
+        f"Unclassified withholding for {holding} used the exchange fallback."
+        for holding in fallback_holdings
+    )
     active = {r.label for r in performance.holdings}
     rows = tuple(TaxRow(k, *v) for k, v in sorted(stats.items()) if k in active or any(v))
     total = TaxRow(

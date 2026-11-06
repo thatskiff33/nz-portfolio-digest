@@ -763,3 +763,74 @@ def test_email_loads_history_once_and_renders_identically(returns_engine, foreig
     assert actual == expected
     assert render(actual) == render(expected)
     assert len(reads) == 4  # One price and FX read per portfolio, regardless of samples.
+
+
+def test_drp_unit_price_uses_financial_precision(monkeypatch):
+    from dataclasses import replace
+    from decimal import getcontext, localcontext
+
+    from portfolio_digest.income import parse_income, store_income
+    from portfolio_digest.returns_loader import load_inputs, load_portfolio_inputs
+
+    consideration = D("1.000001")
+    quantity = D("3.00000001")
+    engine = _sqlite_engine(monkeypatch)
+    original = getcontext().prec
+    try:
+        with Session(engine) as session:
+            portfolio = Portfolio(name="Precision", base_currency="NZD")
+            instrument = Instrument(
+                exchange="NZX", code="FRACTION", name="Fraction", currency="NZD"
+            )
+            session.add_all([portfolio, instrument])
+            session.flush()
+            parsed = parse_income(
+                "fixture",
+                {"date": "2024-06-20", "gross": "1.000001", "net": "1.000001", "rwt": "0"},
+                "NZX",
+                instrument.code,
+                "NZD",
+                "fraction-drp",
+            )
+            store_income(
+                session,
+                portfolio.id,
+                instrument.id,
+                replace(parsed, drp_quantity=quantity),
+                "registry",
+            )
+            session.commit()
+            stored = session.scalar(select(Trade))
+            assert stored.consideration == consideration
+            assert stored.quantity == quantity
+
+            def loaded_price(prec):
+                getcontext().prec = prec
+                named = load_inputs(session, "Precision", "all", date(2024, 6, 20))
+                direct = load_portfolio_inputs(session, portfolio, named.start, named.end)
+                assert getcontext().prec == prec
+                assert named.holdings[0].trades[0].price == direct.holdings[0].trades[0].price
+                return named.holdings[0].trades[0].price
+
+            low_caller = loaded_price(12)
+            with localcontext() as context:
+                context.prec = 80
+                at_financial = consideration / quantity
+            with localcontext() as context:
+                context.prec = 28
+                at_default = consideration / quantity
+            assert low_caller == at_financial
+            assert low_caller != at_default
+            assert low_caller != stored.price
+            assert len(low_caller.as_tuple().digits) == 80
+
+            high_caller = loaded_price(96)
+            with localcontext() as context:
+                context.prec = 96
+                above_minimum = consideration / quantity
+            assert high_caller == above_minimum
+            assert len(high_caller.as_tuple().digits) == 96
+            assert getcontext().prec == 96
+    finally:
+        getcontext().prec = original
+        engine.dispose()

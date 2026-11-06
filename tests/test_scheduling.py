@@ -152,17 +152,17 @@ def test_changing_config_replaces_pending_time_on_restart(tmp_path):
     )
 
 
-def test_annual_year_end_runs_once_at_nine_auckland_across_dst_and_leap_year():
+def test_annual_year_end_runs_once_at_nineteen_auckland_across_dst_and_leap_year():
     from pathlib import Path
 
     schedule = read_config(Path("schedules.toml")).named_report("year-end")
     assert schedule.period == "tax_year"
     # 1 April is still NZDT in 2026 and 2027, but NZST in 2029.
-    first = datetime(2026, 3, 31, 20, tzinfo=UTC)
+    first = datetime(2026, 4, 1, 6, tzinfo=UTC)
     assert schedule.next_run(datetime(2026, 1, 1, tzinfo=UTC)) == first
-    assert schedule.next_run(first) == datetime(2027, 3, 31, 20, tzinfo=UTC)
-    assert schedule.next_run(datetime(2028, 3, 31, 20, tzinfo=UTC)) == datetime(
-        2029, 3, 31, 21, tzinfo=UTC
+    assert schedule.next_run(first) == datetime(2027, 4, 1, 6, tzinfo=UTC)
+    assert schedule.next_run(datetime(2028, 4, 1, 6, tzinfo=UTC)) == datetime(
+        2029, 4, 1, 7, tzinfo=UTC
     )
 
 

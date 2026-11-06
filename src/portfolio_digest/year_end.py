@@ -13,7 +13,7 @@ from portfolio_digest.returns import (
     Report,
     ReturnError,
     calculate_returns,
-    matches_split,
+    is_split_trade,
     ordered_trades,
 )
 
@@ -151,7 +151,7 @@ def parcel_events(holdings, start, end):
                 trade.day != previous_day
                 and trade.kind == "adjustment"
                 and split
-                and matches_split(held, trade.quantity, split)
+                and is_split_trade(trade, held, split)
             )
             priority = 0 if is_split else (2 if trade.delta < ZERO else 1)
             events.append((trade.day, priority, label, index, h, trade, splits))
@@ -185,12 +185,7 @@ def replay_parcels(holdings, start, end, fx, stats, foreign):
         split = splits.get(day)
         first = (label, day) not in seen
         seen.add((label, day))
-        if (
-            trade.kind == "adjustment"
-            and split
-            and first
-            and matches_split(held, trade.quantity, split)
-        ):
+        if trade.kind == "adjustment" and split and first and is_split_trade(trade, held, split):
             new = held + trade.quantity
             # Tax cost capitalises split fees; period performance expenses them.
             fee = trade.fees * fx(h.currency, day, trade.fx) if trade.fees else ZERO

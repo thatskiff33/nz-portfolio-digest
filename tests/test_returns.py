@@ -494,3 +494,66 @@ def test_base_currency_transaction_fx_must_be_one(kind):
     h = holding(trades=[trade(), trade(MID, kind, "1", fx="1.1")])
     with pytest.raises(ReturnError, match="Base-currency FX must be one"):
         calculate_returns((h,), START, END, {})
+
+
+def test_lookup_matches_linear_selection_with_logarithmic_work(monkeypatch):
+    from bisect import bisect_left, bisect_right
+    from datetime import timedelta
+
+    from portfolio_digest import parcels
+    from portfolio_digest.prices.calendars import for_exchange
+
+    first = date(2000, 1, 1)
+    observations = [Observation(first + timedelta(days=n), D(n)) for n in range(10_000)]
+    # Stable ordering must keep the original first observation on a duplicate date.
+    observations.insert(4001, Observation(observations[4000].day, D(99999)))
+    points = parcels.ObservationSeries(reversed(observations))
+    reads = 0
+
+    def counted(bisect):
+        def search(points, day, *, key):
+            def read(point):
+                nonlocal reads
+                reads += 1
+                return key(point)
+
+            return bisect(points, day, key=read)
+
+        return search
+
+    monkeypatch.setattr(parcels, "bisect_left", counted(bisect_left))
+    monkeypatch.setattr(parcels, "bisect_right", counted(bisect_right))
+    for n in range(180):
+        day = first + timedelta(days=9999 * n // 179)
+        flags = set()
+        expected = max((p for p in points if p.day <= day), key=lambda p: p.day)
+        assert parcels.lookup(points, day, "price", flags, for_exchange("NZX")) == expected.value
+        assert flags == set()
+    # A linear scan would inspect 1.8 million observations for these samples.
+    assert 0 < reads < 30 * 180
+    with pytest.raises(ReturnError, match="Missing price"):
+        parcels.lookup(points, first - timedelta(days=1), "price", set(), for_exchange("NZX"))
+
+
+def test_sampled_valuations_do_not_scan_price_history():
+    from datetime import timedelta
+
+    from portfolio_digest.returns import ObservationSeries
+
+    class IndexedOnlySeries(ObservationSeries):
+        def __iter__(self):
+            raise AssertionError("Valuations must use indexed price lookups")
+
+    first = date(2000, 1, 1)
+    points = IndexedOnlySeries(
+        Observation(first + timedelta(days=n), D(n + 1)) for n in range(10_000)
+    )
+    h = Holding("NZX", "FICTION", "NZD", (trade(first),), points)
+    for n in range(180):
+        offset = 9999 * n // 179
+        day = first + timedelta(days=offset)
+        result = holding_return(h, day, day, {})
+        # The original scan selected that day's exact stored close for ten units.
+        assert result.opening == result.closing == D(10 * (offset + 1))
+        assert result.amounts == Components()
+        assert result.flags == ()

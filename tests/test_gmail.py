@@ -1,4 +1,5 @@
 import base64
+import os
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -98,7 +99,8 @@ def test_save_refresh_token_refuses_existing_file_and_force_replaces_privately(t
     assert path.read_text() == "MADE_UP_SETTING=preserve-me\n"
     save_refresh_token(path, "made-up-token", force=True)
     assert path.read_text() == "GMAIL_REFRESH_TOKEN=made-up-token\n"
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.parametrize("force", [False, True])
@@ -111,7 +113,10 @@ def test_save_refresh_token_refuses_symlinks(tmp_path, force, dangling):
     if not dangling:
         target.write_text("preserve-me")
     link = tmp_path / "token-link"
-    link.symlink_to(target)
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("This platform cannot create symlinks.")
     with pytest.raises(GmailError):
         save_refresh_token(link, "made-up-token", force=force)
     assert link.is_symlink()
@@ -125,7 +130,8 @@ def test_save_refresh_token_creates_private_file(tmp_path):
     path = tmp_path / "made-up-token-file"
     save_refresh_token(path, "made-up-token")
     assert path.read_text() == "GMAIL_REFRESH_TOKEN=made-up-token\n"
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.posix
@@ -232,3 +238,132 @@ def test_gmail_message_interrupts_propagate(failure):
 
     with pytest.raises(failure):
         AsbGmailImporter(Client(), "ASB notes").fetch()
+
+
+def test_gmail_fetch_failure_after_valid_message_propagates():
+    class Client:
+        def label_id(self, name):
+            return "made-up-label"
+
+        def message_ids(self, label_id):
+            return iter(("valid", "network-failure"))
+
+        def raw_message(self, message_id):
+            if message_id == "network-failure":
+                raise GmailError("Gmail request failed.")
+            return (FIXTURES / "asb-contract-note.eml").read_bytes()
+
+    with pytest.raises(GmailError, match="request failed"):
+        AsbGmailImporter(Client(), "ASB notes").fetch()
+
+
+def test_save_refresh_token_without_nofollow(tmp_path, monkeypatch):
+    from portfolio_digest.gmail import save_refresh_token
+
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    path = tmp_path / "made-up-token-file"
+    save_refresh_token(path, "invented-refresh")
+    assert path.read_text() == "GMAIL_REFRESH_TOKEN=invented-refresh\n"
+
+
+@pytest.mark.parametrize("stage", ["write", "replace"])
+def test_failed_force_save_preserves_existing_file(tmp_path, monkeypatch, stage):
+    from portfolio_digest.gmail import save_refresh_token
+
+    path = tmp_path / "made-up-token-file"
+    path.write_text("preserve-me")
+
+    def fail(*args, **kwargs):
+        raise OSError("invented write failure")
+
+    monkeypatch.setattr(os, "fdopen" if stage == "write" else "replace", fail)
+    with pytest.raises(GmailError, match="Cannot save"):
+        save_refresh_token(path, "invented-refresh", force=True)
+    assert path.read_text() == "preserve-me"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_save_without_force_preserves_concurrent_output(tmp_path, monkeypatch):
+    from portfolio_digest import gmail
+
+    path = tmp_path / "made-up-token-file"
+    check_output = gmail._check_token_output
+    checks = 0
+
+    def create_after_final_check(output, *, force):
+        nonlocal checks
+        check_output(output, force=force)
+        checks += 1
+        if checks == 2:
+            output.write_text("preserve-concurrent-token")
+
+    monkeypatch.setattr(gmail, "_check_token_output", create_after_final_check)
+    with pytest.raises(GmailError, match="already exists"):
+        gmail.save_refresh_token(path, "invented-refresh")
+    assert path.read_text() == "preserve-concurrent-token"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize(
+    "kind,force",
+    [
+        ("existing", False),
+        ("symlink", False),
+        ("symlink", True),
+        ("dangling", False),
+        ("dangling", True),
+    ],
+)
+def test_authorise_checks_output_before_sign_in(tmp_path, monkeypatch, kind, force):
+    from portfolio_digest import gmail
+
+    output = tmp_path / "made-up-output"
+    if kind == "existing":
+        output.write_text("preserve-me")
+    else:
+        target = tmp_path / "made-up-target"
+        if kind == "symlink":
+            target.write_text("preserve-me")
+        try:
+            output.symlink_to(target)
+        except (OSError, NotImplementedError):
+            pytest.skip("This platform cannot create symlinks.")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Sign-in must not start for a refused output path.")
+
+    monkeypatch.setattr(gmail, "_Server", unexpected)
+    with pytest.raises(GmailError, match="already exists|symlink"):
+        gmail.authorise(settings(), output, show=unexpected, http=unexpected, force=force)
+
+
+@pytest.mark.parametrize("destination", ["http://other.invalid/", "https://other.invalid/"])
+def test_gmail_refuses_redirects_without_forwarding_credentials(monkeypatch, destination):
+    from email.message import Message
+    from io import BytesIO
+    from urllib.request import HTTPSHandler, build_opener
+    from urllib.response import addinfourl
+
+    from portfolio_digest import gmail
+
+    calls = []
+
+    class RedirectingGoogle(HTTPSHandler):
+        def https_open(self, request):
+            calls.append(request)
+            headers = Message()
+            headers["Location"] = destination
+            response = addinfourl(BytesIO(b"{}"), headers, request.full_url, 302)
+            response.msg = "Found"
+            return response
+
+    def fake_opener(*handlers):
+        return build_opener(RedirectingGoogle(), *handlers)
+
+    monkeypatch.setattr(gmail, "urlopen", fake_opener().open, raising=False)
+    monkeypatch.setattr(gmail, "build_opener", fake_opener, raising=False)
+    with pytest.raises(GmailError, match="302"):
+        gmail.urllib_http(
+            "GET", gmail.API_URL + "/labels", {"Authorization": "Bearer invented-token"}, None
+        )
+    assert len(calls) == 1

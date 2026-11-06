@@ -1,5 +1,6 @@
 """Public exact parcel operations and dated market-data lookup."""
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -41,6 +42,15 @@ class Observation:
             raise ReturnError("Observations must be finite, non-negative Decimals.")
 
 
+class ObservationSeries(tuple):
+    """Stable date ordering prepared once for logarithmic lookups."""
+
+    def __new__(cls, points=()):
+        if isinstance(points, cls):
+            return points
+        return super().__new__(cls, sorted(points, key=lambda p: p.day))
+
+
 def _skips_trading_day(calendar: TradingCalendar, source: date, day: date) -> bool:
     """True when the market traded after `source` and on or before `day`."""
     current = source + timedelta(days=1)
@@ -63,7 +73,13 @@ def lookup(
     Flagged when stored as stale, or when a trading day passed without a fresh one.
     Using Friday's close on a weekend or a market holiday is normal and not flagged.
     """
-    point = max((p for p in points if p.day <= day), key=lambda p: p.day, default=None)
+    if not isinstance(points, ObservationSeries):
+        points = ObservationSeries(points)
+    index = bisect_right(points, day, key=lambda p: p.day) - 1
+    # Stable ordering preserves the first observation when dates are duplicated.
+    point = (
+        points[bisect_left(points, points[index].day, key=lambda p: p.day)] if index >= 0 else None
+    )
     if point is None:
         raise ReturnError(f"Missing {label} on or before {day}.")
     if point.stale or _skips_trading_day(calendar, point.day, day):

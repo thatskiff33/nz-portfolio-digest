@@ -1,8 +1,9 @@
 """Alert evaluation using the shared returns engine and exchange calendars."""
 
 import logging
+import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from html import escape
 from urllib.parse import urlencode, urlsplit
@@ -13,12 +14,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError, runtime_settings
-from portfolio_digest.mailers import mail_settings, message, send
+from portfolio_digest.mailers import MailError, mail_settings, message, send
 from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.calendars import FX, for_exchange
 from portfolio_digest.returns import ReturnError, units_at
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.returns_table import format_number as money
+from portfolio_digest.scheduling import SchedulerStateError
+from portfolio_digest.splits import rescale_price
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +81,16 @@ def push(text: str) -> None:
         logger.warning("Alert email sent, but the optional push failed.")
 
 
+# Close dates appended to a daily-move key: daily:{exchange}:{code}:{previous}:{latest}.
+_CLOSE_PAIR = re.compile(r"\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}")
+
+
 @dataclass(frozen=True)
 class Trigger:
     key: str
     text: str
+    # Previous and latest close days for a daily move. Other rules leave this unset.
+    close_dates: tuple[date, date] | None = None
 
 
 def evaluate(session, portfolio, config, now):
@@ -143,7 +152,7 @@ def evaluate(session, portfolio, config, now):
             opening = prices[start]
             for split in splits:
                 if start < split.split_date <= end:
-                    opening = opening * split.shares_before / split.shares_after
+                    opening = rescale_price(opening, split.shares_before, split.shares_after)
             movement = (prices[end] / opening - 1) * Decimal(100)
             key = f"daily:{label}"
             states[key] = (
@@ -152,6 +161,7 @@ def evaluate(session, portfolio, config, now):
                     f"{label} moved {movement:+.2f}% ({start} to {end}); "
                     f"closing prices {opening} to {prices[end]} {instrument.currency} "
                     "(split-adjusted).",
+                    close_dates=(start, end),
                 )
                 if abs(movement) > limits.daily_percent
                 else None
@@ -208,69 +218,144 @@ def evaluate(session, portfolio, config, now):
     return states
 
 
-def run_alerts(session, config, *, dry_run=False, now=None):
-    """Deliver and persist per portfolio under a lock shared by concurrent checks."""
+def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
+    """Commit each portfolio before moving to the next or sending optional push."""
     if not config.alerts.enabled:
         return []
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
         raise ConfigError("Alert checks require an aware datetime.")
     output = []
-    portfolios = select(Portfolio).order_by(Portfolio.id)
-    if not dry_run:
-        portfolios = portfolios.with_for_update()
+    failed = False
+    portfolio_ids = session.scalars(select(Portfolio.id).order_by(Portfolio.id)).all()
     with localcontext() as context:
         context.prec = max(context.prec, 80)
-        for portfolio in session.scalars(portfolios).all():
-            states = {
-                s.rule_key: s
-                for s in session.scalars(
-                    select(AlertState).where(AlertState.portfolio_id == portfolio.id)
-                )
-            }
-            evaluated = evaluate(session, portfolio, config, now)
-            due = []
-            for key, trigger in evaluated.items():
-                previous = states.get(key)
-                if trigger is None:
-                    if previous is not None and not dry_run:
-                        session.delete(previous)
+        for portfolio_id in portfolio_ids:
+            if not dry_run and checkpoint and portfolio_id in checkpoint.delivered:
+                continue
+            try:
+                query = select(Portfolio).where(Portfolio.id == portfolio_id)
+                if not dry_run:
+                    query = query.with_for_update()
+                portfolio = session.scalar(query)
+                if portfolio is None:
                     continue
-                cooldown = config.alerts.cooldown_hours
-                if previous is None or (
-                    cooldown is not None
-                    # SQLite returns naive timestamps; the stored instant is always UTC.
-                    and now - previous.sent_at.replace(tzinfo=previous.sent_at.tzinfo or UTC)
-                    >= timedelta(hours=cooldown)
-                ):
-                    due.append(trigger)
-            if not due:
+                text = _run_portfolio(session, portfolio, config, now, dry_run)
+                if not dry_run:
+                    # Includes cleared rules and evaluations with no email due.
+                    session.commit()
+            except SchedulerStateError:
+                raise
+            except Exception:
+                session.rollback()
+                failed = True
+                logger.warning("Portfolio alert check failed.")
                 continue
-            text = f"Portfolio alerts | {portfolio.name}\n\n" + "\n".join(t.text for t in due)
-            text += "\n\nOpen your dashboard over Tailscale for details."
-            output.append(text)
-            if dry_run:
-                continue
-            settings = mail_settings()
-            recipients = config.recipients or ([settings.mail_owner] if settings.mail_owner else [])
-            html = (
-                '<html lang="en-NZ"><body style="font-family:Arial,sans-serif">'
-                + "".join(f"<p>{escape(line)}</p>" for line in text.splitlines() if line)
-                + "</body></html>"
-            )
-            send(
-                settings,
-                message(settings.mail_from, recipients, "Portfolio alerts", html, text),
-                recipients,
-            )
-            for trigger in due:
-                previous = states.get(trigger.key)
-                if previous is None:
-                    session.add(
-                        AlertState(portfolio_id=portfolio.id, rule_key=trigger.key, sent_at=now)
-                    )
-                else:
-                    previous.sent_at = now
-            session.flush()
-            push(text)
+            if not dry_run:
+                if checkpoint:
+                    checkpoint.complete(portfolio_id)
+                if text:
+                    push(text)
+            if text:
+                output.append(text)
+    if failed:
+        raise MailError("Some portfolio alerts failed. Check alert data and delivery settings.")
     return output
+
+
+def _delivery_key(trigger: Trigger) -> str:
+    """Key written to alert state. A daily move includes its close-date pair."""
+    if trigger.close_dates is None:
+        return trigger.key
+    previous_close, latest_close = trigger.close_dates
+    return f"{trigger.key}:{previous_close.isoformat()}:{latest_close.isoformat()}"
+
+
+def _saved_for_rule(saved: dict[str, AlertState], key: str) -> list[AlertState]:
+    """Delivery rows for one rule.
+
+    Daily moves match the holding key and any close-date suffix, so a row
+    recorded before pairs were stored is still found. Other rules match exactly.
+    """
+    if not key.startswith("daily:"):
+        row = saved.get(key)
+        return [] if row is None else [row]
+    prefix = f"{key}:"
+    return [
+        row
+        for rule_key, row in saved.items()
+        if rule_key == key
+        or (rule_key.startswith(prefix) and _CLOSE_PAIR.fullmatch(rule_key[len(prefix) :]))
+    ]
+
+
+def _is_due(saved: dict[str, AlertState], trigger: Trigger, cooldown_hours, now) -> bool:
+    """Whether this trigger should send.
+
+    A daily move sends when its close-date pair has not been sent. Repeating the
+    same pair, including a later fetch the same day or over a weekend, does not.
+    Portfolio-drop and stale rules send once until they clear, then follow cooldown.
+    """
+    if trigger.close_dates is not None:
+        return _delivery_key(trigger) not in saved
+    previous = saved.get(trigger.key)
+    if previous is None:
+        return True
+    if cooldown_hours is None:
+        return False
+    # SQLite returns naive timestamps; the stored instant is always UTC.
+    sent_at = previous.sent_at.replace(tzinfo=previous.sent_at.tzinfo or UTC)
+    return now - sent_at >= timedelta(hours=cooldown_hours)
+
+
+def _record_delivery(session, portfolio, saved, trigger, now) -> None:
+    if trigger.close_dates is not None:
+        delivered = _delivery_key(trigger)
+        for row in _saved_for_rule(saved, trigger.key):
+            if row.rule_key != delivered:
+                session.delete(row)
+        session.add(AlertState(portfolio_id=portfolio.id, rule_key=delivered, sent_at=now))
+        return
+    previous = saved.get(trigger.key)
+    if previous is None:
+        session.add(AlertState(portfolio_id=portfolio.id, rule_key=trigger.key, sent_at=now))
+    else:
+        previous.sent_at = now
+
+
+def _run_portfolio(session, portfolio, config, now, dry_run):
+    states = {
+        s.rule_key: s
+        for s in session.scalars(select(AlertState).where(AlertState.portfolio_id == portfolio.id))
+    }
+    evaluated = evaluate(session, portfolio, config, now)
+    due = []
+    for key, trigger in evaluated.items():
+        if trigger is None:
+            if not dry_run:
+                for row in _saved_for_rule(states, key):
+                    session.delete(row)
+            continue
+        if _is_due(states, trigger, config.alerts.cooldown_hours, now):
+            due.append(trigger)
+    if not due:
+        return None
+    text = f"Portfolio alerts | {portfolio.name}\n\n" + "\n".join(t.text for t in due)
+    text += "\n\nOpen your dashboard over Tailscale for details."
+    if dry_run:
+        return text
+    settings = mail_settings()
+    recipients = config.recipients or ([settings.mail_owner] if settings.mail_owner else [])
+    html = (
+        '<html lang="en-NZ"><body style="font-family:Arial,sans-serif">'
+        + "".join(f"<p>{escape(line)}</p>" for line in text.splitlines() if line)
+        + "</body></html>"
+    )
+    send(
+        settings,
+        message(settings.mail_from, recipients, "Portfolio alerts", html, text),
+        recipients,
+    )
+    for trigger in due:
+        _record_delivery(session, portfolio, states, trigger, now)
+    return text

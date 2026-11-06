@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -16,9 +16,10 @@ from portfolio_digest.db import make_engine
 from portfolio_digest.importers.base import FileProblem, RowProblem
 from portfolio_digest.importing import ImportFailure, undo_import
 from portfolio_digest.manual import add_trade, prepare_trade
-from portfolio_digest.models import ImportRun, Income, Instrument, Portfolio, Price, Trade
+from portfolio_digest.models import ImportRun, Income, Instrument, Portfolio, Trade
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
-from portfolio_digest.returns_loader import first_activity_date
+from portfolio_digest.returns import ReturnError, holding_return
+from portfolio_digest.returns_loader import first_activity_date, load_portfolio_inputs
 from portfolio_digest.web.security import COOKIE, LIFETIME, Security
 from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
@@ -62,10 +63,15 @@ def create_app(
     templates.env.filters["quantity"] = lambda n: format(n.normalize(), "f")
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
+    @app.get("/healthz")
+    def healthz() -> PlainTextResponse:
+        """Liveness only. Does not open a session or read the database."""
+        return PlainTextResponse("ok")
+
     @app.middleware("http")
     async def headers(request: Request, call_next):
         try:
-            if not request.url.path.startswith("/static/"):
+            if request.url.path != "/healthz" and not request.url.path.startswith("/static/"):
                 request.state.session_id, request.state.browser = security.browser(request)
         except HTTPException as exc:
             response = HTMLResponse(str(exc.detail), status_code=exc.status_code)
@@ -220,30 +226,39 @@ def create_app(
             if not trades and not income:
                 raise HTTPException(404, "Holding not found in this portfolio.")
             instrument = session.get(Instrument, iid)
-            prices = list(
-                session.scalars(
-                    select(Price).where(Price.instrument_id == iid).order_by(Price.price_date)
-                )
-            )
             today = datetime.now(ZoneInfo(timezone)).date()
-            begin, finish = period_dates(
-                "all", today, first_activity_date(session, pid, today) or today
-            )
-            values = Dashboard(session, p, begin, finish)
-            result = next((row.result for row in values.holdings if row.instrument.id == iid), None)
+            activity = [t.trade_date for t in trades if t.trade_date <= today] + [
+                i.paid_date
+                for i in income
+                if i.paid_date <= today and i.kind in ("dividend", "distribution")
+            ]
+            begin, finish = period_dates("all", today, min(activity, default=today))
+            result, error = None, None
+            prices = ()
+            try:
+                data = load_portfolio_inputs(session, p, begin, finish, instrument_id=iid)
+                prices = data.holdings[0].prices if data.holdings else ()
+                if data.holdings:
+                    result = holding_return(
+                        data.holdings[0], begin, finish, data.rates, data.base_currency
+                    )
+            except ReturnError as exc:
+                error = str(exc)
+            count = len(prices)
+            indices = sorted({(count - 1) * n // 179 for n in range(180)}) if count else []
             return render(
                 request,
                 session,
                 "holding.html",
                 result=result,
-                returns_error=values.error,
+                returns_error=error,
                 start=begin,
                 end=finish,
                 portfolio=p,
                 instrument=instrument,
                 trades=trades,
                 income=income,
-                series=[(r.price_date, r.close) for r in prices],
+                series=[(prices[n].day, prices[n].value) for n in indices],
             )
 
     @app.get("/p/{pid}/imports", response_class=HTMLResponse)

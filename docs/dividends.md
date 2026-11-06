@@ -87,9 +87,14 @@ be decided again. Fetching needs network access; importing, recording and report
 
 Split and consolidation ratios are old units (`before`) to new units (`after`). They
 apply to all portfolios before trades on the effective date, retain total cost base, and
-are recognised by the price quality check. Do not also enter an adjustment trade for
-the same split. Existing histories that already contain split adjustments must be
-reconciled before recording that split here. Registry records survive Yahoo refreshes;
+round the resulting holding total to 8 decimal places, half-even. Every parcel keeps
+its total cost and entry FX. Record cash paid in lieu of fractional units as a separate
+owner-recorded sale; the engine does not infer it. Do not also enter an adjustment trade
+for the same split. Either recording order is refused if a matching adjustment and
+registry action fall within inclusive ±10 calendar days, across affected portfolios.
+Reconcile those entries before recording the action. Older same-day matching pairs
+count once; differently dated pairs remain in the ledger and produce a reconciliation
+warning. Registry records survive Yahoo refreshes;
 a conflicting Yahoo ratio stops that price fetch with an error.
 
 ```sh
@@ -137,7 +142,12 @@ distinction between earned income and invested cash.
 
 Amounts convert to portfolio base currency at each cash flow's date, using broker FX
 when given, otherwise the latest stored FX rate on or before that date. Valuations use
-the latest raw close on or before the report date, adjusted for later registry splits.
+the latest raw close on or before the report date, adjusted for later splits from any source, strictly after the close's date and on or
+before valuation. Downloaded splits require an exact matching owner ADJUSTMENT and do
+not change units themselves. An unrecorded downloaded split affecting day-opening units
+produces "Split on DATE not yet recorded; add the adjustment" in returns, email and
+`prices check` (which exits non-zero). The portfolio-drop alert is suppressed until
+resolved. CSV and Akahu reconciliation compare both sides at 8 decimal places, half-even.
 Missing prices or FX raise an explicit error; stale observations are flagged. See
 [period returns](RETURNS.md) for attribution and denominator conventions. Report labels
 use current instrument codes. Email and dashboard consumers can reuse the shared report.

@@ -466,3 +466,144 @@ def test_csv_non_utf8_file_has_clear_error():
 
     with pytest.raises(FileProblem, match="not UTF-8"):
         list(read_csv(b"Code\n\xff\n", {"code": ("Code",)}, {"code"}))
+
+
+@pytest.mark.parametrize("price", [b"410.123457", b"410.12"])
+def test_sharesies_order_reference_survives_changed_price(price):
+    content = fixture("sharesies-transactions.csv")
+    original = SharesiesImporter().parse(content, ParseContext()).trades[3]
+    changed = (
+        SharesiesImporter().parse(content.replace(b"410.1234567", price), ParseContext()).trades[3]
+    )
+    assert original.external_ref == changed.external_ref == "order:made-up-1004-1"
+
+
+def test_sharesies_repeated_order_ids_and_missing_ids_keep_separate_rows():
+    from portfolio_digest.importers.base import Fingerprinter
+
+    lines = fixture("sharesies-transactions.csv").splitlines(keepends=True)
+    row = lines[1]
+    result = SharesiesImporter().parse(lines[0] + row + row, ParseContext())
+    assert [trade.external_ref for trade in result.trades] == [
+        "order:made-up-1001-1",
+        "order:made-up-1001-2",
+    ]
+    no_id = row.replace(b"made-up-1001", b"")
+    result = SharesiesImporter().parse(lines[0] + no_id + no_id, ParseContext())
+    refs = Fingerprinter()
+    for trade in result.trades:
+        assert trade.reference_aliases == ()
+        assert trade.external_ref == refs.ref(
+            "",
+            trade.trade_date,
+            trade.trade_type,
+            trade.exchange,
+            trade.code,
+            trade.quantity,
+            trade.price,
+        )
+
+
+def test_sharesies_refuses_order_id_that_cannot_fit_stored_reference():
+    content = fixture("sharesies-transactions.csv").replace(b"made-up-1001", b"x" * 128)
+    result = SharesiesImporter().parse(content, ParseContext())
+    assert len(result.trades) == 4
+    assert len(result.errors) == 1
+    assert result.errors[0].where == "line 2"
+    assert "Order ID is too long" in result.errors[0].message
+
+
+@pytest.mark.parametrize("value", ["1,5", "1.234,56", "12,34,5", "27,50"])
+@pytest.mark.parametrize("column", ["Quantity", "Price in Dollars", "Brokerage"])
+def test_decimal_commas_are_row_errors(value, column):
+    import csv
+    import io
+
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream)
+    columns = [
+        "Trade Date",
+        "Instrument Code",
+        "Market Code",
+        "Quantity",
+        "Price in Dollars",
+        "Transaction Type",
+        "Brokerage",
+    ]
+    row = ["14/03/2024", "EXM", "NZX", "1", "2", "BUY", "0"]
+    row[columns.index(column)] = value
+    writer.writerow(columns)
+    writer.writerow(row)
+    result = SharesightCsvImporter().parse(stream.getvalue().encode(), ParseContext())
+    assert not result.trades
+    assert len(result.errors) == 1
+    assert result.errors[0].where == "line 2"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1,234.56", "1234.56"),
+        ("12,345", "12345"),
+        ("-1,234.56", "-1234.56"),
+    ],
+)
+def test_valid_thousands_groups_are_exact(value, expected):
+    from portfolio_digest.importers.base import parse_decimal
+
+    assert parse_decimal(value, "amount") == Decimal(expected)
+
+
+@pytest.fixture
+def auckland_date_boundary(monkeypatch):
+    from datetime import UTC, datetime
+
+    from portfolio_digest.importers import base
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2024, 6, 30, 12, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(base, "datetime", Clock)
+
+
+@pytest.mark.parametrize("value", ["14/03/24", "04/03/68", "2024-07-03"])
+def test_invalid_trade_dates_name_the_line(auckland_date_boundary, value):
+    content = (
+        "Trade Date,Instrument Code,Market Code,Quantity,Price in Dollars,"
+        f"Transaction Type\n{value},EXM,NZX,1,2,BUY\n"
+    ).encode()
+    result = SharesightCsvImporter().parse(content, ParseContext())
+    assert not result.trades
+    assert result.errors[0].where == "line 2"
+
+
+def test_date_limit_uses_auckland_today_plus_one_day(auckland_date_boundary):
+    from datetime import date
+
+    from portfolio_digest.importers.base import RowProblem, parse_date
+
+    assert parse_date("2024-07-02") == date(2024, 7, 2)
+    with pytest.raises(RowProblem, match="later than"):
+        parse_date("2024-07-03")
+
+
+@pytest.mark.parametrize("value,accepted", [(b"14/03/24", True), (b"04/03/68", False)])
+def test_asb_contract_note_two_digit_years(auckland_date_boundary, value, accepted):
+    content = fixture("asb-contract-note.eml").replace(b"14/03/2024", value)
+    result = AsbEmailImporter().parse(content, ParseContext())
+    assert bool(result.trades) is accepted
+    assert bool(result.errors) is not accepted
+
+
+def test_future_payment_date_names_the_line(auckland_date_boundary):
+    content = (
+        b"Order ID,Trade date,Instrument code,Market code,Quantity,Price,Transaction type,"
+        b"Currency,Gross amount,Amount\n"
+        b"made-up-dividend,2024-07-03,EXM,NZX,0,0,DIVIDEND,NZD,10,10\n"
+    )
+    result = SharesiesImporter().parse(content, ParseContext())
+    assert not result.incomes
+    assert result.errors[0].where == "line 2"
+    assert "later than" in result.errors[0].message

@@ -25,3 +25,6 @@ report.txt
 
 # Private year-end previews.
 private-preview/
+
+# Scheduler and operations notice state written at runtime.
+state/

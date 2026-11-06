@@ -103,7 +103,7 @@ def render(report: Report) -> tuple[str, str]:
     if not report.holdings:
         parts.append("<p>No holdings or activity in this period.</p>")
         text.append("No holdings or activity in this period.")
-    if any(h.flags for h in report.holdings):
+    if any(any(not f.startswith("Split on ") for f in h.flags) for h in report.holdings):
         parts.append(
             '<p style="padding:10px;background:#fff0cb">'
             "Stale prices or FX: flagged values may be out of date.</p>"
@@ -218,7 +218,7 @@ def render(report: Report) -> tuple[str, str]:
         )
         text += ["", market, " | ".join(headers)]
         for row in rows:
-            label = row.label.split(":", 1)[1] + (" (stale)" if row.flags else "")
+            label = row.label.split(":", 1)[1] + (" (stale)" if any(not f.startswith("Split on ") for f in row.flags) else "")
             cells = [
                 label,
                 f"{money(row.price)} {row.currency}" if row.price is not None else "",
@@ -237,6 +237,14 @@ def render(report: Report) -> tuple[str, str]:
             )
             text.append(f"{row.name} ({row.units} units)")
             text.append(" | ".join(cells))
+            for flag in row.flags:
+                if flag.startswith("Split on "):
+                    message = f"{row.label}: {flag}"
+                    text.append(message)
+                    parts.append(
+                        '<tr><td colspan="7" style="padding:10px;background:#fff0cb">'
+                        + escape(message) + "</td></tr>"
+                    )
         market_result = next(r for r in report.returns.markets if r.label == market)
         subtotal = total_row("Subtotal", market_result)
         parts.append(html_row(subtotal[:7], True) + "</table>")

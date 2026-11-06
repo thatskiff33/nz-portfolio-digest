@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+from portfolio_digest.splits import rescale_price
+
 from sqlalchemy import Engine, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -211,7 +213,7 @@ def carry_forward(
     for day in sorted(days | set(known) | set(splits)):
         if day in splits and previous is not None:
             before, after = splits[day]
-            previous = previous * before / after
+            previous = rescale_price(previous, before, after)
         if day in known:
             previous = known[day]
         elif day in days and previous is not None:

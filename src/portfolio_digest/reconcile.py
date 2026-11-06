@@ -19,6 +19,7 @@ from portfolio_digest.importers.base import (
 )
 from portfolio_digest.models import Instrument, Split, Trade
 from portfolio_digest.returns import units_at
+from portfolio_digest.splits import round_units
 
 
 @dataclass(frozen=True)
@@ -63,8 +64,8 @@ def _unit_differences(
     actual: dict[Key, Decimal], snapshot: dict[Key, Decimal]
 ) -> Iterator[tuple[Key, Decimal, Decimal]]:
     for key in sorted(actual.keys() | snapshot.keys()):
-        app_units = actual.get(key, Decimal(0))
-        snapshot_units = snapshot.get(key, Decimal(0))
+        app_units = round_units(actual.get(key, Decimal(0)))
+        snapshot_units = round_units(snapshot.get(key, Decimal(0)))
         if app_units != snapshot_units:
             yield key, app_units, snapshot_units
 

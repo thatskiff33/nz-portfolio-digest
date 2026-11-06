@@ -12,7 +12,10 @@ from portfolio_digest.importers.base import RowProblem, checked_text, parse_pric
 from portfolio_digest.importing import ImportFailure
 from portfolio_digest.markets import instrument_code
 from portfolio_digest.models import CorporateAction, Instrument, Portfolio, Split, Trade
-from portfolio_digest.returns import instrument_position
+from portfolio_digest.returns import (
+    SplitEvent, Transaction, instrument_position, ledger_holding, matching_registry_adjustments,
+)
+from dataclasses import replace
 
 KINDS = (
     "split",
@@ -55,6 +58,7 @@ def record_action(
         split = session.get(Split, (instrument.id, day))
         if split and (split.shares_before != before or split.shares_after != after):
             raise ImportFailure("A different split ratio is already recorded on this date.")
+        validate_split_adjustments(session, instrument.id, SplitEvent(day, before, after, True))
         if split is None:
             session.add(
                 Split(
@@ -143,3 +147,35 @@ def record_action(
     session.add(action)
     session.flush()
     return action
+
+
+DUPLICATE_SPLIT = (
+    "That split and adjustment would count the same units twice within 10 days. "
+    "Reconcile the entries first; see docs/dividends.md."
+)
+
+
+def validate_split_adjustments(
+    session: Session, instrument_id: int, candidate: SplitEvent | None = None,
+    *, portfolio_id: int | None = None, adjustment: Transaction | None = None,
+) -> None:
+    """Called under the instrument lock in either recording order."""
+    trades = list(session.scalars(select(Trade).where(Trade.instrument_id == instrument_id)))
+    splits = list(session.scalars(select(Split).where(Split.instrument_id == instrument_id)))
+    portfolio_ids = {t.portfolio_id for t in trades} if portfolio_id is None else {portfolio_id}
+    for key in portfolio_ids:
+        holding, _ = ledger_holding([t for t in trades if t.portfolio_id == key], splits)
+        if candidate is not None:
+            holding = replace(
+                holding,
+                splits=tuple(s for s in holding.splits if s.day != candidate.day) + (candidate,),
+            )
+            if matching_registry_adjustments(holding, candidate):
+                raise ImportFailure(DUPLICATE_SPLIT)
+        elif adjustment is not None:
+            holding = replace(holding, trades=holding.trades + (adjustment,))
+            if any(
+                adjustment in matching_registry_adjustments(holding, split)
+                for split in holding.splits if split.automatic
+            ):
+                raise ImportFailure(DUPLICATE_SPLIT)

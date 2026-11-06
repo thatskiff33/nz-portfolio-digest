@@ -221,3 +221,15 @@ def test_shared_change_retains_decimal_precision():
     with localcontext() as context:
         context.prec = 10
         assert row.change == D(".01")
+
+
+def test_split_warning_is_actionable_and_escaped_in_email():
+    report = example_report()
+    warning = 'Split on 2026-10-06 not yet recorded; add the adjustment'
+    row = replace(report.holdings[0], label='ASX:FERN<&>', flags=(warning,))
+    report = replace(report, returns=replace(report.returns, holdings=(row,)))
+    html, text = render(report)
+    assert warning in text and warning in html
+    assert 'FERN<&>' in text
+    assert 'FERN&lt;&amp;&gt;' in html
+    assert '(stale)' not in text

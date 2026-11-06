@@ -17,7 +17,9 @@ from portfolio_digest.importers.base import (
     parse_security_name,
 )
 from portfolio_digest.importing import find_or_create_instrument, portfolio_named
-from portfolio_digest.models import Trade, TradeType
+from portfolio_digest.models import Instrument, Trade, TradeType
+from portfolio_digest.actions import validate_split_adjustments
+from portfolio_digest.returns import Transaction
 
 
 def prepare_trade(
@@ -63,6 +65,12 @@ def add_trade(session: Session, portfolio_name: str, entry: ParsedTrade) -> Trad
     instrument = find_or_create_instrument(
         session, entry.exchange, entry.code, entry.currency, entry.name
     )
+    session.get(Instrument, instrument.id, with_for_update=True)
+    if entry.trade_type == TradeType.ADJUSTMENT:
+        validate_split_adjustments(
+            session, instrument.id, portfolio_id=portfolio.id,
+            adjustment=Transaction(entry.trade_date, "adjustment", entry.quantity, entry.price),
+        )
     trade = Trade(
         portfolio_id=portfolio.id,
         instrument_id=instrument.id,

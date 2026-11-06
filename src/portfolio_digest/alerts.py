@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from portfolio_digest.splits import rescale_price
+
 from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError
@@ -144,7 +146,7 @@ def evaluate(session, portfolio, config, now):
             opening = prices[start]
             for split in splits:
                 if start < split.split_date <= end:
-                    opening = opening * split.shares_before / split.shares_after
+                    opening = rescale_price(opening, split.shares_before, split.shares_after)
             movement = (prices[end] / opening - 1) * Decimal(100)
             key = f"daily:{label}"
             states[key] = (

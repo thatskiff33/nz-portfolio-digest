@@ -421,3 +421,12 @@ def test_push_refuses_redirects_with_credentials(target):
     )
     with pytest.raises(HTTPError):
         alerts._push_opener.error("http", request, Mock(), 302, "Found", {"location": target})
+
+
+def test_unrecorded_downloaded_split_suppresses_portfolio_drop(sample):
+    from portfolio_digest.models import Split
+    session, portfolio, instrument = sample
+    session.add(Split(instrument_id=instrument.id, split_date=date(2026,10,16), shares_before=D(1), shares_after=D(4), source='yahoo'))
+    session.get(Price, (instrument.id, date(2026,10,16))).close = D('2.5')
+    states = alerts.evaluate(session, portfolio, config(), NOW)
+    assert states['portfolio'] is None

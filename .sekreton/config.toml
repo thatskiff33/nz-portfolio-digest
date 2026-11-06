@@ -21,7 +21,7 @@ on_merge = false
 run = "scripts/deploy-dashboard.sh"
 
 [environment]
-packages = ["openssh-client"]
+packages = ["openssh-client", "shellcheck"]
 
 # Optional manual update of an already provisioned server; no deployment on merge.
 [deploy.server]

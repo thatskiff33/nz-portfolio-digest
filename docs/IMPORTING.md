@@ -7,8 +7,7 @@ inherited holding.
 
 Every attempt is recorded as an import run. A malformed file imports nothing. Importing
 an overlapping or identical export is safe because each broker row has a stable reference.
-Use `portfolio-digest import list` to see the audit trail and `portfolio-digest import undo
-ID` to remove the rows written by one successful run. Undo does not remove instruments or
+Use `docker compose run --rm migrate import list` to see the audit trail and `docker compose run --rm migrate import undo ID` to remove the rows written by one successful run. Undo does not remove instruments or
 touch trades from another run. If another successful run supplied the same trade, undo
 retains it and reassigns it to that run. Undo those runs too to remove their shared trades.
 Identical repeated references within one input collapse to one trade. A stored reference
@@ -25,12 +24,31 @@ Broker exports contain private financial information. Keep them outside the repo
 prefer the ignored `imports/` directory on the server, and remove them when they are no
 longer needed.
 
+## Docker server workflow
+
+Run these commands from the server checkout. Mount the private host `imports/` directory
+read-only at `/imports` inside each one-off container. Host paths such as
+`imports/transactions.csv` are not visible inside Docker without this mount. Make the
+files and parent directories readable by the container app user (uid 10001), while keeping
+access limited to trusted users. Do not commit exports or make them publicly readable.
+Postgres has no published host port; use the Compose CLI rather than a host database URL.
+
+```sh
+docker compose run --rm migrate import list
+docker compose run --rm migrate import undo 12
+```
+
+For local development only, an installed `portfolio-digest` CLI can replace
+`docker compose run --rm migrate`, with a separately reachable development database.
+Omit the volume option and use host file paths in that case. Gmail authorisation below
+runs locally on a trusted machine with a browser.
+
 ## Sharesies
 
 In Sharesies, choose **Account > Generate Reports > Transaction Report**. Import the CSV:
 
 ```sh
-portfolio-digest import sharesies imports/transactions.csv --portfolio "Personal"
+docker compose run --rm -v "$PWD/imports:/imports:ro" migrate import sharesies /imports/transactions.csv --portfolio "Personal"
 ```
 
 The importer handles NZX, ASX and US trades, including Smart ETFs and fractional units.
@@ -50,7 +68,7 @@ machine, then import the text. The PDF itself is deliberately refused.
 
 ```sh
 pdftotext -layout trade-statement.pdf imports/asb-history.txt
-portfolio-digest import asb-statement imports/asb-history.txt --portfolio "Personal"
+docker compose run --rm -v "$PWD/imports:/imports:ro" migrate import asb-statement /imports/asb-history.txt --portfolio "Personal"
 ```
 
 Statement fees include brokerage plus GST when a separate GST column appears between
@@ -71,7 +89,7 @@ never silently leave the holding short. A saved contract-note email can also be 
 imported directly:
 
 ```sh
-portfolio-digest import asb-email imports/contract-note.eml --portfolio "Personal"
+docker compose run --rm -v "$PWD/imports:/imports:ro" migrate import asb-email /imports/contract-note.eml --portfolio "Personal"
 ```
 
 For the ongoing feed:
@@ -88,7 +106,7 @@ For the ongoing feed:
 6. Run the feed whenever required:
 
 ```sh
-portfolio-digest import asb-gmail --portfolio "Personal"
+docker compose run --rm migrate import asb-gmail --portfolio "Personal"
 ```
 
 Only messages carrying the configured label are read. OAuth secrets and tokens are never
@@ -100,7 +118,7 @@ Some brokers export a CSV described as "for Sharesight". This is only a file for
 app does not connect to, scrape, or call Sharesight.
 
 ```sh
-portfolio-digest import sharesight-csv imports/broker-trades.csv --portfolio "Personal"
+docker compose run --rm -v "$PWD/imports:/imports:ro" migrate import sharesight-csv /imports/broker-trades.csv --portfolio "Personal"
 ```
 
 Recognised columns are `Trade Date`, `Instrument Code`, `Market Code`, `Quantity`, `Price
@@ -113,7 +131,7 @@ manual adjustments so their signed unit effect is explicit.
 Use manual entries for corrections, gifts and the rare real opening balance:
 
 ```sh
-portfolio-digest trade add --portfolio "Personal" --date 2024-06-30 \
+docker compose run --rm migrate trade add --portfolio "Personal" --date 2024-06-30 \
   --type adjustment --exchange NZX --code AIR --quantity 10 --price 0 \
   --notes "Made-up example: gifted shares"
 ```
@@ -136,7 +154,7 @@ NASDAQ,MSFT,0.125
 Then compare it with the units calculated from all stored trades:
 
 ```sh
-portfolio-digest reconcile sharesies imports/current-holdings.csv --portfolio "Personal"
+docker compose run --rm -v "$PWD/imports:/imports:ro" migrate reconcile sharesies /imports/current-holdings.csv --portfolio "Personal"
 ```
 
 The command exits successfully only when every exact unit total matches. Its mismatch

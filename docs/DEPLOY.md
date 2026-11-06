@@ -135,13 +135,15 @@ by Compose on restart. A failed job, including a price fetch that finishes with 
 instruments, also sends one operations email through the configured mailer to the report
 recipients, or to `MAIL_OWNER` when that list is empty. The optional ntfy or Pushover
 push used for alerts is included when it is set. The message names the job and the failing
-instrument labels, with the date, and leaves out balances, prices and links. While the
+instrument labels, with the date, and leaves out balances, prices and links. Digits in
+job and instrument names are spelt out, so the date is the only numeric text. While the
 failure continues, that email is sent at most once every 24 hours. The throttle is stored
 in the scheduler state file, next to the pending run Compose retries. The next successful
 run sends one recovered notice. If the notice cannot be sent, that is logged and the
 scheduler still exits so Compose can retry the job. Notices are on whenever the mailer is
 configured. The `migrate` service mounts the same state volume, so a manual `prices fetch`
-or the Akahu sync can use the same once-a-day limit.
+or the Akahu sync can persist its once-a-day limit there too. Overlapping standalone
+commands share a lock; successful manual fetches also send a recovery notice.
 Mail delivery is at least once: a crash after provider acceptance
 but before saving state can cause a duplicate. Partial recipient rejection also fails the
 send; some recipients may already have received it. Check the provider before a manual retry.

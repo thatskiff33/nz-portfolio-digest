@@ -167,7 +167,10 @@ class Scheduler:
                                 s.name + ":config": s.model_dump_json() + self.config.timezone
                                 for s in self.config.schedules
                             },
-                            **{name + ":notice": stamp.isoformat() for name, stamp in notices.items()},
+                            **{
+                                name + ":notice": stamp.isoformat()
+                                for name, stamp in notices.items()
+                            },
                         }
                     )
                 )

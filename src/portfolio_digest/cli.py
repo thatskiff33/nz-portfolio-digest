@@ -44,7 +44,6 @@ from portfolio_digest.importing import (
 )
 from portfolio_digest.income import parse_income
 from portfolio_digest.mailers import MailError
-from portfolio_digest.operations import load_notice_config, note_outcome
 from portfolio_digest.manual import add_trade, prepare_trade
 from portfolio_digest.models import (
     PORTFOLIO_NAME_UNIQUE,
@@ -53,6 +52,7 @@ from portfolio_digest.models import (
     Portfolio,
     TradeType,
 )
+from portfolio_digest.operations import load_notice_config, note_outcome
 from portfolio_digest.prices.fetch import Sources, held_instruments, run_fetch
 from portfolio_digest.prices.http import JsonFetcher, SourceError, make_client
 from portfolio_digest.prices.quality import check_data
@@ -268,15 +268,13 @@ def cmd_prices_fetch(
         )
     if not report.outcomes:
         print("No traded instruments found; nothing to fetch.")
-        return (0, ()) if for_scheduler else 0
     for outcome in report.outcomes:
         print(outcome.describe())
     labels = tuple(outcome.label for outcome in report.outcomes if outcome.error)
     code = 0 if report.ok else 1
     if for_scheduler:
         return code, labels
-    if code != 0:
-        note_outcome(load_notice_config(), "prices", failed=True, labels=labels)
+    note_outcome(load_notice_config(), "prices", failed=code != 0, labels=labels)
     return code
 
 

@@ -424,7 +424,9 @@ def test_price_monitor_pings_only_after_a_clean_fetch(monkeypatch):
     monkeypatch.setattr(cli, "cmd_prices_fetch", fetch)
 
     def run(_, execute):
-        return execute(Schedule(name="prices", kind="prices", frequency="daily", at=time(10, 30)), NOW)
+        return execute(
+            Schedule(name="prices", kind="prices", frequency="daily", at=time(10, 30)), NOW
+        )
 
     monkeypatch.setattr(cli.Scheduler, "run", run)
     assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == (

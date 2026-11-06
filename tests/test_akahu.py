@@ -502,3 +502,16 @@ def test_name_only_holding_can_be_mapped_manually(local_engine):
 def test_unusable_holdings_fail_safely(local_engine, row):
     with pytest.raises(AkahuError):
         sync(local_engine, "Fictional", sync_client([row]), [])
+
+
+def test_akahu_fetch_error_records_a_failure_notice(monkeypatch, capsys):
+    def fail():
+        raise AkahuError("Akahu fetch failed.")
+
+    monkeypatch.setattr(cli, "get_settings", fail)
+    monkeypatch.setattr(cli, "load_notice_config", lambda: "config")
+    notice = Mock()
+    monkeypatch.setattr(cli, "note_outcome", notice)
+    assert cli.main(["akahu", "sync", "--portfolio", "Fictional"]) == 1
+    notice.assert_called_once_with("config", "akahu", failed=True)
+    assert "Akahu fetch failed." in capsys.readouterr().err

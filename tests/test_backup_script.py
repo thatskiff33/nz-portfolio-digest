@@ -158,7 +158,9 @@ def test_monitor_is_not_pinged_after_a_failed_dump(fake_bin, dump_dir, tmp_path)
     assert not log.exists()
 
 
-def test_a_failed_monitor_ping_does_not_fail_the_dump_or_print_the_url(fake_bin, dump_dir, tmp_path):
+def test_a_failed_monitor_ping_does_not_fail_the_dump_or_print_the_url(
+    fake_bin, dump_dir, tmp_path
+):
     install_wget(fake_bin)
     log = tmp_path / "wget.log"
     url = "https://kuma.example.invalid/api/push/SECRETTOKEN"

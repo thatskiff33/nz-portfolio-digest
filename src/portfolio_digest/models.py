@@ -473,7 +473,12 @@ class ImportIncomeMatch(Base):
 
 
 class AlertState(Base):
-    """Last delivery per portfolio, rule and holding; cleared rules are removed."""
+    """Last delivery per portfolio and rule. Cleared rules are removed.
+
+    A daily move stores its close dates in the rule key,
+    ``daily:{exchange}:{code}:{previous}:{latest}``. That pair is not sent again.
+    Portfolio-drop and stale keys do not include dates.
+    """
 
     __tablename__ = "alert_states"
     portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id"), primary_key=True)

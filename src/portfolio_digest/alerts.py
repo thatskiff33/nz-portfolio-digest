@@ -1,8 +1,9 @@
 """Alert evaluation using the shared returns engine and exchange calendars."""
 
 import logging
+import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from html import escape
 from urllib.parse import urlencode, urlsplit
@@ -80,10 +81,16 @@ def push(text: str) -> None:
         logger.warning("Alert email sent, but the optional push failed.")
 
 
+# Close dates appended to a daily-move key: daily:{exchange}:{code}:{previous}:{latest}.
+_CLOSE_PAIR = re.compile(r"\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}")
+
+
 @dataclass(frozen=True)
 class Trigger:
     key: str
     text: str
+    # Previous and latest close days for a daily move. Other rules leave this unset.
+    close_dates: tuple[date, date] | None = None
 
 
 def evaluate(session, portfolio, config, now):
@@ -154,6 +161,7 @@ def evaluate(session, portfolio, config, now):
                     f"{label} moved {movement:+.2f}% ({start} to {end}); "
                     f"closing prices {opening} to {prices[end]} {instrument.currency} "
                     "(split-adjusted).",
+                    close_dates=(start, end),
                 )
                 if abs(movement) > limits.daily_percent
                 else None
@@ -255,6 +263,67 @@ def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
     return output
 
 
+def _delivery_key(trigger: Trigger) -> str:
+    """Key written to alert state. A daily move includes its close-date pair."""
+    if trigger.close_dates is None:
+        return trigger.key
+    previous_close, latest_close = trigger.close_dates
+    return f"{trigger.key}:{previous_close.isoformat()}:{latest_close.isoformat()}"
+
+
+def _saved_for_rule(saved: dict[str, AlertState], key: str) -> list[AlertState]:
+    """Delivery rows for one rule.
+
+    Daily moves match the holding key and any close-date suffix, so a row
+    recorded before pairs were stored is still found. Other rules match exactly.
+    """
+    if not key.startswith("daily:"):
+        row = saved.get(key)
+        return [] if row is None else [row]
+    prefix = f"{key}:"
+    return [
+        row
+        for rule_key, row in saved.items()
+        if rule_key == key
+        or (rule_key.startswith(prefix) and _CLOSE_PAIR.fullmatch(rule_key[len(prefix) :]))
+    ]
+
+
+def _is_due(saved: dict[str, AlertState], trigger: Trigger, cooldown_hours, now) -> bool:
+    """Whether this trigger should send.
+
+    A daily move sends when its close-date pair has not been sent. Repeating the
+    same pair, including a later fetch the same day or over a weekend, does not.
+    Portfolio-drop and stale rules send once until they clear, then follow cooldown.
+    """
+    if trigger.close_dates is not None:
+        delivered = _delivery_key(trigger)
+        return all(row.rule_key != delivered for row in _saved_for_rule(saved, trigger.key))
+    previous = saved.get(trigger.key)
+    if previous is None:
+        return True
+    if cooldown_hours is None:
+        return False
+    # SQLite returns naive timestamps; the stored instant is always UTC.
+    sent_at = previous.sent_at.replace(tzinfo=previous.sent_at.tzinfo or UTC)
+    return now - sent_at >= timedelta(hours=cooldown_hours)
+
+
+def _record_delivery(session, portfolio, saved, trigger, now) -> None:
+    if trigger.close_dates is not None:
+        delivered = _delivery_key(trigger)
+        for row in _saved_for_rule(saved, trigger.key):
+            if row.rule_key != delivered:
+                session.delete(row)
+        session.add(AlertState(portfolio_id=portfolio.id, rule_key=delivered, sent_at=now))
+        return
+    previous = saved.get(trigger.key)
+    if previous is None:
+        session.add(AlertState(portfolio_id=portfolio.id, rule_key=trigger.key, sent_at=now))
+    else:
+        previous.sent_at = now
+
+
 def _run_portfolio(session, portfolio, config, now, dry_run):
     states = {
         s.rule_key: s
@@ -263,18 +332,12 @@ def _run_portfolio(session, portfolio, config, now, dry_run):
     evaluated = evaluate(session, portfolio, config, now)
     due = []
     for key, trigger in evaluated.items():
-        previous = states.get(key)
         if trigger is None:
-            if previous is not None and not dry_run:
-                session.delete(previous)
+            if not dry_run:
+                for row in _saved_for_rule(states, key):
+                    session.delete(row)
             continue
-        cooldown = config.alerts.cooldown_hours
-        if previous is None or (
-            cooldown is not None
-            # SQLite returns naive timestamps; the stored instant is always UTC.
-            and now - previous.sent_at.replace(tzinfo=previous.sent_at.tzinfo or UTC)
-            >= timedelta(hours=cooldown)
-        ):
+        if _is_due(states, trigger, config.alerts.cooldown_hours, now):
             due.append(trigger)
     if not due:
         return None
@@ -295,9 +358,5 @@ def _run_portfolio(session, portfolio, config, now, dry_run):
         recipients,
     )
     for trigger in due:
-        previous = states.get(trigger.key)
-        if previous is None:
-            session.add(AlertState(portfolio_id=portfolio.id, rule_key=trigger.key, sent_at=now))
-        else:
-            previous.sent_at = now
+        _record_delivery(session, portfolio, states, trigger, now)
     return text

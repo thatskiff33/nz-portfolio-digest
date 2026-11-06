@@ -443,3 +443,48 @@ def test_asb_contract_note_table_and_tabbed_fields(source):
     result = AsbEmailImporter().parse(content, ParseContext())
     assert result.errors == []
     assert result.trades == original.trades
+
+
+@pytest.mark.parametrize("price", [b"410.123457", b"410.12"])
+def test_sharesies_order_reference_survives_changed_price(price):
+    content = fixture("sharesies-transactions.csv")
+    original = SharesiesImporter().parse(content, ParseContext()).trades[3]
+    changed = (
+        SharesiesImporter().parse(content.replace(b"410.1234567", price), ParseContext()).trades[3]
+    )
+    assert original.external_ref == changed.external_ref == "order:made-up-1004-1"
+
+
+def test_sharesies_repeated_order_ids_and_missing_ids_keep_separate_rows():
+    from portfolio_digest.importers.base import Fingerprinter
+
+    lines = fixture("sharesies-transactions.csv").splitlines(keepends=True)
+    row = lines[1]
+    result = SharesiesImporter().parse(lines[0] + row + row, ParseContext())
+    assert [trade.external_ref for trade in result.trades] == [
+        "order:made-up-1001-1",
+        "order:made-up-1001-2",
+    ]
+    no_id = row.replace(b"made-up-1001", b"")
+    result = SharesiesImporter().parse(lines[0] + no_id + no_id, ParseContext())
+    refs = Fingerprinter()
+    for trade in result.trades:
+        assert trade.reference_aliases == ()
+        assert trade.external_ref == refs.ref(
+            "",
+            trade.trade_date,
+            trade.trade_type,
+            trade.exchange,
+            trade.code,
+            trade.quantity,
+            trade.price,
+        )
+
+
+def test_sharesies_refuses_order_id_that_cannot_fit_stored_reference():
+    content = fixture("sharesies-transactions.csv").replace(b"made-up-1001", b"x" * 128)
+    result = SharesiesImporter().parse(content, ParseContext())
+    assert len(result.trades) == 4
+    assert len(result.errors) == 1
+    assert result.errors[0].where == "line 2"
+    assert "Order ID is too long" in result.errors[0].message

@@ -483,3 +483,58 @@ def test_manual_oversized_security_name_is_refused_before_storage(monkeypatch, c
         == 2
     )
     assert "Security name must be 255 characters or fewer" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "status"),
+    [
+        (b"410.1234567", b"410.123457", 0),
+        (b"410.1234567", b"410.12", 2),
+        (b"0.125", b"0.126", 2),
+    ],
+)
+def test_sharesies_order_changes_never_add_trades(engine, tmp_path, capsys, old, new, status):
+    assert main(["portfolio", "add", "Personal"]) == 0
+    content = (FIXTURES / "sharesies-transactions.csv").read_bytes()
+    path = tmp_path / "invented-orders.csv"
+    path.write_bytes(content)
+    args = ["import", "sharesies", str(path), "--portfolio", "Personal"]
+    assert main(args) == 0
+    capsys.readouterr()
+    path.write_bytes(content.replace(old, new))
+    assert main(args) == status
+    output = capsys.readouterr()
+    if status == 0:
+        assert "imported 0, duplicates 5" in output.out
+    else:
+        assert "different trade fields" in output.err
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(Trade)) == 5
+
+
+def test_sharesies_legacy_references_are_duplicates_and_keep_undo_links(engine, tmp_path, capsys):
+    from portfolio_digest.importers.base import ParseContext
+    from portfolio_digest.importers.sharesies import SharesiesImporter
+
+    assert main(["portfolio", "add", "Personal"]) == 0
+    content = (FIXTURES / "sharesies-transactions.csv").read_bytes()
+    path = tmp_path / "invented-legacy-orders.csv"
+    path.write_bytes(content)
+    args = ["import", "sharesies", str(path), "--portfolio", "Personal"]
+    assert main(args) == 0
+    parsed = SharesiesImporter().parse(content, ParseContext())
+    with Session(engine) as session:
+        for row in parsed.trades:
+            stored = session.scalar(select(Trade).where(Trade.external_ref == row.external_ref))
+            stored.external_ref = row.reference_aliases[0]
+        session.commit()
+    capsys.readouterr()
+    assert main(args) == 0
+    assert "imported 0, duplicates 5" in capsys.readouterr().out
+    assert main(["import", "undo", "1"]) == 0
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(Trade)) == 5
+        assert set(session.scalars(select(Trade.import_run_id))) == {2}
+    assert main(["import", "undo", "2"]) == 0
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(Trade)) == 0

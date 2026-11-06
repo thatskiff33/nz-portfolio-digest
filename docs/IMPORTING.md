@@ -40,6 +40,14 @@ skipped because their original trades should come from the other broker's histor
 Sharesies exchange rates are based on NZD, so these reports can only be imported into an
 NZD-base portfolio.
 
+Trades with an Order ID use that ID, with a counter for repeated IDs in one file,
+as their reference. A changed price or quantity on the same reference is refused rather
+than imported as another trade. Rows without an Order ID keep their field-based
+fingerprint. Imports also check the previous fingerprint format, so re-importing an
+unchanged older export recognises its stored trades without a database migration.
+An older fingerprint cannot identify an order after its fingerprint fields change;
+reconcile older history carefully when importing a corrected export.
+
 ## ASB Securities
 
 ASB Securities has no share-trade CSV. Use the historical statement once, then use the

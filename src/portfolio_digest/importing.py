@@ -167,7 +167,11 @@ def _store_result(
     *,
     skip_conflicts: bool = False,
 ) -> ImportOutcome:
-    references = [trade.external_ref for trade in result.trades]
+    references = [
+        reference
+        for trade in result.trades
+        for reference in (trade.external_ref, *trade.reference_aliases)
+    ]
     existing = (
         {
             trade.external_ref: (trade, instrument)
@@ -213,8 +217,12 @@ def _store_result(
                 f"Reference {parsed.external_ref!r} is repeated (first at "
                 f"{previous.where}) with different trade fields.",
             )
-        match = existing.get(parsed.external_ref)
-        if match is not None:
+        matches = [
+            existing[reference]
+            for reference in (parsed.external_ref, *parsed.reference_aliases)
+            if reference in existing
+        ]
+        for match in matches:
             trade, instrument = match
             stored = (
                 trade.trade_date,
@@ -246,6 +254,8 @@ def _store_result(
             else:
                 result.errors.append(conflict)
             continue
+        if matches:
+            existing[parsed.external_ref] = matches[0]
         seen[parsed.external_ref] = parsed
         accepted.append(parsed)
 

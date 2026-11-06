@@ -17,9 +17,10 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, DecimalException, InvalidOperation
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from portfolio_digest import markets
 from portfolio_digest.models import TradeType
@@ -166,19 +167,24 @@ def read_csv(
 
 # Reading values ---------------------------------------------------------------------------
 
-_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d %b %Y", "%d-%b-%Y")
+_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d-%b-%Y")
 
 
-def parse_date(value: str, what: str = "date") -> date:
-    """A date written the NZ way (day first) or as YYYY-MM-DD. Never month first."""
+def parse_date(value: str, what: str = "date", *, allow_two_digit_year: bool = False) -> date:
+    """A day-first or ISO date no later than tomorrow in Pacific/Auckland."""
     text = value.strip()
     # A timestamp such as 2024-03-14T09:30:00 or "2024-03-14 09:30:00".
     text = re.sub(r"^(\d{4}-\d{2}-\d{2})[T ].*$", r"\1", text)
-    for fmt in _DATE_FORMATS:
+    formats = (*_DATE_FORMATS, "%d/%m/%y") if allow_two_digit_year else _DATE_FORMATS
+    for fmt in formats:
         try:
-            return datetime.strptime(text, fmt).date()
+            parsed = datetime.strptime(text, fmt).date()
         except ValueError:
             continue
+        latest = datetime.now(ZoneInfo("Pacific/Auckland")).date() + timedelta(days=1)
+        if parsed > latest:
+            raise RowProblem(f"{what} {value!r} is later than {latest.isoformat()}.")
+        return parsed
     raise RowProblem(f"{what} {value!r} is not a date such as 14/03/2024 or 2024-03-14.")
 
 
@@ -194,9 +200,13 @@ def parse_decimal(value: str, what: str, *, currency: str | None = None) -> Deci
         if currency is None or prefix != currency:
             expected = currency or "an unprefixed number"
             raise RowProblem(f"{what} is in {prefix}, but expected {expected}.")
-    text = _NUMBER_NOISE.sub("", text).replace(",", "").strip()
+    text = _NUMBER_NOISE.sub("", text).strip()
     if text.startswith("-$"):
         text = "-" + text[2:]
+    if "," in text:
+        if not re.fullmatch(r"-?\d{1,3}(,\d{3})+(\.\d+)?", text):
+            raise RowProblem(f"{what} {value!r} has invalid thousands separators.")
+        text = text.replace(",", "")
     try:
         number = Decimal(text)
     except InvalidOperation:

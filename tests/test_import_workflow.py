@@ -197,6 +197,8 @@ def test_conflicting_stored_contract_reference_fails_without_partial_writes(
     path = tmp_path / "made-up-statement.txt"
     path.write_text("14/03/2016 30001234 Buy FPH NZX 100 9.8500 30.00 985.00\n")
     assert main(["import", "asb-statement", str(path), "--portfolio", "Personal"]) == 0
+    with Session(engine) as session:
+        instrument_count = session.scalar(select(func.count()).select_from(Instrument))
     path.write_text(
         "15/03/2016 30001235 Buy AIR NZX 10 1.0000 1.00 10.00\n"
         "15/03/2016 30001234 Sell AIR NZX 10 1.0000 1.00 10.00\n"
@@ -208,6 +210,7 @@ def test_conflicting_stored_contract_reference_fails_without_partial_writes(
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(Trade)) == 1
         assert session.get(ImportRun, 2).status == "failed"
+        assert session.scalar(select(func.count()).select_from(Instrument)) == instrument_count
 
 
 @pytest.mark.parametrize("first_two", [(2, 1), (1, 2)])
@@ -538,3 +541,76 @@ def test_sharesies_legacy_references_are_duplicates_and_keep_undo_links(engine, 
     assert main(["import", "undo", "2"]) == 0
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(Trade)) == 0
+
+
+@pytest.mark.parametrize("source", ["asb-email", "asb-gmail"])
+def test_next_import_marks_only_stale_running_runs_in_same_portfolio_failed(
+    engine, monkeypatch, source
+):
+    from datetime import UTC, datetime, timedelta
+
+    from portfolio_digest.gmail import AsbGmailImporter
+    from portfolio_digest.importers.base import ParseResult
+    from portfolio_digest.importing import import_file, import_gmail
+    from portfolio_digest.models import Portfolio
+
+    assert main(["portfolio", "add", "Personal"]) == 0
+    assert main(["portfolio", "add", "Other"]) == 0
+    now = datetime.now(UTC)
+    with Session(engine) as session:
+        portfolios = dict(session.execute(select(Portfolio.name, Portfolio.id)).all())
+        stale, recent, completed, other = [
+            ImportRun(
+                portfolio_id=portfolios[name],
+                source="asb-gmail",
+                status=status,
+                started_at=now - age,
+            )
+            for name, status, age in [
+                ("Personal", "running", timedelta(hours=2)),
+                ("Personal", "running", timedelta(minutes=30)),
+                ("Personal", "succeeded", timedelta(hours=2)),
+                ("Other", "running", timedelta(hours=2)),
+            ]
+        ]
+        session.add_all([stale, recent, completed, other])
+        session.commit()
+        monkeypatch.setattr(AsbGmailImporter, "fetch", lambda self: ParseResult())
+        if source == "asb-email":
+            import_file(session, source, FIXTURES / "asb-contract-note.eml", "Personal")
+        else:
+            import_gmail(session, AsbGmailImporter(None, "Made-up label"), "Personal")
+        session.refresh(stale)
+        assert stale.status == "failed"
+        assert stale.notes == "Interrupted; marked failed at next import"
+        assert stale.finished_at is not None
+        for run, expected in [(recent, "running"), (completed, "succeeded"), (other, "running")]:
+            session.refresh(run)
+            assert run.status == expected
+
+
+def test_gmail_error_mid_fetch_fails_run_without_partial_history(engine):
+    from portfolio_digest.gmail import AsbGmailImporter, GmailError
+    from portfolio_digest.importing import import_gmail
+
+    class Client:
+        def label_id(self, name):
+            return "made-up-label"
+
+        def message_ids(self, label_id):
+            return iter(("valid", "network-failure"))
+
+        def raw_message(self, message_id):
+            if message_id == "network-failure":
+                raise GmailError("Gmail request failed.")
+            return (FIXTURES / "asb-contract-note.eml").read_bytes()
+
+    assert main(["portfolio", "add", "Personal"]) == 0
+    with Session(engine) as session:
+        with pytest.raises(GmailError, match="request failed"):
+            import_gmail(session, AsbGmailImporter(Client(), "Made-up label"), "Personal")
+        run = session.scalars(select(ImportRun)).one()
+        assert run.status == "failed"
+        assert run.finished_at is not None
+        assert session.scalar(select(func.count()).select_from(Trade)) == 0
+        assert session.scalar(select(func.count()).select_from(Instrument)) == 0

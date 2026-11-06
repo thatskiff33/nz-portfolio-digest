@@ -18,7 +18,18 @@ output, allowing the rest of the label to import. The stored trade is retained; 
 amendment and correct the history explicitly rather than overwriting it automatically.
 The first accepted version of a new reference in a Gmail batch is retained. Unreadable
 Gmail contract notes are also skipped with a message ID and reason; review and correct
-them explicitly so the history is complete. Interrupted imports are marked failed.
+them explicitly so the history is complete. A Gmail network or HTTP failure fails the whole
+run and imports nothing, so retry the feed once the connection is restored. At the start
+of each import, running attempts for the same portfolio older than one hour are marked
+failed with the note "Interrupted; marked failed at next import". Failed imports leave
+no new instruments behind.
+
+Numbers use a decimal point. Commas are accepted only as thousands separators in groups
+of three, for example `1,234.56` or `12,345`. Decimal commas such as `1,5` or `27,50`, and
+mixed formats such as `1.234,56`, are refused with the row's location.
+Trade and payment dates must be no later than tomorrow in Pacific/Auckland. Use
+four-digit years; only ASB contract-note emails accept two-digit years, and these must
+also meet the date limit.
 Currency prefixes on prices and fees must agree with their declared currency.
 
 Broker exports contain private financial information. Keep them outside the repository,
@@ -39,6 +50,14 @@ for the required income and tax columns. Other cash rows are skipped. Share tran
 skipped because their original trades should come from the other broker's history.
 Sharesies exchange rates are based on NZD, so these reports can only be imported into an
 NZD-base portfolio.
+
+Trades with an Order ID use that ID, with a counter for repeated IDs in one file,
+as their reference. A changed price or quantity on the same reference is refused rather
+than imported as another trade. Rows without an Order ID keep their field-based
+fingerprint. Imports also check the previous fingerprint format, so re-importing an
+unchanged older export recognises its stored trades without a database migration.
+An older fingerprint cannot identify an order after its fingerprint fields change;
+reconcile older history carefully when importing a corrected export.
 
 ## ASB Securities
 
@@ -80,7 +99,9 @@ For the ongoing feed:
 2. In Gmail, create a dedicated label and apply it only to ASB contract-note emails.
 3. Put `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` and `GMAIL_LABEL` in the private `.env`.
 4. On a machine with a browser, run `portfolio-digest gmail authorise`. It requests only
-   `gmail.readonly` and writes the refresh token to `.env.gmail` with owner-only permissions.
+   `gmail.readonly` and writes the refresh token to `.env.gmail` with owner-only permissions
+   on Unix. On Windows the file is not permission-restricted; delete it after copying
+   the token into the server’s private `.env`.
    Existing files are refused unless `--force` is supplied. Symlinks are always refused.
    The command names the variable to copy; it never prints the token.
 5. Copy `GMAIL_REFRESH_TOKEN` from that file into the server's private `.env`, then securely

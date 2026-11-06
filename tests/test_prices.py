@@ -95,7 +95,8 @@ def _seed_trade(engine, *, currency="USD", code="TEST"):
 
 
 @pytest.mark.parametrize("run_hour", [21, 5])
-def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, run_hour):
+@pytest.mark.parametrize("all_failed", [False, True])
+def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, run_hour, all_failed):
     from portfolio_digest import db
     from portfolio_digest.prices import fetch
 
@@ -118,7 +119,7 @@ def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, ru
     def handler(request):
         symbol = request.url.path.rsplit("/", 1)[-1]
         calls.append(symbol)
-        if symbol == "AAA":
+        if symbol == "AAA" or (all_failed and symbol == "BBB"):
             return httpx.Response(
                 200,
                 headers={"Content-Encoding": "gzip"},
@@ -157,10 +158,15 @@ def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, ru
     assert report.outcomes[0].error == (
         "DecodingError from query2.finance.yahoo.com, gave up after 2 attempts."
     )
-    assert all(outcome.error is None for outcome in report.outcomes[1:])
-    assert [outcome.fetched for outcome in report.outcomes] == [0, 1, 1]
-    assert calls == ["AAA", "AAA", "BBB", "USDNZD=X"]
-    assert waits == [1]
+    assert report.scheduler_complete is not all_failed
+    assert report.outcomes[-1].error is None
+    assert [outcome.fetched for outcome in report.outcomes] == [0, 0 if all_failed else 1, 1]
+    assert calls == (
+        ["AAA", "AAA", "BBB", "BBB", "USDNZD=X"]
+        if all_failed
+        else ["AAA", "AAA", "BBB", "USDNZD=X"]
+    )
+    assert waits == ([1, 1] if all_failed else [1])
 
 
 @pytest.mark.parametrize(
@@ -726,7 +732,11 @@ def test_quality_compares_fresh_closes_across_gaps_unless_a_split_intervenes(gap
     rows.append((last, Decimal("100"), False))
     session = MagicMock()
     session.execute.return_value.all.return_value = rows
-    session.scalars.return_value = [] if split_day is None else [split_day]
+    session.scalars.side_effect = lambda statement: (
+        ([] if split_day is None else [split_day])
+        if statement.column_descriptions[0]["name"] == "split_date"
+        else []
+    )
     holding = Holding(1, "NZX", "QUALITY", "NZD", None, first, last, False)
     findings = check_data(session, [holding], "NZD", datetime(2026, 10, 6, 22, tzinfo=UTC))
     assert ("stale-price" if gap == "stale" else "missing-price", middle) in {
@@ -937,3 +947,51 @@ def test_fetch_boundaries_preserve_explicit_start_and_incremental_refresh():
     assert len(needs) == 1
     assert needs[0].first_day == first
     assert _range(needs[0].first_day, needs[0].last_day, None, True, None) == date(2024, 3, 24)
+
+
+@pytest.mark.parametrize(
+    ("errors", "complete"),
+    [([], True), ([None, "failed"], True), (["failed", "failed"], False)],
+)
+def test_scheduler_completion_uses_instruments_not_successful_fx(errors, complete):
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
+
+    instruments = [Outcome("invented", error=error) for error in errors]
+    report = FetchReport(
+        outcomes=[*instruments, Outcome("USD/NZD")], instrument_outcomes=instruments
+    )
+    assert report.scheduler_complete is complete
+    assert report.ok is all(error is None for error in errors)
+
+
+def test_empty_fetch_completes_without_provider_requests(monkeypatch):
+    from contextlib import nullcontext
+
+    from portfolio_digest.prices import fetch
+
+    monkeypatch.setattr(fetch, "session_scope", lambda _: nullcontext(None))
+    monkeypatch.setattr(fetch, "held_instruments", lambda *a: [])
+    source = MagicMock()
+    report = run_fetch(
+        MagicMock(),
+        Sources(source, [source]),
+        now=datetime(2026, 10, 1, tzinfo=UTC),
+        base_currency="NZD",
+    )
+    assert report.ok and report.scheduler_complete
+    assert report.outcomes == []
+    assert source.mock_calls == []
+
+
+def test_manual_partial_fetch_retains_failure_exit_and_output(monkeypatch, capsys):
+    from argparse import Namespace
+
+    from portfolio_digest import cli
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
+
+    instruments = [Outcome("NZX:INVENTED"), Outcome("NZX:MISSING", error="No data")]
+    report = FetchReport(outcomes=instruments, instrument_outcomes=instruments)
+    monkeypatch.setattr(cli, "_fetch_prices", lambda _: report)
+    assert cli.cmd_prices_fetch(Namespace()) == 1
+    assert "NZX:MISSING: FAILED, No data" in capsys.readouterr().out
+    assert report.scheduler_complete

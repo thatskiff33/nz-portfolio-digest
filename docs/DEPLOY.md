@@ -31,8 +31,8 @@ nowhere.
 ## Prices and exchange rates
 
 The first backfill starts seven calendar days before each instrument's first trade.
-To deliberately use a later date, add `--start YYYY-MM-DD`. Normal runs re-read recent history so corrections from the
-source replace carried-forward values. Commands are safe to repeat: an existing day is
+To deliberately use a later date, add `--start YYYY-MM-DD`. Normal runs re-read recent
+history so corrections from the source replace carried-forward values. Commands are safe to repeat: an existing day is
 updated, not duplicated.
 
 ```sh

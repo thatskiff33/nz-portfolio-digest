@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -43,10 +43,15 @@ def create_app(
     templates.env.filters["quantity"] = lambda n: format(n.normalize(), "f")
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
+    @app.get("/healthz")
+    def healthz() -> PlainTextResponse:
+        """Liveness only. Does not open a session or read the database."""
+        return PlainTextResponse("ok")
+
     @app.middleware("http")
     async def headers(request: Request, call_next):
         try:
-            if not request.url.path.startswith("/static/"):
+            if request.url.path != "/healthz" and not request.url.path.startswith("/static/"):
                 request.state.session_id, request.state.browser = security.browser(request)
         except HTTPException as exc:
             response = HTMLResponse(str(exc.detail), status_code=exc.status_code)

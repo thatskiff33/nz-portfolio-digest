@@ -4,9 +4,12 @@ schema = 1
 # Database tests skip here (no TEST_DATABASE_URL); GitHub CI runs them against Postgres.
 [setup]
 run = '''
-python3 -m venv .venv &&
-.venv/bin/pip install -q --upgrade pip &&
-.venv/bin/pip install -q -e ".[dev]"
+if ! command -v uv >/dev/null 2>&1; then
+  python3 -m venv /tmp/uv-bootstrap &&
+  /tmp/uv-bootstrap/bin/pip install -q "uv==0.13.7" &&
+  export PATH="/tmp/uv-bootstrap/bin:$PATH"
+fi &&
+uv sync --frozen --extra dev
 '''
 
 [jobs.lint]

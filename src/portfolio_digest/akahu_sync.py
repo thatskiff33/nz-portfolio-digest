@@ -2,7 +2,7 @@
 
 import json
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_EVEN, Decimal, localcontext
+from decimal import Decimal, localcontext
 from typing import Any
 
 from sqlalchemy import Engine, func, select
@@ -12,9 +12,8 @@ from portfolio_digest.akahu import AkahuClient, AkahuError, exact_units
 from portfolio_digest.db import session_scope
 from portfolio_digest.models import AkahuMapping, AkahuSnapshot, Instrument, Portfolio
 from portfolio_digest.reconcile import Mismatch, ledger_units, reconcile
+from portfolio_digest.splits import round_units
 from portfolio_digest.validation import InvalidInput
-
-LEDGER_PLACES = Decimal("1e-8")
 
 
 def _text(item: dict, *keys: str) -> str | None:
@@ -179,7 +178,7 @@ def sync(
                         raise AkahuError("Akahu returned an invalid or duplicate holding.")
                     seen.add(holding_id)
                     # The ledger stores 8 decimal places, so compare at that precision.
-                    compared = holding["units"].quantize(LEDGER_PLACES, rounding=ROUND_HALF_EVEN)
+                    compared = round_units(holding["units"])
                     instrument_id = mappings.get((account["account_id"], holding_id))
                     if instrument_id is None:
                         instrument_id = _match(instruments, holding)

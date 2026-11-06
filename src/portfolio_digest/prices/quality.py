@@ -9,9 +9,10 @@ from itertools import pairwise
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from portfolio_digest.models import FxRate, Price, Split
+from portfolio_digest.models import FxRate, Price, Split, Trade
 from portfolio_digest.prices import calendars
 from portfolio_digest.prices.fetch import CurrencyNeed, Holding, currencies_needed
+from portfolio_digest.returns import holding_history_flags, ledger_holding
 
 JUMP_LIMIT = Decimal("0.50")
 
@@ -70,6 +71,21 @@ def _check_instrument(session: Session, holding: Holding, now: datetime) -> list
         for day, _close, stale in rows
         if stale
     )
+
+    trades = list(
+        session.scalars(select(Trade).where(Trade.instrument_id == holding.instrument_id))
+    )
+    splits = list(
+        session.scalars(select(Split).where(Split.instrument_id == holding.instrument_id))
+    )
+    for portfolio_id in sorted({t.portfolio_id for t in trades}):
+        history, _ = ledger_holding([t for t in trades if t.portfolio_id == portfolio_id], splits)
+        for flag in holding_history_flags(history, end):
+            findings.append(
+                QualityFinding(
+                    "split-recording", holding.label, end, f"Portfolio {portfolio_id}: {flag}"
+                )
+            )
 
     split_days = set(
         session.scalars(

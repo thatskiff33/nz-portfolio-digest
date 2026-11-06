@@ -29,7 +29,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2",
+    "pyyaml>=6.0",
     "ruff>=0.6",
+    # Starlette's TestClient uses this. Without it, tests fall back to httpx and warn.
+    "httpx2>=2",
 ]
 
 [project.scripts]

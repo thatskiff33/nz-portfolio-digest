@@ -342,7 +342,8 @@ def test_dashboard_quantity_display_stops_at_eight_places(engine_web):
     assert shown == "14.30357143"
     assert f"<td>{shown}</td>" in response.text
     assert "e" not in shown.lower()
-    assert len(format(row.quantity, "f")) > len(shown) + 8
+    # Registry splits already round units to the ledger's eight-place policy.
+    assert row.quantity == Decimal("14.30357143")
 
 
 def test_missing_inputs_are_explained(engine_web):

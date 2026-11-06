@@ -573,7 +573,7 @@ def test_scheduled_year_end_send_failure_exits_nonzero_without_monitoring(
     monkeypatch.setattr("portfolio_digest.report_service.ping_kuma", lambda *a: pytest.fail("Ping"))
     monkeypatch.setattr("portfolio_digest.year_end_service.latest_ended_year", lambda *a: 2026)
     assert main(["report", "send-now", "--schedule", "year-end"]) == 1
-    assert "Mail delivery failed" in capsys.readouterr().err
+    assert "Some portfolio year-end reports failed" in capsys.readouterr().err
 
 
 def test_year_end_scheduler_dispatch_retains_persisted_due_date(year_engine, monkeypatch):
@@ -586,7 +586,7 @@ def test_year_end_scheduler_dispatch_retains_persisted_due_date(year_engine, mon
     seen = []
 
     def run(self, execute):
-        return execute(self.config.named_report("year-end"), due)
+        return execute(self.config.named_report("year-end"), due, None)
 
     monkeypatch.setattr(Scheduler, "run", run)
     monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: year_engine)
@@ -965,3 +965,133 @@ def test_csv_decimals_keep_full_fixed_point_precision():
                 continue
             assert "e" not in cell.lower()
             assert D(format(parsed, "f")) == parsed
+
+
+def test_scheduled_delivery_checkpoints_survive_three_failed_restarts(
+    year_engine, monkeypatch, tmp_path
+):
+    import json
+    from datetime import timedelta
+
+    from portfolio_digest import report_service, year_end_service
+    from portfolio_digest.reports import ReportError
+    from portfolio_digest.scheduling import ScheduleConfig, Scheduler
+
+    with Session(year_engine) as session:
+        session.add_all(
+            [
+                Portfolio(name="Second invented", base_currency="NZD"),
+                Portfolio(name="Third invented", base_currency="NZD"),
+            ]
+        )
+        session.commit()
+    config = read_config(Path("schedules.toml"))
+    config = ScheduleConfig(schedules=[config.named_report("year-end")])
+    due = datetime(2026, 3, 31, 20, tzinfo=UTC)
+    instant = due + timedelta(days=800)
+    path = tmp_path / "state.json"
+    schedule = config.schedules[0]
+    path.write_text(
+        json.dumps(
+            {
+                schedule.name: due.isoformat(),
+                schedule.name + ":config": schedule.model_dump_json() + config.timezone,
+            }
+        )
+    )
+    sends = []
+    pings = []
+    attempts = 0
+    real_run = year_end_service.run_year_end
+
+    def send(config, subject, *a, **kwargs):
+        # Exercise real report and CSV construction before the provider boundary.
+        assert kwargs["csv"] is not None
+        assert "2026" in kwargs["csv_name"]
+        sends.append(subject)
+
+    def annual(session, config, name, year, **kwargs):
+        nonlocal attempts
+        assert year == 2026
+        if name == "Second invented":
+            attempts += 1
+            if attempts <= 3:
+                raise ReportError("invented-private-token")
+        return real_run(session, config, name, year, **kwargs)
+
+    monkeypatch.setattr(year_end_service, "run_year_end", annual)
+    monkeypatch.setattr(report_service, "deliver_report", send)
+    monkeypatch.setattr(report_service, "ping_kuma", pings.append)
+
+    class Stop(Exception):
+        pass
+
+    def stop(_):
+        raise Stop
+
+    def execute(schedule, at, checkpoint):
+        with Session(year_engine) as session:
+            report_service.run_report(session, config, schedule.name, now=at, checkpoint=checkpoint)
+        return 0
+
+    for attempt, minutes in enumerate([0, 30, 60, 120], 1):
+        instant += timedelta(minutes=minutes)
+        with pytest.raises(Stop):
+            Scheduler(config, path).run(execute, now=lambda instant=instant: instant, sleep=stop)
+        assert len(sends) == (2 if attempt <= 3 else 3)
+        assert len(pings) == (0 if attempt <= 3 else 1)
+    assert attempts == 4
+    assert len(sends) == 3
+    assert sum("Invented," in subject for subject in sends) == 1
+    assert sum("Third invented," in subject for subject in sends) == 1
+    assert len(pings) == 1
+    assert json.loads(path.read_text())["year-end:retry"]["delivered"] == []
+
+
+def test_year_end_checkpoint_failure_stops_before_next_delivery(year_engine, monkeypatch):
+    from portfolio_digest import report_service, year_end_service
+    from portfolio_digest.scheduling import DeliveryCheckpoint, SchedulerStateError
+
+    with Session(year_engine) as session:
+        session.add(Portfolio(name="Second invented", base_currency="NZD"))
+        session.commit()
+    sent = []
+    monkeypatch.setattr(
+        year_end_service,
+        "run_year_end",
+        lambda session, config, name, year, **kw: sent.append(name),
+    )
+    monkeypatch.setattr(report_service, "ping_kuma", lambda *a: pytest.fail("Ping"))
+
+    def fail():
+        raise SchedulerStateError("Cannot write scheduler state.")
+
+    with Session(year_engine) as session, pytest.raises(SchedulerStateError):
+        report_service.run_report(
+            session,
+            read_config(Path("schedules.toml")),
+            "year-end",
+            checkpoint=DeliveryCheckpoint(set(), fail),
+        )
+    assert sent == ["Invented"]
+
+
+def test_year_end_preview_ignores_delivery_checkpoint(year_engine, tmp_path):
+    from unittest.mock import Mock
+
+    from portfolio_digest import report_service
+    from portfolio_digest.scheduling import DeliveryCheckpoint
+
+    checkpoint = DeliveryCheckpoint({1}, Mock())
+    with Session(year_engine) as session:
+        report_service.run_report(
+            session,
+            read_config(Path("schedules.toml")),
+            "year-end",
+            dry_run=True,
+            out=tmp_path / "annual.html",
+            now=datetime(2026, 4, 1, tzinfo=UTC),
+            checkpoint=checkpoint,
+        )
+    assert (tmp_path / "annual-portfolio-1.csv").exists()
+    checkpoint.save.assert_not_called()

@@ -30,6 +30,7 @@ from portfolio_digest.prices.http import SourceError
 from portfolio_digest.prices.sources import FxSource, Listing, PriceSource, _fits_numeric
 from portfolio_digest.prices.symbols import UnknownSymbol
 from portfolio_digest.returns import units_at
+from portfolio_digest.splits import rescale_price
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +115,14 @@ class Outcome:
 @dataclass
 class FetchReport:
     outcomes: list[Outcome] = field(default_factory=list)
+    instrument_outcomes: list[Outcome] = field(default_factory=list)
+
+    @property
+    def scheduler_complete(self) -> bool:
+        """A partial instrument fetch advances; FX success cannot mask total failure."""
+        return not self.instrument_outcomes or any(
+            outcome.error is None for outcome in self.instrument_outcomes
+        )
 
     @property
     def ok(self) -> bool:
@@ -211,7 +220,7 @@ def carry_forward(
     for day in sorted(days | set(known) | set(splits)):
         if day in splits and previous is not None:
             before, after = splits[day]
-            previous = previous * before / after
+            previous = rescale_price(previous, before, after)
         if day in known:
             previous = known[day]
         elif day in days and previous is not None:
@@ -253,7 +262,9 @@ def run_fetch(
         found = {h.label for h in holdings}
         for label in only:
             if label not in found:
-                report.outcomes.append(Outcome(label, error="not found, or it has no trades"))
+                outcome = Outcome(label, error="not found, or it has no trades")
+                report.outcomes.append(outcome)
+                report.instrument_outcomes.append(outcome)
 
     for holding in holdings:
         try:
@@ -267,6 +278,7 @@ def run_fetch(
             outcome = Outcome(holding.label, error="database error; changes rolled back")
             log.warning("%s: %s", outcome.label, outcome.error)
         report.outcomes.append(outcome)
+        report.instrument_outcomes.append(outcome)
     for need in currencies_needed(holdings, base_currency, now):
         try:
             with session_scope(engine) as session:

@@ -84,8 +84,9 @@ Akahu's next refresh after recent trades, then rerun. Never overwrite trades fro
 
 ## Nightly run and monitoring
 
-Use the systemd user timer alongside the price-fetch timers described in
-[the deployment guide](DEPLOY.md#twice-daily-schedule). It runs at 03:15
+Use the Akahu systemd user timer alongside the
+[shared Compose scheduler](DEPLOY.md#shared-price-and-report-schedule). Keep the old
+price timers disabled. The Akahu timer runs at 03:15
 Pacific/Auckland and catches up after downtime. The service assumes the checkout is at
 `~/portfolio-digest` and the portfolio is called `Personal`. Edit `WorkingDirectory` and
 `--portfolio` in the installed service to match your server before enabling it.
@@ -100,7 +101,7 @@ systemctl --user list-timers portfolio-digest-akahu.timer
 ```
 
 Use `journalctl --user -u portfolio-digest-akahu.service` to inspect runs. Keep logs
-private. Enable user lingering as described in the deployment guide so the timer runs
+private. Enable [user lingering](DEPLOY.md#systemd-user-timers) so the timer runs
 while you are logged out.
 
 The Compose command reads credentials from the project's `.env`. Build the image and run

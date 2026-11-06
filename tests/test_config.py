@@ -62,3 +62,23 @@ def test_a_malformed_database_url_is_never_echoed(url):
         make_engine(url)
     assert "s3cret-pass" not in str(exc.value)
     assert exc.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    ("url", "options"),
+    [
+        (URL, {"pool_pre_ping": True, "connect_args": {"connect_timeout": 10}}),
+        (
+            "postgresql://user:invented@db/portfolio",
+            {"pool_pre_ping": True, "connect_args": {"connect_timeout": 10}},
+        ),
+        ("sqlite:///:memory:", {"pool_pre_ping": True}),
+    ],
+)
+def test_engine_connection_options(monkeypatch, url, options):
+    from unittest.mock import Mock
+
+    create = Mock()
+    monkeypatch.setattr("portfolio_digest.db.create_engine", create)
+    assert make_engine(url) is create.return_value
+    create.assert_called_once_with(url, **options)

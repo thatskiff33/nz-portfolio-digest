@@ -520,3 +520,27 @@ def test_lookup_matches_linear_selection_with_logarithmic_work(monkeypatch):
     assert 0 < reads < 30 * 180
     with pytest.raises(ReturnError, match="Missing price"):
         returns._lookup(points, first - timedelta(days=1), "price", set(), for_exchange("NZX"))
+
+
+def test_sampled_valuations_do_not_scan_price_history():
+    from datetime import timedelta
+
+    from portfolio_digest.returns import ObservationSeries
+
+    class IndexedOnlySeries(ObservationSeries):
+        def __iter__(self):
+            raise AssertionError("Valuations must use indexed price lookups")
+
+    first = date(2000, 1, 1)
+    points = IndexedOnlySeries(
+        Observation(first + timedelta(days=n), D(n + 1)) for n in range(10_000)
+    )
+    h = Holding("NZX", "FICTION", "NZD", (trade(first),), points)
+    for n in range(180):
+        offset = 9999 * n // 179
+        day = first + timedelta(days=offset)
+        result = holding_return(h, day, day, {})
+        # The original scan selected that day's exact stored close for ten units.
+        assert result.opening == result.closing == D(10 * (offset + 1))
+        assert result.amounts == Components()
+        assert result.flags == ()

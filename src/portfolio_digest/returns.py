@@ -459,7 +459,7 @@ def holding_return(
 
     def price_on(day: date) -> Decimal:
         close = _lookup(holding.prices, day, f"{holding.code} price", flags, calendar)
-        source = max(p.day for p in holding.prices if p.day <= day)
+        source = holding.prices[bisect_right(holding.prices, day, key=lambda p: p.day) - 1].day
         for split in holding.splits:
             if source < split.day <= day:
                 close = rescale_price(close, split.before, split.after)

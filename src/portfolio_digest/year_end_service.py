@@ -30,6 +30,8 @@ def load_year_end(session: Session, name: str, year: int) -> YearEnd:
             p.withholding_tax,
             p.net_amount,
             p.fx_rate,
+            resident_withholding_tax=p.resident_withholding_tax,
+            foreign_withholding_tax=p.foreign_withholding_tax,
         )
         for p in data.income
     )

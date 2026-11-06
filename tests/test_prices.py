@@ -93,7 +93,8 @@ def _seed_trade(engine, *, currency="USD", code="TEST"):
 
 
 @pytest.mark.parametrize("run_hour", [21, 5])
-def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, run_hour):
+@pytest.mark.parametrize("all_failed", [False, True])
+def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, run_hour, all_failed):
     from portfolio_digest import db
     from portfolio_digest.prices import fetch
 
@@ -103,6 +104,8 @@ def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, ru
         for i, code in enumerate(["AAA", "BBB"], 1)
     ]
     sessions = [MagicMock() for _ in range(4)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     for session in sessions:
         session.scalar.return_value = None
         session.execute.return_value.all.return_value = []
@@ -116,7 +119,7 @@ def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, ru
     def handler(request):
         symbol = request.url.path.rsplit("/", 1)[-1]
         calls.append(symbol)
-        if symbol == "AAA":
+        if symbol == "AAA" or (all_failed and symbol == "BBB"):
             return httpx.Response(
                 200,
                 headers={"Content-Encoding": "gzip"},
@@ -155,10 +158,15 @@ def test_bad_content_encoding_does_not_stop_second_holding_or_fx(monkeypatch, ru
     assert report.outcomes[0].error == (
         "DecodingError from query2.finance.yahoo.com, gave up after 2 attempts."
     )
-    assert all(outcome.error is None for outcome in report.outcomes[1:])
-    assert [outcome.fetched for outcome in report.outcomes] == [0, 1, 1]
-    assert calls == ["AAA", "AAA", "BBB", "USDNZD=X"]
-    assert waits == [1]
+    assert report.scheduler_complete is not all_failed
+    assert report.outcomes[-1].error is None
+    assert [outcome.fetched for outcome in report.outcomes] == [0, 0 if all_failed else 1, 1]
+    assert calls == (
+        ["AAA", "AAA", "BBB", "BBB", "USDNZD=X"]
+        if all_failed
+        else ["AAA", "AAA", "BBB", "USDNZD=X"]
+    )
+    assert waits == ([1, 1] if all_failed else [1])
 
 
 @pytest.mark.parametrize(
@@ -197,6 +205,8 @@ def test_old_sold_holdings_and_fx_skip_only_when_complete(
         1, "NASDAQ", "OLD", "USD", None, date(2023, 3, 1), date(2023, 3, 3), still_held
     )
     sessions = [MagicMock() for _ in range(3)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     for session in sessions:
         session.execute.return_value.all.return_value = []
     inactive_check = (
@@ -250,6 +260,8 @@ def test_sold_out_completion_uses_each_markets_last_trading_day(
     first = date(2023, 3, 1)
     holding = Holding(1, "NZX", "SOLD", "AUD", None, first, sale, still_held)
     sessions = [MagicMock() for _ in range(3)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     for session in sessions:
         session.execute.return_value.all.return_value = []
     price_terminal = price_day if price_day == holding.calendar.last_trading_day(sale) else None
@@ -351,6 +363,8 @@ def test_takeover_skips_prices_and_sold_only_fx_with_a_carried_final_value(
     first, last_close, sale = date(2023, 3, 1), date(2023, 3, 3), date(2023, 3, 8)
     holding = Holding(1, "NZX", "OLD", "AUD", None, first, sale, False)
     sessions = [MagicMock() for _ in range(3)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     last_good = last_close if fresh_present else None
     terminal = [sale if terminal_present else None] if fresh_present else []
     for session in sessions:
@@ -466,6 +480,8 @@ def test_carried_price_overflow_does_not_stop_next_instrument_or_fx(monkeypatch)
         for i, code in enumerate(["AAA", "BBB"], 1)
     ]
     sessions = [MagicMock() for _ in range(4)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     for session, value in zip(sessions[1:], ["50", "10", "1.7"], strict=True):
         session.scalar.side_effect = [first, first, None] if value != "1.7" else [None, None]
         rows = MagicMock()
@@ -521,6 +537,8 @@ def test_database_failure_rolls_back_and_continues(monkeypatch, failure_stage, f
         for i, (code, currency) in enumerate([("AAA", "AUD"), ("BBB", "USD")], 1)
     ]
     sessions = [MagicMock() for _ in range(5)]
+    for session in sessions:
+        session.get.return_value = Instrument(split_scanned_at=None)
     failed_index = 1 if failed_item == "instrument" else 3
     factory = MagicMock(side_effect=sessions)
     monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: factory)
@@ -723,8 +741,13 @@ def test_quality_compares_fresh_closes_across_gaps_unless_a_split_intervenes(gap
         rows.append((middle, Decimal("10"), True))
     rows.append((last, Decimal("100"), False))
     session = MagicMock()
+    session.get.return_value = Instrument(split_scanned_at=None)
     session.execute.return_value.all.return_value = rows
-    session.scalars.return_value = [] if split_day is None else [split_day]
+    session.scalars.side_effect = lambda statement: (
+        ([] if split_day is None else [split_day])
+        if statement.column_descriptions[0]["name"] == "split_date"
+        else []
+    )
     holding = Holding(1, "NZX", "QUALITY", "NZD", None, first, last, False)
     findings = check_data(session, [holding], "NZD", datetime(2026, 10, 6, 22, tzinfo=UTC))
     assert ("stale-price" if gap == "stale" else "missing-price", middle) in {
@@ -747,6 +770,7 @@ def test_new_split_refreshes_full_stored_history_once(monkeypatch):
     first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
     holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
     session = MagicMock()
+    session.get.return_value = Instrument(split_scanned_at=None)
     source = FakePriceSource(
         {first: Decimal("40"), recent: Decimal("40"), split_day: Decimal("10")},
         {split_day: (Decimal("1"), Decimal("4"))},
@@ -801,6 +825,7 @@ def test_withdrawn_split_refreshes_history_and_does_not_scale_stale_prices(monke
     holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
     source = FakePriceSource({recent: Decimal("40")})
     session = MagicMock()
+    session.get.return_value = Instrument(split_scanned_at=None)
     session.scalar.side_effect = [recent, first, None]
     session.execute.side_effect = [
         [(split_day, Decimal("1"), Decimal("4"))],
@@ -844,6 +869,7 @@ def test_failed_split_refresh_preserves_recorded_events(monkeypatch):
     source = MagicMock(name="yahoo")
     source.history.side_effect = [PriceHistory(), SourceError("refresh failed")]
     session = MagicMock()
+    session.get.return_value = Instrument(split_scanned_at=None)
     session.scalar.side_effect = [recent, first, None]
     session.execute.side_effect = [
         [(split_day, Decimal("1"), Decimal("4"))],
@@ -859,3 +885,164 @@ def test_failed_split_refresh_preserves_recorded_events(monkeypatch):
     assert result.error == "refresh failed"
     save_splits.assert_not_called()
     assert saved[-1][0][2][split_day] == Decimal("10")
+
+
+@pytest.mark.parametrize(
+    ("errors", "complete"),
+    [([], True), ([None, "failed"], True), (["failed", "failed"], False)],
+)
+def test_scheduler_completion_uses_instruments_not_successful_fx(errors, complete):
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
+
+    instruments = [Outcome("invented", error=error) for error in errors]
+    report = FetchReport(
+        outcomes=[*instruments, Outcome("USD/NZD")], instrument_outcomes=instruments
+    )
+    assert report.scheduler_complete is complete
+    assert report.ok is all(error is None for error in errors)
+
+
+def test_empty_fetch_completes_without_provider_requests(monkeypatch):
+    from contextlib import nullcontext
+
+    from portfolio_digest.prices import fetch
+
+    monkeypatch.setattr(fetch, "session_scope", lambda _: nullcontext(None))
+    monkeypatch.setattr(fetch, "held_instruments", lambda *a: [])
+    source = MagicMock()
+    report = run_fetch(
+        MagicMock(),
+        Sources(source, [source]),
+        now=datetime(2026, 10, 1, tzinfo=UTC),
+        base_currency="NZD",
+    )
+    assert report.ok and report.scheduler_complete
+    assert report.outcomes == []
+    assert source.mock_calls == []
+
+
+def test_manual_partial_fetch_retains_failure_exit_and_output(monkeypatch, capsys):
+    from argparse import Namespace
+
+    from portfolio_digest import cli
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
+
+    instruments = [Outcome("NZX:INVENTED"), Outcome("NZX:MISSING", error="No data")]
+    report = FetchReport(outcomes=instruments, instrument_outcomes=instruments)
+    monkeypatch.setattr(cli, "_fetch_prices", lambda _: report)
+    assert cli.cmd_prices_fetch(Namespace()) == 1
+    assert "NZX:MISSING: FAILED, No data" in capsys.readouterr().out
+    assert report.scheduler_complete
+
+
+def test_rate_limit_storm_stops_source_after_three_instruments_and_resets_next_run(monkeypatch):
+    from portfolio_digest import db
+    from portfolio_digest.prices import fetch
+
+    first = date(2026, 10, 1)
+    holdings = [Holding(i, "NZX", f"TEST{i}", "NZD", None, first, first, True) for i in range(1, 7)]
+    session = MagicMock()
+    session.scalar.return_value = None
+    session.execute.return_value.all.return_value = []
+    session.get.return_value = Instrument(split_scanned_at=None)
+    monkeypatch.setattr(db, "sessionmaker", lambda **kwargs: lambda: session)
+    monkeypatch.setattr(fetch, "held_instruments", lambda *args: holdings)
+    waits = []
+    monkeypatch.setattr(fetch.time, "sleep", waits.append)
+    for name in ("_save_prices", "_save_rates", "_save_splits"):
+        monkeypatch.setattr(fetch, name, MagicMock())
+    requests = []
+
+    def storm(request):
+        requests.append(request)
+        return httpx.Response(429, headers={"Retry-After": "60"})
+
+    with httpx.Client(transport=httpx.MockTransport(storm)) as client:
+        source = YahooSource(JsonFetcher(client, sleep=lambda _: pytest.fail("429 retried")))
+        for run in range(2):
+            report = run_fetch(
+                MagicMock(),
+                Sources(source, ()),
+                now=datetime(2026, 10, 3, 22, tzinfo=UTC),
+                base_currency="NZD",
+            )
+            assert len(requests) == 3 * (run + 1)
+            assert len(report.instrument_outcomes) == 6
+            assert all("HTTP 429" in o.error for o in report.instrument_outcomes[:3])
+            assert all("circuit open" in o.error for o in report.instrument_outcomes[3:])
+            assert not report.ok
+    assert waits == [0.1] * 10
+
+
+@pytest.mark.parametrize("hours", [0, 23, 24, 25])
+def test_full_split_scan_is_limited_to_once_in_24_hours(monkeypatch, hours):
+    from datetime import timedelta
+
+    from portfolio_digest.prices import fetch
+
+    first, recent = date(2020, 1, 1), date(2026, 10, 1)
+    scanned = datetime(2026, 10, 3, 12, tzinfo=UTC)
+    instrument = Instrument(split_scanned_at=scanned)
+    session = MagicMock()
+    session.get.return_value = instrument
+    session.scalar.side_effect = [recent, first, None]
+    session.execute.return_value.all.return_value = []
+    source = FakePriceSource({recent: Decimal("10")})
+    calls = []
+    history = source.history
+
+    def record(*args, **kwargs):
+        calls.append(kwargs["split_start"])
+        return history(*args, **kwargs)
+
+    source.history = record
+    for name in ("_save_prices", "_save_splits"):
+        monkeypatch.setattr(fetch, name, MagicMock())
+    holding = Holding(1, "NASDAQ", "INVENTED", "USD", None, first, first, True)
+    now = scanned + timedelta(hours=hours)
+    outcome = fetch._update_instrument(session, source, holding, now, False, None)
+    assert outcome.error is None
+    assert calls == [
+        first if hours >= 24 else fetch_start(first, recent, holding.last_day_needed(now))
+    ]
+    assert instrument.split_scanned_at == (now if hours >= 24 else scanned)
+    assert outcome.fetched == 1
+
+
+def test_source_circuit_counts_consecutive_rate_limits_only():
+    from portfolio_digest.prices.fetch import _RunSource
+    from portfolio_digest.prices.http import RateLimited
+
+    source = MagicMock(name="invented")
+    source.name = "invented"
+    source.history.side_effect = [
+        RateLimited("HTTP 429"),
+        RateLimited("HTTP 429"),
+        PriceHistory({}, {}),
+        RateLimited("HTTP 429"),
+        SourceError("HTTP 503"),
+        RateLimited("HTTP 429"),
+        RateLimited("HTTP 429"),
+        RateLimited("HTTP 429"),
+    ]
+    circuit = _RunSource(source)
+    for expected in (
+        RateLimited,
+        RateLimited,
+        None,
+        RateLimited,
+        SourceError,
+        RateLimited,
+        RateLimited,
+        RateLimited,
+    ):
+        if expected:
+            with pytest.raises(expected):
+                circuit.history("TEST", date(2026, 1, 1), date(2026, 1, 2))
+        else:
+            assert circuit.history("TEST", date(2026, 1, 1), date(2026, 1, 2)) == PriceHistory(
+                {}, {}
+            )
+    with pytest.raises(SourceError, match="circuit open"):
+        circuit.history("TEST", date(2026, 1, 1), date(2026, 1, 2))
+    assert source.history.call_count == 8

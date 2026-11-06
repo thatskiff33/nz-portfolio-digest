@@ -14,6 +14,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  commit-emails:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Check PR author and committer privacy
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python scripts/check-commit-emails.py "$PR_BASE_SHA" "$PR_HEAD_SHA"
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -23,7 +43,8 @@ jobs:
         python: ["3.11", "3.12", "3.13"]
     services:
       postgres:
-        image: postgres:18-alpine
+        # postgres:18-alpine
+        image: postgres:18-alpine@sha256:123b17998ccaf47e53b502e8c6a1e79afd8f579c6f3eec83c563da026f957395
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -40,9 +61,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
+          version: "0.13.7"
           python-version: ${{ matrix.python }}
+          enable-cache: true
       - name: Create the app's database role, as on the server
         env:
           PGHOST: localhost
@@ -52,10 +75,13 @@ jobs:
         run: |
           sh scripts/db-init/10-app-role.sh
           psql -U postgres -d postgres -c "CREATE DATABASE portfolio_test OWNER portfolio"
-      - run: pip install -e ".[dev]"
-      - run: ruff check .
-      - run: ruff format --check .
-      - run: pytest
+      - name: Check the lock file matches pyproject.toml
+        run: uv lock --check
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - run: uv run --frozen --extra dev ruff check .
+      - run: uv run --frozen --extra dev ruff format --check .
+      - run: uv run --frozen --extra dev pytest
 
   docker:
     runs-on: ubuntu-latest

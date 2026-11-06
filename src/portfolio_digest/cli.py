@@ -52,7 +52,7 @@ from portfolio_digest.models import (
     Portfolio,
     TradeType,
 )
-from portfolio_digest.prices.fetch import Sources, held_instruments, run_fetch
+from portfolio_digest.prices.fetch import FetchReport, Sources, held_instruments, run_fetch
 from portfolio_digest.prices.http import JsonFetcher, SourceError, make_client
 from portfolio_digest.prices.quality import check_data
 from portfolio_digest.prices.sources import FX_SOURCES, PRICE_SOURCES, Listing, YahooSource
@@ -238,7 +238,7 @@ def _instrument_label(value: str) -> str:
     return ":".join(parts)
 
 
-def cmd_prices_fetch(args: argparse.Namespace) -> int:
+def _fetch_prices(args: argparse.Namespace) -> FetchReport:
     settings = get_settings()
     with make_client() as client:
         fetcher = JsonFetcher(client)
@@ -253,6 +253,11 @@ def cmd_prices_fetch(args: argparse.Namespace) -> int:
             start=args.start,
             only=args.instrument,
         )
+    return report
+
+
+def cmd_prices_fetch(args: argparse.Namespace) -> int:
+    report = _fetch_prices(args)
     if not report.outcomes:
         print("No traded instruments found; nothing to fetch.")
         return 0
@@ -323,17 +328,19 @@ def cmd_alerts_check(args: argparse.Namespace) -> int:
 def cmd_scheduler(args: argparse.Namespace) -> int:
     config = read_config(Path(args.config))
 
-    def execute(schedule, scheduled):
+    def execute(schedule, scheduled, checkpoint):
         if schedule.kind == "prices":
-            result = cmd_prices_fetch(
-                argparse.Namespace(backfill=False, start=None, instrument=None)
-            )
+            report = _fetch_prices(argparse.Namespace(backfill=False, start=None, instrument=None))
             # Even a partial fetch may leave a price stale. Evaluate the committed data.
             with session_scope(make_engine()) as session:
-                run_alerts(session, config)
-            return result
+                run_alerts(session, config, checkpoint=checkpoint)
+            if report.scheduler_complete and not report.ok:
+                logging.getLogger(__name__).warning(
+                    "Scheduled price fetch completed with warnings."
+                )
+            return 0 if report.scheduler_complete else 1
         with session_scope(make_engine()) as session:
-            run_report(session, config, schedule.name, now=scheduled)
+            run_report(session, config, schedule.name, now=scheduled, checkpoint=checkpoint)
         return 0
 
     return Scheduler(config, Path(args.state)).run(execute)
@@ -729,6 +736,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

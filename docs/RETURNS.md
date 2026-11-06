@@ -117,15 +117,33 @@ Transactions retain dates and cash flows, leaving room for a separate
 money-weighted return strategy later without changing simple-return attribution.
 
 Signed ADJUSTMENT trades before or on the opening date count towards opening
-quantity. Inside the period, an adjustment matching a stored Split row rescales
-parcel units, preserving each parcel's total local cost and entry FX. Match once
-per split date against units held before that day's trades, using the exact
+quantity. Inside the period, an owner adjustment matching a downloaded Split row
+rescales parcel units, preserving each parcel's total local cost and entry FX.
+Match once per split date against units held before that day's trades, using the exact
 cross-product `quantity_change × shares_before = held × (shares_after - shares_before)`.
-Downloaded Split metadata alone never changes quantity. A registry action recorded
-with `corporate-actions` applies the ratio directly, including before the period's
-opening close. If a matching adjustment already exists, it counts only once. Zero-fee splits need no transaction-date
-FX because no value is converted. A rounded quantity change that does not match
-exactly follows the non-split rule below, rather than guessing cash in lieu.
+A rounded owner adjustment that does not match exactly follows the non-split rule
+below. Downloaded Split metadata alone never changes quantity. If units were held
+immediately before a downloaded split and it has neither a matching adjustment nor
+a registry action, reports flag "Split on DATE not yet recorded; add the adjustment".
+This warning remains visible for unresolved events before the opening date, appears
+in emails and `prices check`, and suppresses the portfolio-drop alert.
+
+A registry action recorded with `corporate-actions` has explicit split identity,
+including before the period's opening close. At the action, the resulting holding
+total is rounded to the ledger's 8 decimal places, half-even. Parcels are rescaled
+to that total, with any arithmetic residual assigned to the last parcel. Each
+parcel retains its total local cost and entry FX. This unit rounding is separate
+from money display rounding. Record any registry cash in lieu as a separate sale;
+the engine does not infer cash or a gain from a fraction.
+
+Recording either a registry split or a matching owner adjustment is refused when
+the other exists within 10 calendar days either side, including the boundary days.
+Older matching same-day pairs count once; differently dated legacy pairs produce
+a warning to reconcile the entries in `docs/dividends.md`, without deleting or
+re-dating ledger rows. Zero-fee splits need no transaction-date FX because no value
+is converted. Carried prices are rescaled for all split sources strictly after the
+selected observation and on or before valuation. A close dated on or after an action
+is already on that basis and is never rescaled for that action.
 
 Other positive adjustments add a parcel at the recorded trade price and FX;
 negative ones remove units FIFO at that price and FX, realising the removed

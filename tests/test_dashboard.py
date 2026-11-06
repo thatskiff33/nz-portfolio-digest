@@ -26,6 +26,7 @@ from portfolio_digest.returns import ReturnError, instrument_position
 from portfolio_digest.returns_loader import load_returns
 from portfolio_digest.web.app import create_app
 from portfolio_digest.web.binding import private_host
+from portfolio_digest.web.security import COOKIE
 from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
 PASSWORD = "fictional-test-password-only"  # noqa: S105
@@ -160,6 +161,23 @@ def sign_in(client):
     response = client.post("/login", data={"csrf": csrf, "password": PASSWORD})
     assert response.status_code == 200
     return token(response)
+
+
+def test_healthz_returns_ok_without_a_session():
+    engine = create_engine("sqlite://")
+
+    def refuse_connection(*_args, **_kwargs):
+        raise AssertionError("health check touched the database")
+
+    engine.connect = refuse_connection
+    app = create_app(engine, PASSWORD)
+    with TestClient(app) as client:
+        client.cookies.set(COOKIE, "not-a-session")
+        response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.text == "ok"
+    assert COOKIE not in response.cookies
+    assert app.state.security.sessions == {}
 
 
 @pytest.mark.parametrize(
@@ -708,3 +726,80 @@ def test_client_login_throttle_expires(client, monkeypatch):
 def test_dashboard_refuses_missing_or_short_password(engine_web, password):
     with pytest.raises(ValueError, match="at least 16"):
         create_app(engine_web, password)
+
+
+def test_overview_series_values_match_linear_lookup(engine_web, monkeypatch):
+    from portfolio_digest import returns
+
+    with Session(engine_web) as session:
+        dashboard = Dashboard(session, session.get(Portfolio, 1), DAY - timedelta(days=10), DAY)
+        actual = dashboard.series(DAY - timedelta(days=10), DAY)
+
+        def linear_lookup(points, day, label, flags, calendar):
+            point = max((p for p in points if p.day <= day), key=lambda p: p.day, default=None)
+            if point is None:
+                raise ReturnError(f"Missing {label} on or before {day}.")
+            if point.stale or returns._skips_trading_day(calendar, point.day, day):
+                flags.add(f"Carried forward {label} for {day} (source {point.day})")
+            return point.value
+
+        monkeypatch.setattr(returns, "_lookup", linear_lookup)
+        assert dashboard.series(DAY - timedelta(days=10), DAY) == actual
+
+
+def test_holding_bounds_chart_and_table_and_ignores_unrelated_bad_inputs(engine_web):
+    with Session(engine_web) as session:
+        # An unrelated invalid currency must not prevent this holding being valued.
+        session.scalar(select(Trade).where(Trade.instrument_id == 2)).currency = "AUD"
+        first = DAY - timedelta(days=500)
+        session.add_all(
+            Price(
+                instrument_id=1,
+                price_date=first + timedelta(days=n),
+                close=Decimal(n) / 100,
+                source="test",
+            )
+            for n in range(480)
+        )
+        session.commit()
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        sign_in(client)
+        response = client.get("/p/1/holding/1")
+    assert response.status_code == 200
+    series = response.context["series"]
+    assert len(series) == 180
+    assert series[0] == (first, Decimal(0))
+    assert series[-1] == (DAY, Decimal("5.25"))
+    assert response.context["result"].closing == Decimal("100.125") * Decimal("5.25")
+    assert response.text.count("data-chart-date=") == len(series)
+    assert response.context["returns_error"] is None
+
+
+def test_holding_input_error_is_explained(engine_web):
+    with Session(engine_web) as session:
+        session.scalar(select(Trade).where(Trade.instrument_id == 1)).currency = "AUD"
+        session.commit()
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        sign_in(client)
+        response = client.get("/p/1/holding/1")
+    assert response.status_code == 200
+    assert "Trade currency differs from instrument currency" in response.context["returns_error"]
+    assert response.context["result"] is None
+
+
+def test_holding_future_activity_does_not_invert_report_dates(engine_web):
+    today = datetime.now(ZoneInfo("Pacific/Auckland")).date()
+    with Session(engine_web) as session:
+        session.scalar(select(Trade).where(Trade.instrument_id == 2)).trade_date = (
+            today + timedelta(days=30)
+        )
+        session.commit()
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        sign_in(client)
+        response = client.get("/p/1/holding/2")
+    assert response.status_code == 200
+    assert response.context["start"] <= response.context["end"] == today
+    assert response.context["result"] is None
+    assert response.context["returns_error"] is None
+    # Future ledger rows remain visible, but are excluded from valuation inputs.
+    assert len(response.context["trades"]) == 1

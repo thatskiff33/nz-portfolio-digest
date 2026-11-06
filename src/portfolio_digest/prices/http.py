@@ -24,6 +24,10 @@ class SourceError(Exception):
     """A source could not supply the data. The message is safe to show and log."""
 
 
+class RateLimited(SourceError):
+    """A source refused a request with HTTP 429."""
+
+
 class NotFound(SourceError):
     """The source does not know the symbol or currency. Retrying will not help."""
 
@@ -58,6 +62,8 @@ class JsonFetcher:
             wait = self.backoff * 2 ** (attempt - 1)
             try:
                 with self.client.stream("GET", url, params=params) as response:
+                    if response.status_code == 429:
+                        raise RateLimited(f"HTTP 429 from {_host(url)}; rate limit reached.")
                     if response.status_code == 404:
                         raise NotFound(f"{_host(url)} has no data for this request (HTTP 404).")
                     if response.is_redirect:

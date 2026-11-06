@@ -46,9 +46,13 @@ codes are used as-is. Set an exception for a right, renamed or delisted security
 `portfolio-digest prices symbol NZX:AIRRG AIRRG.NZ`. See the deployment guide for the
 twice-daily schedule and recovery commands. Stored closes are raw, unadjusted prices in
 major currency units. Registry-recorded splits and consolidations adjust units without
-changing total cost. Do not also enter an ADJUSTMENT for a recorded registry action.
+changing total cost or parcel FX. Holdings round to 8 decimal places, half-even, at
+the action; record any cash in lieu separately as a sale. Matching registry actions
+and ADJUSTMENT entries within inclusive ±10 calendar days are refused in either order.
 For downloaded Split metadata, an ADJUSTMENT trade records the quantity change; the
-returns engine preserves parcel cost when it matches that ratio. Other adjustments
+returns engine preserves parcel cost when it matches that ratio exactly. Missing
+adjustments produce an actionable warning in returns, emails and `prices check`, and
+suppress the portfolio-drop alert until resolved. Other adjustments
 move units at their recorded price without cash. Do not split-adjust stored closes again.
 
 Dividends and ETF distributions import from Sharesies CSV and ASB dividend advice. Yahoo
@@ -74,13 +78,13 @@ for boundaries, FIFO attribution, dividend treatment and percentage denominators
 
 ## Development
 
-Needs Python 3.11 or newer, and a throwaway Postgres for the database tests.
+Needs Python 3.11 or newer, uv, and a throwaway Postgres for the database tests.
+`uv sync --frozen` installs the versions in `uv.lock`, which is what CI and the server image use.
 
 ```sh
-python -m venv .venv
-.venv/bin/pip install -e ".[dev]"     # Windows: .venv\Scripts\pip
-ruff check . && ruff format --check .
-TEST_DATABASE_URL=postgresql+psycopg://postgres:pass@localhost:5432/test pytest
+uv sync --frozen --extra dev
+uv run ruff check . && uv run ruff format --check .
+TEST_DATABASE_URL=postgresql+psycopg://postgres:pass@localhost:5432/test uv run pytest
 ```
 
 The tests **wipe** the database in `TEST_DATABASE_URL`, so never point it at real data. As a
@@ -104,7 +108,10 @@ The preview writes `year-end-2026.html`, `year-end-2026.txt` and
 `year-end-2026.csv` and sends nothing. Keep these private financial reports outside git.
 The send command emails HTML and plain text with a CSV attachment, using the same
 `MAILER`, `MAIL_FROM`, `MAIL_OWNER` and provider credentials as weekly and monthly reports.
-The recipients in `schedules.toml` override `MAIL_OWNER` for every report. Use `--config`
+Non-empty `REPORT_RECIPIENTS` in the server `.env` overrides TOML recipients for every
+report. TOML recipients then take precedence over the `MAIL_OWNER` fallback. Keep private
+recipients and `REPORT_KUMA_PUSH_URL` in `.env`; the latter overrides legacy TOML monitoring.
+Empty or whitespace-only report environment settings leave TOML values in effect. Use `--config`
 to select another schedule file. See [email setup](docs/DEPLOY.md#email-reports).
 Preview mode needs no mail configuration.
 
@@ -149,21 +156,34 @@ preceding stored close. Review carried-forward flags; refresh prices and FX thro
 For an all-portfolio preview, use `year-end --all --year 2026 --dry-run --out
 ./private-preview`; each portfolio gets a numbered subdirectory. Other portfolios continue
 if one fails, and the command exits non-zero if any failed. Manual reruns send again.
-The scheduler retries failed occurrences after restart using their original tax year;
-a retry may resend to portfolios already delivered. Check provider delivery before
-retrying an uncertain result. Inspect failures with `docker compose logs scheduler`.
+The scheduler retries each failed job independently after 30 minutes, doubling the delay
+to a maximum of 6 hours. Retry times and the original tax year survive restarts in the
+existing scheduler state volume. A partial price fetch advances with warnings; if every
+instrument fails, that price job retries while other schedules continue. No holdings
+counts as success. Alerts still check the committed data after partial fetches.
+Inspect failures with `docker compose logs scheduler`.
 
 The scheduled report can also be sent or previewed through the shared report command:
 
 ```sh
 portfolio-digest report send-now --schedule year-end
-portfolio-digest report send-now --schedule year-end --dry-run --out annual.html
+mkdir -p -m 700 ./private-preview
+portfolio-digest report send-now --schedule year-end --dry-run --out ./private-preview/annual.html
 ```
 
-The latter writes `annual-portfolio-ID.html`, `.txt` and `.csv` for each portfolio,
-using its database ID. A scheduled report stops on the first failed portfolio, exits
-non-zero and does not ping monitoring. First startup schedules future occurrences;
-existing pending occurrences catch up once after downtime.
+The latter writes `./private-preview/annual-portfolio-ID.html`, `.txt` and `.csv` for each portfolio,
+using its database ID. Scheduled year-end reports continue past failed portfolios and
+record each successful portfolio in the scheduler state file. Retries skip those
+portfolios and monitoring is pinged only when the whole occurrence succeeds. Alerts
+commit sent state per portfolio and use the same occurrence checkpoints on scheduled
+checks. Keep the state volume and run one scheduler replica.
+
+Delivery remains at least once: provider acceptance followed by a crash before the
+checkpoint or database commit can duplicate email. Partial recipient acceptance is
+also uncertain. Check provider delivery before retrying an uncertain result manually.
+Only configuration or scheduler-state errors stop the scheduler with a non-zero exit.
+First startup schedules future occurrences; existing pending occurrences catch up once
+after downtime, with any intervening skipped occurrences logged.
 
 ### Price and movement alerts
 

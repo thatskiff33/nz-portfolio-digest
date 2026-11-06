@@ -1,6 +1,7 @@
 """Report orchestration, shared by the CLI and scheduler."""
 
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -14,7 +15,7 @@ from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
 from portfolio_digest.models import Portfolio
 from portfolio_digest.reports import ReportError, build_report, render
-from portfolio_digest.scheduling import ScheduleConfig
+from portfolio_digest.scheduling import DeliveryCheckpoint, ScheduleConfig, SchedulerStateError
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ def run_report(
     out: Path | None = None,
     now: datetime | None = None,
     settings: MailSettings | None = None,
+    checkpoint: DeliveryCheckpoint | None = None,
 ) -> None:
     _validate_preview(dry_run, out)
     schedule = config.named_report(schedule_name)
@@ -58,21 +60,40 @@ def run_report(
         from portfolio_digest.year_end_service import latest_ended_year, run_year_end
 
         year = latest_ended_year(now)
-        portfolios = (
-            select(Portfolio).where(Portfolio.base_currency == "NZD").order_by(Portfolio.id)
-        )
-        for portfolio in session.scalars(portfolios):
+        portfolios = session.execute(
+            select(Portfolio.id, Portfolio.name)
+            .where(Portfolio.base_currency == "NZD")
+            .order_by(Portfolio.id)
+        ).all()
+        failed = False
+        for portfolio_id, name in portfolios:
+            if not dry_run and checkpoint and portfolio_id in checkpoint.delivered:
+                continue
             preview = (
-                out.with_name(f"{out.stem}-portfolio-{portfolio.id}{out.suffix}") if out else None
+                out.with_name(f"{out.stem}-portfolio-{portfolio_id}{out.suffix}") if out else None
             )
-            run_year_end(
-                session,
-                config,
-                portfolio.name,
-                year,
-                dry_run=dry_run,
-                out=preview,
-                settings=settings,
+            try:
+                run_year_end(
+                    session,
+                    config,
+                    name,
+                    year,
+                    dry_run=dry_run,
+                    out=preview,
+                    settings=settings,
+                )
+            except SchedulerStateError:
+                raise
+            except Exception:
+                session.rollback()
+                failed = True
+                logger.warning("Portfolio year-end delivery failed.")
+                continue
+            if not dry_run and checkpoint:
+                checkpoint.complete(portfolio_id)
+        if failed:
+            raise ReportError(
+                "Some portfolio year-end reports failed. Check report data and delivery settings."
             )
         if not dry_run:
             ping_kuma(config)
@@ -93,6 +114,21 @@ def run_report(
         ping_kuma(config)
 
 
+def _write_private(path: Path, content: str) -> None:
+    if os.name != "posix":
+        path.write_text(content, encoding="utf-8")
+        return
+    # Tighten permissions before truncating an existing preview.
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.ftruncate(descriptor, 0)
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as stream:
+            stream.write(content)
+    finally:
+        os.close(descriptor)
+
+
 def deliver_report(
     config: ScheduleConfig,
     subject: str,
@@ -109,10 +145,10 @@ def deliver_report(
     _validate_preview(dry_run, out)
     if dry_run:
         try:
-            out.write_text(html, encoding="utf-8")
-            out.with_suffix(".txt").write_text(text, encoding="utf-8")
+            _write_private(out, html)
+            _write_private(out.with_suffix(".txt"), text)
             if csv is not None:
-                out.with_suffix(".csv").write_text(csv, encoding="utf-8")
+                _write_private(out.with_suffix(".csv"), csv)
         except OSError:
             raise ReportError(
                 "Cannot write report preview files. Check the output directory."

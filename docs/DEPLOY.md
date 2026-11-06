@@ -108,12 +108,22 @@ systemctl --user daemon-reload
 docker compose up -d --build scheduler
 ```
 
-Edit the server copy of `schedules.toml`, then `docker compose restart scheduler`.
-`recipients = []` uses `MAIL_OWNER`; otherwise supply a list of mailbox addresses, for example
-`recipients = ["owner@example.invalid", "other@example.invalid"]`. It applies to every report.
-Keep real addresses and private monitoring URLs in the server copy only, never commit them.
-An optional `kuma_push_url` is pinged only after successful delivery. Ping failures are
-logged without the URL and do not fail the send.
+Edit schedule times in `schedules.toml`, then `docker compose restart scheduler`.
+Keep private report values in the server `.env`: `REPORT_RECIPIENTS` accepts a
+comma-separated list of mailbox addresses, and `REPORT_KUMA_PUSH_URL` holds the optional
+monitoring push URL. Non-empty environment values override their TOML equivalents.
+Empty or whitespace-only environment settings leave TOML values in effect; if the resulting
+recipient list is empty, reports use `MAIL_OWNER`. This applies to every report.
+
+To migrate an existing server, move recipients and the monitoring URL from its
+`schedules.toml` into these `.env` settings, restore `recipients = []`, and remove
+`kuma_push_url` from TOML. Recreate containers after environment changes with
+`docker compose up -d --force-recreate scheduler`. Legacy TOML values still work;
+any TOML `kuma_push_url` emits a warning recommending `REPORT_KUMA_PUSH_URL`, even when
+an environment value overrides it. The warning never includes the URL.
+The deploy script continues preserving existing server schedules for compatibility.
+Monitoring is pinged only after successful delivery. Ping failures are logged without
+the URL and do not fail the send.
 
 Each `[[schedules]]` needs a unique `name`, `kind` (`prices` or `report`), `frequency`
 (`daily`, `weekly`, `monthly` or `yearly`) and local `at = "HH:MM"`. Weekly schedules use a
@@ -126,11 +136,28 @@ autumn time runs once, at its first occurrence.
 
 Pending runs live in the `scheduler-state` volume. First startup schedules future jobs;
 restarts run one catch-up per schedule for a missed occurrence, retaining its original
-report period, then resume future runs. Failed jobs exit non-zero, are logged and are retried
-by Compose on restart. Mail delivery is at least once: a crash after provider acceptance
-but before saving state can cause a duplicate. Partial recipient rejection also fails the
-send; some recipients may already have received it. Check the provider before a manual retry.
-Run only one scheduler replica. Inspect it with `docker compose logs scheduler`.
+report period, then resume future runs. Intervening skipped occurrences are logged.
+Each failed job stays pending while other schedules continue. Retries start 30 minutes
+after the failed attempt finishes, then wait 60, 120, 240 and at most 360 minutes.
+Retry times, failure counts and successful portfolio deliveries are saved in the existing
+JSON file and survive restarts. A partial instrument price fetch advances with warnings;
+if every instrument fails, the price job retries even when FX succeeds. No holdings counts
+as success. Alerts still evaluate committed data after partial fetches.
+Only configuration or scheduler-state errors stop the process with a non-zero exit.
+State writes flush and sync the temporary file before replacing the saved state.
+Changing a schedule's timing or kind, or removing it, discards its pending occurrence
+with a log entry; unrelated configuration fields preserve it.
+
+Mail delivery is at least once: a crash after provider acceptance but before saving
+state or committing the database can cause a duplicate. Partial recipient rejection
+also fails the send; some recipients may already have received it. Check the provider
+before a manual retry. Keep the state volume and run only one scheduler replica.
+Inspect it with `docker compose logs scheduler`.
+The scheduler writes `/tmp/scheduler-heartbeat` every time around its loop. Compose
+reports it healthy while that file is less than 30 minutes old, so a slow price fetch
+does not look like a crash. The migrate, scheduler and web containers have a read-only
+root filesystem, no extra capabilities and a 512 MB memory cap. `/tmp` is writable, and
+so is the scheduler state volume.
 
 ## Email reports
 
@@ -190,7 +217,10 @@ docker compose run --rm -v "$PWD/previews:/previews" migrate report send-now \
   --schedule monthly --dry-run --out /previews/report.html
 ```
 
-Dry-run writes `report.html` and `report.txt`. Keep real previews private and out of git.
+Dry-run writes `report.html` and `report.txt`, plus CSV for year-end reports.
+On POSIX, all preview files are created with mode `0600` (owner read/write only), and
+existing preview files are tightened to that mode before overwriting. Windows uses its
+ordinary file permissions. Keep the output directory private and real previews out of git.
 The email uses inline styles and table layout, including a table-based value chart that
 works without downloading images. Each market has the requested Sharesight-style columns
 and subtotals, followed by the portfolio total. Missing price/FX data fails the entire
@@ -224,9 +254,12 @@ removed; the deploy script disables an installed legacy year-end timer before re
 the scheduler. On a manual upgrade, run the disable commands above.
 
 Annual catch-up retains the due occurrence's tax year, even if the scheduler restarts
-in a later year. Delivery stops on the first failed portfolio. A retry may resend
-earlier portfolios, so check the provider after a partial send. Monitoring is pinged
-only after every portfolio succeeds. US closing data may not yet be stored at 09:00 NZDT
+in a later year. Delivery continues after a failed portfolio and records each successful
+portfolio in the scheduler JSON file, scoped to the schedule and original due time.
+Retries skip recorded portfolios; these records are cleared when the occurrence advances.
+Monitoring is pinged only after every portfolio succeeds. Manual reruns send again.
+Check the provider after an uncertain send, since a crash before checkpointing or partial
+recipient acceptance can still cause duplicate email. US closing data may not yet be stored at 09:00 NZDT
 on 1 April; inspect carried-forward flags and refresh through 31 March before a manual
 rerun if needed.
 
@@ -240,6 +273,17 @@ imputation is excluded from the default total return. Foreign portfolio broker F
 is translated to NZD using stored FX for the transaction date. Split and DRP handling
 also comes from the shared engine. Record DRP reinvestments at their actual price.
 
+
+## Private data retention
+
+Keep Akahu snapshots for two years as the recommended default. They contain private
+financial data in the database; review retention and remove older snapshots manually
+when appropriate. No automatic snapshot deletion is configured.
+
+Every Compose service rotates `json-file` container logs at 10 MB, retaining at most
+three files per container. HTTP transport INFO logs are suppressed to avoid recording
+holding symbols and request timestamps. Recreate containers to apply logging changes.
+Keep database backups and any separately exported logs private as well.
 
 ## Updating
 
@@ -320,7 +364,9 @@ password.
 ## Private dashboard over Tailscale
 
 The `web` service shares the app package and database. It runs FastAPI on container port
-8000 with one worker. Only its host binding is published; the database remains private.
+8000 with one worker. `GET /healthz` returns `ok` and does not open a session or read the
+database; Compose uses it as the web healthcheck. Only its host binding is published; the
+database remains private.
 The default is `127.0.0.1:8000`. Never publish it on a wildcard or public address, configure
 router forwarding, or use Tailscale Funnel.
 
@@ -415,7 +461,8 @@ daily_percent = "10"
 portfolio_drop_percent = "5"
 period_days = 7
 stale_trading_days = 3
-# Optional repeat interval while a rule remains triggered:
+# Optional. Repeats portfolio-drop and stale rules while they stay triggered.
+# Daily moves send once per pair of close dates and do not use this interval.
 # cooldown_hours = 24
 
 [alerts.holdings."NZX:EXAMPLE"]
@@ -426,7 +473,12 @@ daily_percent = "15"
 Threshold comparisons are strict: exactly 10% does not exceed a 10% rule. Daily
 movement compares fresh closes on adjacent completed trading days in the holding's
 listing currency, adjusted for splits. Fees, trades and currency movements do not
-change this price comparison. Missing closes leave its suppression state unchanged.
+change this price comparison. The delivery row records the pair of close dates that
+triggered it. That pair sends once: a second fetch the same day, or a weekend check
+of Friday's closes, does not send again. A later qualifying pair sends even when the
+earlier move never fell back under the threshold. Missing closes leave its
+suppression state unchanged. A daily row recorded before close dates were stored has
+no pair, so the next check can send the current move once and then records the dates.
 Staleness counts completed exchange trading days, excluding weekends and exchange
 holidays. If no fresh price exists, it counts from the first trade. Sold holdings do
 not trigger holding alerts.
@@ -441,10 +493,18 @@ valuations suppress that evaluation rather than inventing figures.
 
 Emails list the triggering figures and a reminder to open the private dashboard over
 Tailscale. They reuse `MAILER`, sender and `recipients` (or `MAIL_OWNER` when empty).
-Delivery state lives in the database and survives scheduler restarts. Each portfolio
-and rule sends once until a successful evaluation clears it; optional `cooldown_hours`
-allows repeats while it remains triggered. Failed email delivery is retried without
-recording a sent alert. A process failure after email delivery but before the database
+Delivery state lives in the database and survives scheduler restarts. Each portfolio is
+locked, evaluated and committed separately. Successful sends and rule clears commit
+before moving to the next portfolio, so a later failure cannot roll them back.
+Scheduled checks also checkpoint each completed portfolio in the scheduler JSON file
+and skip it on retries of that occurrence. Dry runs neither commit nor checkpoint.
+Each portfolio-drop and stale rule sends once until a successful evaluation clears
+it. Optional `cooldown_hours` repeats those rules while they remain triggered. A
+daily move ignores that cooldown and sends again only for a new pair of close dates.
+Clearing a daily move, because it no longer exceeds the threshold or the holding is
+sold, removes the recorded pair so a later qualifying pair can send.
+Failed email delivery is retried without recording a sent alert; other portfolios
+continue before the overall failure is reported. A process failure after email delivery but before the database
 commit can cause a duplicate on retry, since email and the database cannot commit
 atomically.
 
@@ -453,6 +513,8 @@ topic URL and optionally `ALERT_NTFY_TOKEN`, or set both `ALERT_PUSHOVER_TOKEN` 
 `ALERT_PUSHOVER_USER`. ntfy takes precedence if both providers are configured. Recreate
 the scheduler container after changing environment values. Push providers receive the
 same portfolio figures as the email; use only a private topic or account. Never put
-URLs or tokens in TOML, commands or git. Push requests refuse redirects to protect tokens and portfolio figures.
+private URLs or tokens in TOML, commands or git. Legacy report monitoring in TOML
+is supported only for migration; move it to `REPORT_KUMA_PUSH_URL` in `.env`. Push requests
+refuse redirects to protect tokens and portfolio figures.
 Push failures emit a generic warning without
 secrets and do not retry an already successful email.

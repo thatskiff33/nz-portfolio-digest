@@ -336,3 +336,45 @@ def test_floats_and_non_finite_amounts_never_reach_the_database(engine, value):
     with pytest.raises(StatementError), session_scope(engine) as session:
         portfolio, instrument = _seed(session)
         session.add(_trade(portfolio, instrument, price=value))
+
+
+def test_history_migration_adds_income_indexes_and_scan_timestamp():
+    """Exercise the additive migration without requiring a Postgres service."""
+    from alembic.operations import Operations
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import create_engine
+
+    scripts = ScriptDirectory.from_config(migrate.alembic_config())
+    assert len(scripts.get_heads()) == 1
+    revision = scripts.get_revision("0007")
+    assert revision.down_revision == "0006"
+    portable = create_engine("sqlite://")
+    try:
+        with portable.begin() as conn:
+            conn.execute(text("CREATE TABLE trades (id INTEGER PRIMARY KEY, income_id INTEGER)"))
+            conn.execute(
+                text(
+                    "CREATE TABLE dividend_suggestions (id INTEGER PRIMARY KEY, income_id INTEGER)"
+                )
+            )
+            conn.execute(text("CREATE TABLE instruments (id INTEGER PRIMARY KEY)"))
+            with Operations.context(MigrationContext.configure(conn)):
+                revision.module.upgrade()
+                for table in ("trades", "dividend_suggestions"):
+                    indexes = inspect(conn).get_indexes(table)
+                    assert any(index["column_names"] == ["income_id"] for index in indexes)
+                    assert any(
+                        [column.name for column in index.columns] == ["income_id"]
+                        for index in Base.metadata.tables[table].indexes
+                    )
+                assert "split_scanned_at" in {
+                    c["name"] for c in inspect(conn).get_columns("instruments")
+                }
+                revision.module.downgrade()
+                assert not inspect(conn).get_indexes("trades")
+                assert not inspect(conn).get_indexes("dividend_suggestions")
+                assert "split_scanned_at" not in {
+                    c["name"] for c in inspect(conn).get_columns("instruments")
+                }
+    finally:
+        portable.dispose()

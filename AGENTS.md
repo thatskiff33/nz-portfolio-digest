@@ -75,11 +75,20 @@ agent does the GitHub steps.
 - **If someone ever has to open a PR as `thatskiff33-agents`:** first check that the
   account's GitHub setting "Keep my email addresses private" is on. Do not merge it
   otherwise; note it on the epic.
+- **Before merging:** the `commit-emails` CI check must pass. It checks author and
+  committer addresses for every PR commit and the actual PR head, without printing addresses.
+  Keep using squash merges and the post-merge checks below.
 - **After every merge:** check both `git log origin/main -1 --format=%ae` and
   `git log origin/main -1 --format=%ce`. Each must be a `users.noreply.github.com`
   address or GitHub's `noreply@github.com` address.
 - **Never:** push to `main` directly, force-push, or commit secrets, `.env` files, broker
   exports or real portfolio data.
+
+## Dependabot
+
+Dependabot opens weekly pull requests for GitHub Actions, container images and Python
+packages (`.github/dependabot.yml`). Do not merge those pull requests directly. Turn each
+one into a Sekreton task so the commits stay authored by sekreton[bot].
 
 ## Migrations when tasks run in parallel
 

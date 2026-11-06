@@ -108,16 +108,29 @@ systemctl --user daemon-reload
 docker compose up -d --build scheduler
 ```
 
-Edit the server copy of `schedules.toml`, then `docker compose restart scheduler`.
-`recipients = []` uses `MAIL_OWNER`; otherwise supply a list of mailbox addresses, for example
-`recipients = ["owner@example.invalid", "other@example.invalid"]`. It applies to every report.
-Keep real addresses and private monitoring URLs in the server copy only, never commit them.
-An optional `kuma_push_url` is pinged only after successful delivery. Ping failures are
-logged without the URL and do not fail the send.
-An optional `prices_kuma_push_url` is pinged only after a scheduled price fetch in which
-every instrument and rate succeeded. Give that Push monitor a 26-hour heartbeat too.
-Prices run twice a day, so one missed run stays quiet and a day without a clean fetch
-raises an alert. Ping failures are logged without the URL and do not fail the job.
+Edit schedule times in `schedules.toml`, then `docker compose restart scheduler`.
+Keep private report values in the server `.env`: `REPORT_RECIPIENTS` accepts a
+comma-separated list of mailbox addresses, and `REPORT_KUMA_PUSH_URL` holds the optional
+monitoring push URL. Non-empty environment values override their TOML equivalents.
+Empty or whitespace-only environment settings leave TOML values in effect; if the resulting
+recipient list is empty, reports use `MAIL_OWNER`. This applies to every report.
+
+To migrate an existing server, move recipients and the monitoring URL from its
+`schedules.toml` into these `.env` settings, restore `recipients = []`, and remove
+`kuma_push_url` from TOML. Recreate containers after environment changes with
+`docker compose up -d --force-recreate scheduler`. Legacy TOML values still work;
+any TOML `kuma_push_url` emits a warning recommending `REPORT_KUMA_PUSH_URL`, even when
+an environment value overrides it. The warning never includes the URL.
+The deploy script continues preserving existing server schedules for compatibility.
+Monitoring is pinged only after successful delivery. Ping failures are logged without
+the URL and do not fail the send.
+
+An optional `REPORT_PRICES_KUMA_PUSH_URL` in the server `.env` is pinged only after a
+scheduled price fetch in which every instrument and rate succeeded. Give that Push monitor
+a 26-hour heartbeat. Prices run twice a day, so one missed run stays quiet and a day
+without a clean fetch raises an alert. A non-empty value overrides any legacy TOML
+`prices_kuma_push_url`, which also emits a warning without the URL. Ping failures are
+logged without the URL and do not fail the job.
 
 Each `[[schedules]]` needs a unique `name`, `kind` (`prices` or `report`), `frequency`
 (`daily`, `weekly`, `monthly` or `yearly`) and local `at = "HH:MM"`. Weekly schedules use a
@@ -225,7 +238,10 @@ docker compose run --rm -v "$PWD/previews:/previews" migrate report send-now \
   --schedule monthly --dry-run --out /previews/report.html
 ```
 
-Dry-run writes `report.html` and `report.txt`. Keep real previews private and out of git.
+Dry-run writes `report.html` and `report.txt`, plus CSV for year-end reports.
+On POSIX, all preview files are created with mode `0600` (owner read/write only), and
+existing preview files are tightened to that mode before overwriting. Windows uses its
+ordinary file permissions. Keep the output directory private and real previews out of git.
 The email uses inline styles and table layout, including a table-based value chart that
 works without downloading images. Each market has the requested Sharesight-style columns
 and subtotals, followed by the portfolio total. Missing price/FX data fails the entire
@@ -278,6 +294,17 @@ imputation is excluded from the default total return. Foreign portfolio broker F
 is translated to NZD using stored FX for the transaction date. Split and DRP handling
 also comes from the shared engine. Record DRP reinvestments at their actual price.
 
+
+## Private data retention
+
+Keep Akahu snapshots for two years as the recommended default. They contain private
+financial data in the database; review retention and remove older snapshots manually
+when appropriate. No automatic snapshot deletion is configured.
+
+Every Compose service rotates `json-file` container logs at 10 MB, retaining at most
+three files per container. HTTP transport INFO logs are suppressed to avoid recording
+holding symbols and request timestamps. Recreate containers to apply logging changes.
+Keep database backups and any separately exported logs private as well.
 
 ## Updating
 
@@ -518,6 +545,8 @@ topic URL and optionally `ALERT_NTFY_TOKEN`, or set both `ALERT_PUSHOVER_TOKEN` 
 `ALERT_PUSHOVER_USER`. ntfy takes precedence if both providers are configured. Recreate
 the scheduler container after changing environment values. Push providers receive the
 same portfolio figures as the email; use only a private topic or account. Never put
-URLs or tokens in TOML, commands or git. Push requests refuse redirects to protect tokens and portfolio figures.
+private URLs or tokens in TOML, commands or git. Legacy report monitoring in TOML
+is supported only for migration; move it to `REPORT_KUMA_PUSH_URL` in `.env`. Push requests
+refuse redirects to protect tokens and portfolio figures.
 Push failures emit a generic warning without
 secrets and do not retry an already successful email.

@@ -223,6 +223,72 @@ def test_shared_change_retains_decimal_precision():
         assert row.change == D(".01")
 
 
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_preview_files_are_private_even_with_permissive_umask(tmp_path, overwrite):
+    import os
+    import stat
+
+    if os.name != "posix":
+        pytest.skip("POSIX permissions only")
+    out = tmp_path / "annual.html"
+    if overwrite:
+        for suffix in (".html", ".txt", ".csv"):
+            path = out.with_suffix(suffix)
+            path.write_text("old")
+            path.chmod(0o666)
+    previous = os.umask(0)
+    try:
+        report_service.deliver_report(
+            report_config(),
+            "Invented",
+            "<p>Preview</p>",
+            "Preview",
+            dry_run=True,
+            out=out,
+            csv="invented,value\n",
+        )
+    finally:
+        os.umask(previous)
+    for suffix, content in (
+        (".html", "<p>Preview</p>"),
+        (".txt", "Preview"),
+        (".csv", "invented,value\n"),
+    ):
+        path = out.with_suffix(suffix)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.read_text() == content
+
+
+def test_year_end_preview_uses_private_shared_delivery(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    from portfolio_digest import year_end_service
+
+    if os.name != "posix":
+        pytest.skip("POSIX permissions only")
+    monkeypatch.setattr(year_end_service, "load_year_end", lambda *args: object())
+    monkeypatch.setattr(year_end_service, "render_html", lambda *args: "Invented HTML")
+    monkeypatch.setattr(year_end_service, "render_text", lambda *args: "Invented text")
+    monkeypatch.setattr(year_end_service, "render_csv", lambda *args: "Invented CSV")
+    out = tmp_path / "annual.html"
+    previous = os.umask(0)
+    try:
+        year_end_service.run_year_end(
+            None, report_config(), "Invented", 2026, dry_run=True, out=out
+        )
+    finally:
+        os.umask(previous)
+    for suffix, content in (
+        (".html", "Invented HTML"),
+        (".txt", "Invented text"),
+        (".csv", "Invented CSV"),
+    ):
+        path = out.with_suffix(suffix)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.read_text() == content
+
+
 def test_split_warning_is_actionable_and_escaped_in_email():
     report = example_report()
     warning = "Split on 2026-10-06 not yet recorded; add the adjustment"

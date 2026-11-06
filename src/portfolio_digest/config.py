@@ -142,3 +142,25 @@ def get_gmail_settings() -> GmailSettings:
             {f"GMAIL_{error['loc'][0]}".upper() for error in exc.errors() if error["loc"]}
         )
         raise ConfigError(f"Invalid setting: {', '.join(names)}. See .env.example.") from None
+
+
+class ReportSettings(BaseSettings):
+    """Private report overrides, usable without database or mail credentials."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="REPORT_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    recipients: str = ""
+    kuma_push_url: SecretStr | None = None
+    prices_kuma_push_url: SecretStr | None = None
+
+
+def get_report_settings() -> ReportSettings:
+    try:
+        return ReportSettings()
+    except ValidationError as exc:
+        names = sorted(
+            {f"REPORT_{error['loc'][0]}".upper() for error in exc.errors() if error["loc"]}
+        )
+        raise ConfigError(f"Invalid setting: {', '.join(names)}. See .env.example.") from None

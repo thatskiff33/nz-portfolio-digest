@@ -139,15 +139,15 @@ NZ generally does not tax capital gains for long-term investors, but exceptions 
 This summary is information, not tax advice.
 
 The shared scheduler runs the `year-end` entry in `schedules.toml` on
-**1 April at 09:00 Pacific/Auckland**, sending one email per NZD portfolio for the latest
+**1 April at 19:00 Pacific/Auckland**, sending one email per NZD portfolio for the latest
 year ended 31 March. No separate annual systemd timer is needed. If one was installed
 from PR #29, disable it before starting the shared scheduler; see
 [deployment](docs/DEPLOY.md#shared-price-and-report-schedule).
 
-The 09:00 send uses data already stored. The US 31 March close coincides with this time
-in NZ daylight saving, before the normal daily price fetch, so US holdings may use the
-preceding stored close. Review carried-forward flags; refresh prices and FX through
-31 March and rerun manually if you need that closing observation.
+The 19:00 send follows the 18:30 price and FX fetch, allowing the US 31 March close
+and FX fix to be stored before delivery. Source failures can still leave observations
+stale. Review carried-forward flags; refresh prices and FX through 31 March and rerun
+manually after a source failure.
 
 For an all-portfolio preview, use `year-end --all --year 2026 --dry-run --out
 ./private-preview`; each portfolio gets a numbered subdirectory. Other portfolios continue

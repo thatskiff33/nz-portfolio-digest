@@ -31,11 +31,19 @@ The latest observation **on or before** a valuation date is used. An observation
 marked stale by its provider, or a missing trading day since the observation, produces a flag on the holding, market and portfolio. Prices
 use the exchange calendar, so weekends and exchange holidays alone do not cause
 a flag. FX uses its weekday calendar, including weekdays when the exchange is
-closed. Future observations are never used.
+closed. Future observations are never used. For live valuations with a supplied aware instant,
+freshness expects only closes already due at that instant, independently for each
+exchange and FX. Date-only calculations keep completed-day semantics and never read
+the clock.
 A missing price or FX with no prior observation stops the report with a clear
 error rather than treating the holding as worthless. A genuine zero price is
 valid. Fully sold holdings need no closing price. Broker-supplied transaction FX
 is used when available; otherwise the same carry-forward lookup applies.
+
+Initial price and FX fetches and default backfills start seven calendar days before
+the first trade, so a weekend or holiday opening can use the preceding observation.
+An explicit backfill start remains authoritative. This bounded lookback does not
+guarantee an observation during an unusually long suspension.
 
 `portfolio-digest prices fetch` populates the stored price and FX tables. The
 returns loader reads these tables directly without fetching remote data, and the

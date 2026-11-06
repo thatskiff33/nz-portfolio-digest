@@ -1,7 +1,7 @@
 """All figures and securities are invented; expected answers are hand-worked."""
 
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal as D
 from decimal import getcontext, localcontext
 
@@ -544,3 +544,50 @@ def test_sampled_valuations_do_not_scan_price_history():
         assert result.opening == result.closing == D(10 * (offset + 1))
         assert result.amounts == Components()
         assert result.flags == ()
+
+
+@pytest.mark.parametrize(
+    "day,hour,price_flag,fx_flag",
+    [
+        (2, 20, False, False),  # Tuesday NZ morning, before Monday US closes.
+        (3, 0, False, False),  # Tuesday NZ afternoon, Monday US price and FX closed.
+        (4, 0, True, True),
+        (3, 20, False, False),  # Tuesday US closes are still ahead.
+        (3, 21, True, False),  # Price close is due, FX close is an hour later.
+        (3, 22, True, True),
+    ],
+)
+def test_live_freshness_uses_separate_price_and_fx_closes(day, hour, price_flag, fx_flag):
+    monday = date(2026, 11, 2)
+    h = replace(holding("USD"), exchange="NYSE", prices=(Observation(monday, D(50)),))
+    rates = {"USD": (Observation(monday, D("1.7")),)}
+    result = calculate_returns(
+        (h,),
+        monday,
+        date(2026, 11, max(day, 3)),
+        rates,
+        as_of=datetime(2026, 11, day, hour, tzinfo=UTC),
+    )
+    flags = result.total.flags
+    assert any("price" in flag for flag in flags) == price_flag
+    assert any("FX" in flag for flag in flags) == fx_flag
+    assert result.total.closing == D(850)
+
+
+def test_live_freshness_keeps_provider_stale_and_date_only_semantics():
+    monday, tuesday = date(2026, 11, 2), date(2026, 11, 3)
+    h = replace(holding(), exchange="NYSE", prices=(Observation(monday, D(50)),))
+    instant = datetime(2026, 11, 2, 20, tzinfo=UTC)
+    assert not holding_return(h, monday, tuesday, {}, as_of=instant).flags
+    assert holding_return(h, monday, tuesday, {}).flags
+    stale = replace(h, prices=(Observation(monday, D(50), True),))
+    assert holding_return(stale, monday, tuesday, {}, as_of=instant).flags
+    with pytest.raises(ReturnError, match="timezone"):
+        calculate_returns((), monday, tuesday, {}, as_of=datetime(2026, 11, 3))
+
+
+@pytest.mark.parametrize("exchange", ["NYSEARCA", "NYSEAMERICAN", "CBOE"])
+def test_us_venues_do_not_flag_thanksgiving_as_missing(exchange):
+    wednesday, thanksgiving = date(2026, 11, 25), date(2026, 11, 26)
+    h = replace(holding(), exchange=exchange, prices=(Observation(wednesday, D(50)),))
+    assert not holding_return(h, wednesday, thanksgiving, {}).flags

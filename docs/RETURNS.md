@@ -91,10 +91,14 @@ not increase the year-end performance total.
 ## Percentages and rounding
 
 This is a simple, unannualised period return. The shared denominator for all four
-components is **opening value + purchase outlays**, without time weighting.
-Net sales are counted in the return amount, but do not reduce the denominator:
-otherwise a full liquidation at cost would create a zero denominator. Mid-period
-purchases contribute their full outlay. This explicit convention makes the
+components is **opening value + purchase outlays + non-cash value moved in**,
+without time weighting. Non-cash value moved in is the gross value of positive
+non-split adjustments (transfers in, gifts in and other value moved in) at their
+recorded price and FX. Opening balances inside the period already count as purchase
+outlays, so they are not counted twice. Net sales and non-cash removals are counted
+in the return amount, but do not reduce the denominator: otherwise a full
+liquidation at cost would create a zero denominator. Mid-period purchases and
+transfers in contribute their full value. This explicit convention makes the
 Sharesight-shaped columns reproducible; it is not a claim of parity with any
 undocumented Sharesight calculation or annualisation method.
 
@@ -127,10 +131,30 @@ Other positive adjustments add a parcel at the recorded trade price and FX;
 negative ones remove units FIFO at that price and FX, realising the removed
 parcel's price and currency movement. A recorded zero price is valid. These
 transfers, gifts, DRPs and corrections are non-cash: signed value moved in or out
-is retained as `Result.adjustments`, summed in subtotals and excluded from the
-purchase-based denominator. Adjustment fees reduce capital and count as cash
-outlays. Income rows alone never add units. This follows issue #19's recorded
-choice and keeps the accounting identity above intact.
+is retained as `Result.adjustments` and summed in subtotals. The gross value moved
+in by positive adjustments is retained separately as `Result.adjustment_inflows`,
+summed in subtotals and added to the denominator; removals never reduce it, just as
+sales do not. Registry splits and consolidations move no value, so they add nothing.
+Adjustment fees reduce capital and count as cash outlays. Income rows alone never
+add units. The owner decision of 6 Nov 2026 (QS-023) supersedes issue #19's
+recorded choice, which excluded adjustments from the denominator. The accounting
+identity above is unchanged; only the denominator definition changed.
+
+### Worked transfer example
+
+Every figure is invented. A portfolio opens with one holding worth NZ$1,000. During
+the period a second holding arrives by transfer in, recorded at NZ$100,000, and gains
+NZ$10,000. The first holding is unchanged. Closing value is NZ$111,000.
+
+| Row | Opening | Transfer in | Closing | Total return | Denominator | Total % |
+|---|---:|---:|---:|---:|---:|---:|
+| Existing holding | 1,000 | 0 | 1,000 | 0 | 1,000 | 0.00 |
+| Transferred holding | 0 | 100,000 | 110,000 | 10,000 | 100,000 | 10.00 |
+| Portfolio | 1,000 | 100,000 | 111,000 | 10,000 | 101,000 | 9.90 |
+
+The identity gives `111,000 - 1,000 - 100,000 = 10,000`. Before this change the
+portfolio denominator was NZ$1,000, showing 1000.00%, and the transferred holding
+showed `n/a`.
 
 Short positions are rejected. A trade currency different from its instrument
 currency is also rejected until normalised, rather than mixing unlike units.
@@ -138,6 +162,7 @@ currency is also rejected until normalised, rather than mixing unlike units.
 ## Independently worked weekly example
 
 Every security and figure below is invented. Each holding opens at NZ$100.
+There are no adjustments, so the portfolio denominator remains NZ$400.
 The fixture and assertions are in `tests/test_returns.py`.
 
 | Market:code | Units | Local price start → end | FX start → end | Capital NZ$ (%) | Dividends NZ$ (%) | Currency NZ$ (%) | Total NZ$ (%) |

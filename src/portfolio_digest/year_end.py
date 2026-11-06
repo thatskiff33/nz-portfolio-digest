@@ -35,7 +35,7 @@ NOTES = (
     "Splits require a matching quantity adjustment. Missing acquisition history uses the "
     "recorded opening-balance or transfer value, which may differ from tax cost.",
     "Total return uses net cash dividends, as in email reports, and the returns engine's "
-    "opening value plus purchase outlays denominator. "
+    "denominator: opening value plus purchase outlays plus non-cash value moved in. "
     "Carried-forward prices and FX are listed below.",
 )
 

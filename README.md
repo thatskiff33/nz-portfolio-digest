@@ -114,7 +114,8 @@ and closing 31 March values, and total return. CSV retains full calculation prec
 HTML displays amounts to two decimal places. Realised sales use **historical FIFO cost**,
 including acquisition fees and net of sale fees. Annual performance uses the existing
 returns engine, which starts from opening market value and includes gross dividends.
-Its percentage denominator is opening value plus purchase outlays. Splits preserve cost;
+Its percentage denominator is opening value plus purchase outlays plus non-cash
+value moved in (transfers in, gifts, opening balances). Splits preserve cost;
 DRP units need a recorded buy or quantity adjustment as well as the income record.
 Opening balances and transfers use their recorded value, so supply full acquisition
 history for reliable historical cost. Missing prices or FX stop the report; carried-forward

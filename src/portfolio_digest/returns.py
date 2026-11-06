@@ -29,6 +29,7 @@ from portfolio_digest.splits import rescale_price, split_change, split_warning
 
 ZERO = Decimal(0)
 HUNDRED = Decimal(100)
+FINANCIAL_PRECISION = 80
 P = ParamSpec("P")
 T = TypeVar("T")
 
@@ -39,7 +40,7 @@ def _financial_math(function: Callable[P, T]) -> Callable[P, T]:
     @wraps(function)
     def exact(*args: P.args, **kwargs: P.kwargs) -> T:
         with localcontext() as context:
-            context.prec = max(context.prec, 80)
+            context.prec = max(context.prec, FINANCIAL_PRECISION)
             return function(*args, **kwargs)
 
     return exact

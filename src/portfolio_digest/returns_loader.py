@@ -12,6 +12,7 @@ from portfolio_digest.config import get_settings
 from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.calendars import FX
 from portfolio_digest.returns import (
+    FINANCIAL_PRECISION,
     Holding,
     Observation,
     Payment,
@@ -159,7 +160,7 @@ def load_portfolio_inputs(
         # Broker FX is relative to the portfolio base. Translate that base using
         # the same dated lookup and stale-data rules as every other engine input.
         with localcontext() as context:
-            context.prec = max(context.prec, 80)
+            context.prec = max(context.prec, FINANCIAL_PRECISION)
             return value * _lookup(
                 rates.get(portfolio.base_currency, ()),
                 day,

@@ -3,7 +3,9 @@
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 
-UNIT_SCALE = Decimal("0.00000001")
+from portfolio_digest.models import QUANTITY_PLACES
+
+UNIT_SCALE = Decimal(1).scaleb(-QUANTITY_PLACES)
 
 
 def round_units(units: Decimal) -> Decimal:

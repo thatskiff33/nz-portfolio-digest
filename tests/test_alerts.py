@@ -597,3 +597,41 @@ def test_cli_partial_fetch_advances_but_total_failure_remains_pending(
     due = datetime.fromisoformat(state["prices"])
     assert (due > NOW) is partial
     assert (state["prices:retry"]["retry_at"] is None) is partial
+
+
+@pytest.mark.parametrize(
+    ("movement", "expected"),
+    [("8.125", "+8.13"), ("0.125", "+0.13"), ("-8.125", "-8.13"), ("-0.125", "-0.13")],
+)
+def test_daily_alert_rounds_signed_midpoint_half_up(sample, movement, expected):
+    session, portfolio, instrument = sample
+    session.get(Price, (instrument.id, date(2026, 10, 15))).close = D(100)
+    session.get(Price, (instrument.id, NOW.date())).close = D(100) + D(movement)
+    states = alerts.evaluate(session, portfolio, config(daily_percent=D("0.01")), NOW)
+    assert f"moved {expected}%" in states["daily:NZX:MADEUP"].text
+
+
+@pytest.mark.parametrize(("close", "expected"), [("8.125", "8.13"), ("0.125", "0.13")])
+def test_daily_alert_rounds_closing_amount_half_up(sample, close, expected):
+    session, portfolio, instrument = sample
+    session.get(Price, (instrument.id, NOW.date())).close = D(close)
+    states = alerts.evaluate(session, portfolio, config(), NOW)
+    assert f"closing prices 10.00 to {expected} NZD" in states["daily:NZX:MADEUP"].text
+
+
+@pytest.mark.parametrize(("drop", "expected"), [("8.125", "-8.13"), ("0.125", "-0.13")])
+def test_portfolio_alert_rounds_drop_half_up(sample, monkeypatch, drop, expected):
+    from types import SimpleNamespace
+
+    session, portfolio, _ = sample
+    total = SimpleNamespace(flags=(), opening=D(100), change=-D(drop), closing=D(100) - D(drop))
+    monkeypatch.setattr(
+        alerts,
+        "load_returns",
+        lambda *a, **kw: SimpleNamespace(
+            total=total,
+            base_currency="NZD",
+        ),
+    )
+    states = alerts.evaluate(session, portfolio, config(portfolio_drop_percent=D("0.01")), NOW)
+    assert f"Portfolio value changed {expected}%" in states["portfolio"].text

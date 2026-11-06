@@ -23,17 +23,11 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from portfolio_digest import markets
-from portfolio_digest.models import TradeType
+from portfolio_digest.models import MONEY_PLACES, QUANTITY_PLACES, RATE_PLACES, TradeType
 from portfolio_digest.validation import InvalidInput, contains_control_characters
 
 if TYPE_CHECKING:
     from portfolio_digest.income import ParsedIncome
-
-# Matches the database columns: Quantity is Numeric(24, 8), Money is Numeric(20, 6) and
-# Rate is Numeric(20, 10).
-QUANTITY_PLACES = 8
-MONEY_PLACES = 6
-RATE_PLACES = 10
 
 
 class FileProblem(Exception):

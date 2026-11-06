@@ -60,9 +60,16 @@ class ExactNumeric(TypeDecorator[Decimal]):
 
 
 # Quantities allow fractional shares (Sharesies sells fractions).
-Quantity = ExactNumeric(24, 8)
-Money = ExactNumeric(20, 6)
-Rate = ExactNumeric(20, 10)
+QUANTITY_PRECISION = 24
+QUANTITY_PLACES = 8
+MONEY_PRECISION = 20
+MONEY_PLACES = 6
+RATE_PRECISION = 20
+RATE_PLACES = 10
+
+Quantity = ExactNumeric(QUANTITY_PRECISION, QUANTITY_PLACES)
+Money = ExactNumeric(MONEY_PRECISION, MONEY_PLACES)
+Rate = ExactNumeric(RATE_PRECISION, RATE_PLACES)
 
 PORTFOLIO_NAME_UNIQUE = "uq_portfolios_name_lower"
 

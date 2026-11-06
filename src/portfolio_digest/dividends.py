@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from portfolio_digest.importers.base import RowProblem
 from portfolio_digest.importing import ImportFailure
 from portfolio_digest.income import INCOME_FIELDS, ParsedIncome, store_income
-from portfolio_digest.models import DividendSuggestion, Income, Instrument, Portfolio
+from portfolio_digest.models import MONEY_PLACES, DividendSuggestion, Income, Instrument, Portfolio
 from portfolio_digest.returns import instrument_position
 
 
@@ -46,7 +46,7 @@ def suggest(
         )
         if confirmed:
             continue
-        amount = (units * per_unit).quantize(Decimal("0.000001"))
+        amount = (units * per_unit).quantize(Decimal(1).scaleb(-MONEY_PLACES))
         if amount >= Decimal("1e14"):
             raise RowProblem("Suggested dividend is outside the supported money range.")
         suggestion = DividendSuggestion(

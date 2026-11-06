@@ -670,3 +670,46 @@ def test_client_login_throttle_expires(client, monkeypatch):
 def test_dashboard_refuses_missing_or_short_password(engine_web, password):
     with pytest.raises(ValueError, match="at least 16"):
         create_app(engine_web, password)
+
+
+@pytest.mark.parametrize(("value", "expected"), [("8.125", "8.13"), ("0.125", "0.13")])
+def test_dashboard_rounding_matches_cli_and_email(engine_web, monkeypatch, value, expected):
+    from dataclasses import replace
+
+    from portfolio_digest.reports import Report as EmailReport
+    from portfolio_digest.reports import render
+    from portfolio_digest.returns import Components, Report, Result
+    from portfolio_digest.returns_table import render_table
+
+    amount = Decimal(value)
+    row = Result(
+        "NZX:KOW",
+        Decimal(100),
+        amount,
+        Decimal(0),
+        Decimal(0),
+        Components(amount, Decimal(0), Decimal(0)),
+        exchange="NZX",
+    )
+    report = Report(DAY, DAY, "NZD", (row,), (replace(row, label="NZX"),), row)
+    monkeypatch.setattr(Dashboard, "calculate", lambda *args: report)
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        response = client.get(f"/p/1?period=custom&start={DAY}&end={DAY}")
+    assert response.status_code == 200
+    assert f"<strong>{expected}</strong>" in response.text
+    assert f"{expected}%" in response.text
+    assert f"{expected} ({expected}%)" in render_table(report)
+    html, text = render(EmailReport(DAY, DAY, report))
+    assert f">{expected}</td>" in html
+    assert f"Portfolio value NZ$ {expected}" in text
+
+
+def test_dashboard_missing_amount_stays_unavailable(client, monkeypatch):
+    def unavailable(self, *args):
+        self.report = None
+        self.holdings = []
+        self.error = "Missing quotes"
+
+    monkeypatch.setattr(Dashboard, "__init__", unavailable)
+    monkeypatch.setattr(Dashboard, "series", lambda *args: [])
+    assert "<strong>Unavailable</strong>" in client.get("/p/1").text

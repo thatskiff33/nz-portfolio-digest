@@ -19,6 +19,8 @@ from portfolio_digest.returns import (
     is_split_trade,
 )
 
+FIF_THRESHOLD = Decimal(50_000)
+
 NOTES = (
     "Historical FIFO cost, including purchase fees; sale fees reduce proceeds. "
     "The returns engine also uses FIFO, but resets performance parcels to opening market value.",
@@ -28,7 +30,8 @@ NOTES = (
     "NZX holdings and foreign otherwise, using the recorded combined withholding field. "
     "Check this classification against your tax statements.",
     "Foreign cost conservatively includes all non-NZX holdings, including Australian shares. "
-    "Exemptions may apply. The NZ$50,000 FIF threshold is assessed per person across portfolios; "
+    f"Exemptions may apply. The NZ${FIF_THRESHOLD:,.0f} FIF threshold "
+    "is assessed per person across portfolios; "
     "this report covers this portfolio only and does not calculate FIF income. "
     "Without execution times, same-day additions precede sales for a conservative peak.",
     "DRP income is included; reinvested units must also have a recorded buy or adjustment. "
@@ -82,7 +85,7 @@ class YearEnd:
 
     @property
     def fif_exceeded(self) -> bool:
-        return self.foreign_peak > Decimal(50000)
+        return self.foreign_peak > FIF_THRESHOLD
 
 
 @_financial_math

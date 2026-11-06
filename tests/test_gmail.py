@@ -236,6 +236,23 @@ def test_gmail_message_interrupts_propagate(failure):
         AsbGmailImporter(Client(), "ASB notes").fetch()
 
 
+def test_gmail_fetch_failure_after_valid_message_propagates():
+    class Client:
+        def label_id(self, name):
+            return "made-up-label"
+
+        def message_ids(self, label_id):
+            return iter(("valid", "network-failure"))
+
+        def raw_message(self, message_id):
+            if message_id == "network-failure":
+                raise GmailError("Gmail request failed.")
+            return (FIXTURES / "asb-contract-note.eml").read_bytes()
+
+    with pytest.raises(GmailError, match="request failed"):
+        AsbGmailImporter(Client(), "ASB notes").fetch()
+
+
 def test_save_refresh_token_without_nofollow(tmp_path, monkeypatch):
     from portfolio_digest.gmail import save_refresh_token
 

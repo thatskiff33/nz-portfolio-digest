@@ -729,3 +729,21 @@ def test_holding_input_error_is_explained(engine_web):
     assert response.status_code == 200
     assert "Trade currency differs from instrument currency" in response.context["returns_error"]
     assert response.context["result"] is None
+
+
+def test_holding_future_activity_does_not_invert_report_dates(engine_web):
+    today = datetime.now(ZoneInfo("Pacific/Auckland")).date()
+    with Session(engine_web) as session:
+        session.scalar(select(Trade).where(Trade.instrument_id == 2)).trade_date = (
+            today + timedelta(days=30)
+        )
+        session.commit()
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        sign_in(client)
+        response = client.get("/p/1/holding/2")
+    assert response.status_code == 200
+    assert response.context["start"] <= response.context["end"] == today
+    assert response.context["result"] is None
+    assert response.context["returns_error"] is None
+    # Future ledger rows remain visible, but are excluded from valuation inputs.
+    assert len(response.context["trades"]) == 1

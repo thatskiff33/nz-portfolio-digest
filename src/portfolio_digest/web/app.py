@@ -225,8 +225,12 @@ def create_app(
                 raise HTTPException(404, "Holding not found in this portfolio.")
             instrument = session.get(Instrument, iid)
             today = datetime.now(ZoneInfo(timezone)).date()
-            activity = [t.trade_date for t in trades] + [i.paid_date for i in income]
-            begin, finish = period_dates("all", today, min(activity))
+            activity = [t.trade_date for t in trades if t.trade_date <= today] + [
+                i.paid_date
+                for i in income
+                if i.paid_date <= today and i.kind in ("dividend", "distribution")
+            ]
+            begin, finish = period_dates("all", today, min(activity, default=today))
             result, error = None, None
             prices = ()
             try:

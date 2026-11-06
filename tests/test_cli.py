@@ -154,3 +154,42 @@ def test_help_describes_options_without_a_database(no_settings_file, capsys, com
     output = capsys.readouterr().out
     for description in descriptions:
         assert description in output
+
+
+def test_main_suppresses_http_request_details(monkeypatch, caplog):
+    import logging
+    from argparse import Namespace
+
+    import httpx
+
+    from portfolio_digest import cli
+
+    loggers = [logging.getLogger(name) for name in ("httpx", "httpcore")]
+    levels = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.setLevel(logging.NOTSET)
+
+    def fetch(_):
+        with httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200))
+        ) as client:
+            client.get("https://prices.example.invalid/INVENTED?period1=123456")
+        logging.getLogger("httpcore").info("INVENTED holding details")
+        for logger in loggers:
+            logger.warning("Transport warning")
+        return 0
+
+    monkeypatch.setattr(
+        cli, "build_parser", lambda: Namespace(parse_args=lambda _: Namespace(func=fetch))
+    )
+    try:
+        with caplog.at_level(logging.INFO):
+            assert main([]) == 0
+        assert "INVENTED" not in caplog.text
+        assert not any(
+            r.name in {"httpx", "httpcore"} and r.levelno == logging.INFO for r in caplog.records
+        )
+        assert sum(r.message == "Transport warning" for r in caplog.records) == 2
+    finally:
+        for logger, level in zip(loggers, levels, strict=True):
+            logger.setLevel(level)

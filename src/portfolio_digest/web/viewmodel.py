@@ -84,9 +84,31 @@ class Dashboard:
         return points
 
 
-def period_dates(period: str, today: date, first: date, start: str = "", end: str = ""):
+def effective_period(period, today, first, start="", end="", original_start="", original_end=""):
     if period not in {"week", "month", "ytd", "all", "custom"}:
         raise ValueError("Choose a valid period.")
+    if period == "custom":
+        return period
+    if original_start and original_end:
+        edited = (start, end) != (original_start, original_end)
+    else:
+        begin, finish = period_range(period, today, first)
+        edited = bool(start or end) and (start, end) != (str(begin), str(finish))
+    return "custom" if edited else period
+
+
+def period_dates(
+    period: str,
+    today: date,
+    first: date,
+    start: str = "",
+    end: str = "",
+    original_start: str = "",
+    original_end: str = "",
+):
+    if period not in {"week", "month", "ytd", "all", "custom"}:
+        raise ValueError("Choose a valid period.")
+    period = effective_period(period, today, first, start, end, original_start, original_end)
     begin, finish = period_range(f"{start}:{end}" if period == "custom" else period, today, first)
     if finish > today:
         raise ValueError("Choose dates ending no later than today.")

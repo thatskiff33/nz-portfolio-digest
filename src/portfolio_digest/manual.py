@@ -6,9 +6,11 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from portfolio_digest import markets
 from portfolio_digest.actions import validate_split_adjustments
 from portfolio_digest.importers.base import (
     ParsedTrade,
+    RowProblem,
     checked_text,
     listing,
     parse_date,
@@ -20,6 +22,21 @@ from portfolio_digest.importers.base import (
 from portfolio_digest.importing import find_or_create_instrument, portfolio_named
 from portfolio_digest.models import Instrument, Trade, TradeType
 from portfolio_digest.returns import Transaction
+
+
+class TradeProblem(RowProblem):
+    """Validation error with stable form fields, also usable by CLI callers."""
+
+    def __init__(self, fields: tuple[str, ...], message: str):
+        super().__init__(message)
+        self.fields = fields
+
+
+def _field(fields, parser, *args, **kwargs):
+    try:
+        return parser(*args, **kwargs)
+    except (RowProblem, ValueError) as exc:
+        raise TradeProblem(fields, str(exc)) from None
 
 
 def prepare_trade(
@@ -35,15 +52,21 @@ def prepare_trade(
     name: str | None = None,
     notes: str | None = None,
 ) -> ParsedTrade:
-    kind = TradeType(trade_type)
-    exchange, code, currency = listing(exchange, code, currency)
-    day: date = parse_date(trade_date, "Trade date")
-    units: Decimal = parse_quantity(
-        quantity, "Quantity", allow_negative=kind == TradeType.ADJUSTMENT
+    kind = _field(("trade_type",), TradeType, trade_type)
+    exchange = _field(("exchange",), markets.exchange_code, exchange)
+    code = _field(("code",), markets.instrument_code, code)
+    exchange, code, currency = _field(("exchange", "code"), listing, exchange, code, currency)
+    day: date = _field(("trade_date",), parse_date, trade_date, "Trade date")
+    units: Decimal = _field(
+        ("quantity",),
+        parse_quantity,
+        quantity,
+        "Quantity",
+        allow_negative=kind == TradeType.ADJUSTMENT,
     )
-    unit_price = parse_price(price, "Price", currency=currency)
-    fee = parse_money(fees, "Fees", currency=currency, allow_negative=False)
-    name = parse_security_name(name)
+    unit_price = _field(("price",), parse_price, price, "Price", currency=currency)
+    fee = _field(("fees",), parse_money, fees, "Fees", currency=currency, allow_negative=False)
+    name = _field(("name",), parse_security_name, name)
     return ParsedTrade(
         where="manual entry",
         exchange=exchange,
@@ -55,7 +78,7 @@ def prepare_trade(
         price=unit_price,
         fees=fee,
         name=name,
-        notes=checked_text(notes, "Notes") if notes else None,
+        notes=_field(("notes",), checked_text, notes, "Notes") if notes else None,
         external_ref=f"manual:{uuid.uuid4().hex}",
     )
 

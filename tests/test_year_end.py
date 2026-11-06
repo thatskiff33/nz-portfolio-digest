@@ -1096,3 +1096,12 @@ def test_year_end_preview_ignores_delivery_checkpoint(year_engine, tmp_path):
         )
     assert (tmp_path / "annual-portfolio-1.csv").exists()
     checkpoint.save.assert_not_called()
+
+
+def test_year_end_accessible_tables_keep_mobile_semantics(ledger):
+    html = render_html(calculate_year_end(*ledger, 2026), "Example")
+    assert '<th scope="col"' in html
+    assert '<th scope="row"' in html
+    assert "<strong>" in html and "</strong></td>" in html
+    assert "display:block" not in html and "display:none" not in html
+    assert "overflow-x:auto" in html and "font-size:14px" in html

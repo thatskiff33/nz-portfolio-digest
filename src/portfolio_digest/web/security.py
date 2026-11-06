@@ -24,6 +24,7 @@ class BrowserSession:
     csrf: str
     expires: int
     authenticated: bool = False
+    message: str = ""
 
 
 class Security:
@@ -35,6 +36,16 @@ class Security:
         self.sessions: dict[str, BrowserSession] = {}
         self.failures: list[tuple[int, str]] = []
         self.lock = threading.RLock()
+
+    def flash(self, request: Request, message: str) -> None:
+        with self.lock:
+            request.state.browser.message = message[:240]
+
+    def take_message(self, request: Request) -> str:
+        with self.lock:
+            message = request.state.browser.message
+            request.state.browser.message = ""
+            return message
 
     def digest(self, password: str) -> bytes:
         return hashlib.scrypt(password.encode(), salt=self.salt, n=16384, r=8, p=1)

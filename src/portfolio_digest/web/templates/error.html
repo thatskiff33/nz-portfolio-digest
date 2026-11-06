@@ -1,8 +1,9 @@
 {% extends "base.html" %}
+{% block title %}Error: {{ error_status }} · Portfolio digest{% endblock %}
 {% block content %}
     <h1>We could not complete that request</h1>
     <p role="alert">{{ message }}</p>
     <p>
-        <a href="/">Return to your portfolio</a> · <a href="/login">Sign in</a>
+        <a href="/">Return to your portfolio</a>{% if not request.state.browser.authenticated %} · <a href="/login">Sign in</a>{% endif %}
     </p>
 {% endblock %}

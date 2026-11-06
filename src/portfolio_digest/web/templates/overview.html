@@ -1,7 +1,7 @@
 {% from "returns.html" import returns %}
 {% extends "base.html" %}
 {% block title %}
-    {{ portfolio.name }} · Portfolio digest
+    Overview · {{ portfolio.name }} · Portfolio digest
 {% endblock %}
 {% block content %}
     <div class="page-heading">
@@ -13,6 +13,8 @@
         <span class="date-pill">As at {{ end.strftime("%d %b %Y") }}</span>
     </div>
     <form class="period-form" method="get" action="/p/{{ portfolio.id }}">
+        <input type="hidden" name="original_start" value="{{ start }}">
+        <input type="hidden" name="original_end" value="{{ end }}">
         <label>
             Period<select name="period">
             {% for value,label in [('week','Week'),('month','Month'),('ytd','Year to date'),('all','All time'),('custom','Custom')] %}

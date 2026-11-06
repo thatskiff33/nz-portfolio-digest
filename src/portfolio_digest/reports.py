@@ -88,7 +88,8 @@ def render(report: Report) -> tuple[str, str]:
     ]
     parts = [
         '<!doctype html><html lang="en-NZ"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1"></head>'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>{escape(heading)}</title></head>"
         '<body style="margin:0;background:#eef3f1;color:#17342c;font-family:Arial,sans-serif">'
         '<table role="presentation" style="width:100%;border-collapse:collapse"><tr><td '
         'style="padding:12px"><table role="presentation" align="center" '
@@ -177,13 +178,16 @@ def render(report: Report) -> tuple[str, str]:
         ]
 
     def html_row(cells: list[str], bold: bool = False) -> str:
-        tag = "th" if bold else "td"
-        cell_style = (
-            style.replace("padding:", "font-size:9px;padding:")
-            if cells in (core_headers, income_headers)
-            else style
-        )
-        return "<tr>" + "".join(f"<{tag} {cell_style}>{escape(c)}</{tag}>" for c in cells) + "</tr>"
+        header = cells in (core_headers, income_headers)
+        rendered = []
+        for index, cell in enumerate(cells):
+            tag = "th" if header or index == 0 else "td"
+            scope = 'scope="col" ' if header else ('scope="row" ' if index == 0 else "")
+            content = escape(cell)
+            if bold and not header and index > 0:
+                content = f"<strong>{content}</strong>"
+            rendered.append(f"<{tag} {scope}{style}>{content}</{tag}>")
+        return "<tr>" + "".join(rendered) + "</tr>"
 
     def income_table(rows: tuple[Result, ...], total: Result, label: str) -> str:
         def cells(result: Result, name: str) -> list[str]:
@@ -202,7 +206,7 @@ def render(report: Report) -> tuple[str, str]:
         return (
             '<p style="font-size:12px;color:#526c62">Income detail (NZ$)</p>'
             '<table style="width:100%;table-layout:fixed;border-collapse:collapse;'
-            'font-size:10px;text-align:right">'
+            'font-size:12px;text-align:right">'
             + html_row(income_headers, True)
             + "".join(html_row(cells(r, r.label.split(":", 1)[1])) for r in rows)
             + html_row(cells(total, label), True)
@@ -214,7 +218,7 @@ def render(report: Report) -> tuple[str, str]:
         parts.append(
             f'<h2 style="font-size:18px;margin-top:28px">{escape(market)}</h2>'
             '<table style="width:100%;table-layout:fixed;border-collapse:collapse;'
-            'font-size:10px;text-align:right">' + html_row(core_headers, True)
+            'font-size:12px;text-align:right">' + html_row(core_headers, True)
         )
         text += ["", market, " | ".join(headers)]
         for row in rows:
@@ -258,7 +262,7 @@ def render(report: Report) -> tuple[str, str]:
     parts.append(
         '<h2 style="font-size:18px">Portfolio total</h2>'
         '<table style="width:100%;table-layout:fixed;border-collapse:collapse;'
-        'font-size:10px;text-align:right">'
+        'font-size:12px;text-align:right">'
         + html_row(core_headers, True)
         + html_row(total[:7], True)
         + "</table>"

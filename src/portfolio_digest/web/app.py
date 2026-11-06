@@ -11,18 +11,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from portfolio_digest.db import make_engine
 from portfolio_digest.formatting import display_quantity
 from portfolio_digest.importers.base import FileProblem, RowProblem
 from portfolio_digest.importing import ImportFailure, undo_import
-from portfolio_digest.manual import add_trade, prepare_trade
+from portfolio_digest.manual import TradeProblem, add_trade, prepare_trade
 from portfolio_digest.models import ImportRun, Income, Instrument, Portfolio, Trade
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
 from portfolio_digest.returns import ReturnError, holding_return
 from portfolio_digest.returns_loader import first_activity_date, load_portfolio_inputs
 from portfolio_digest.web.security import COOKIE, LIFETIME, Security
-from portfolio_digest.web.viewmodel import Dashboard, period_dates
+from portfolio_digest.web.viewmodel import Dashboard, effective_period, period_dates
 
 ROOT = Path(__file__).parent
 
@@ -83,18 +84,48 @@ def create_app(
             )
         return response
 
-    @app.exception_handler(HTTPException)
+    @app.exception_handler(StarletteHTTPException)
     async def error(request, exc):
+        if not hasattr(request.state, "browser"):
+            request.state.session_id, request.state.browser = security.browser(request)
+        with Session(engine) as session:
+            return render(
+                request,
+                session,
+                "error.html",
+                status_code=exc.status_code,
+                message=exc.detail,
+                error_status=exc.status_code,
+            )
+
+    def render(request, session, name, *, status_code=200, **context):
+        context.update(
+            portfolios=list(session.scalars(select(Portfolio).order_by(Portfolio.name)))
+            if request.state.browser.authenticated
+            else [],
+            page=name.removesuffix(".html"),
+        )
+        context.setdefault("values", {})
+        context.setdefault("errors", {})
+        context.setdefault("form_error", "")
+        context.setdefault("status_message", security.take_message(request))
         return templates.TemplateResponse(
             request=request,
-            name="error.html",
-            context={"message": exc.detail},
-            status_code=exc.status_code,
+            name=name,
+            context=context,
+            status_code=status_code,
         )
 
-    def render(request, session, name, **context):
-        context.update(portfolios=list(session.scalars(select(Portfolio).order_by(Portfolio.name))))
-        return templates.TemplateResponse(request=request, name=name, context=context)
+    def expired_form(request, session, p, name, data):
+        return render(
+            request,
+            session,
+            name,
+            status_code=403,
+            portfolio=p,
+            values=data,
+            form_error="This form has expired. Check your entries and resubmit.",
+        )
 
     def portfolio(session, ident):
         item = session.get(Portfolio, ident)
@@ -102,7 +133,7 @@ def create_app(
             raise HTTPException(404, "Portfolio not found.")
         return item
 
-    async def form(request, *, login=True):
+    async def form(request, *, login=True, recover_csrf=False):
         if login:
             security.require_login(request)
         size = 0
@@ -115,7 +146,13 @@ def create_app(
         request._body = b"".join(parts)
 
         data = await request.form(max_fields=30, max_files=0)
-        security.csrf(request, str(data.get("csrf", "")))
+        request.state.csrf_expired = False
+        try:
+            security.csrf(request, str(data.get("csrf", "")))
+        except HTTPException:
+            if not recover_csrf:
+                raise
+            request.state.csrf_expired = True
         return data
 
     @app.get("/", response_class=HTMLResponse)
@@ -154,6 +191,8 @@ def create_app(
         period: str = "month",
         start: str = "",
         end: str = "",
+        original_start: str = "",
+        original_end: str = "",
         sort: str = "code",
         direction: str = "asc",
     ):
@@ -162,7 +201,12 @@ def create_app(
             today = datetime.now(ZoneInfo(timezone)).date()
             first = first_activity_date(session, pid, today) or today
             try:
-                begin, finish = period_dates(period, today, first, start, end)
+                begin, finish = period_dates(
+                    period, today, first, start, end, original_start, original_end
+                )
+                period = effective_period(
+                    period, today, first, start, end, original_start, original_end
+                )
             except ValueError:
                 raise HTTPException(
                     400, "Choose a valid period and dates ending no later than today."
@@ -285,6 +329,7 @@ def create_app(
                 undo_import(session, rid)
             except ImportFailure as exc:
                 raise HTTPException(400, str(exc)) from None
+        security.flash(request, "Import undone.")
         return RedirectResponse(f"/p/{pid}/imports", status_code=303)
 
     @app.get("/p/{pid}/trade", response_class=HTMLResponse)
@@ -295,9 +340,11 @@ def create_app(
 
     @app.post("/p/{pid}/trade")
     async def trade(request: Request, pid: int):
-        data = await form(request)
+        data = await form(request, recover_csrf=True)
         with Session(engine) as session:
             p = portfolio(session, pid)
+            if request.state.csrf_expired:
+                return expired_form(request, session, p, "trade.html", data)
             try:
                 fields = {
                     k: str(data.get(k, ""))
@@ -314,11 +361,24 @@ def create_app(
                 }
                 add_trade(session, p.name, prepare_trade(**fields))
                 session.commit()
-            except (RowProblem, ValueError, ImportFailure):
+            except (RowProblem, ValueError, ImportFailure) as exc:
                 session.rollback()
-                raise HTTPException(
-                    400, "Trade not saved. Check the date, listing, type and amounts."
-                ) from None
+                errors = (
+                    {field: str(exc) for field in exc.fields}
+                    if isinstance(exc, TradeProblem)
+                    else {}
+                )
+                return render(
+                    request,
+                    session,
+                    "trade.html",
+                    status_code=400,
+                    portfolio=p,
+                    values=fields,
+                    errors=errors,
+                    form_error="Trade not saved. Check your entries and try again.",
+                )
+        security.flash(request, "Trade saved.")
         return RedirectResponse(f"/p/{pid}", status_code=303)
 
     @app.get("/p/{pid}/reconcile", response_class=HTMLResponse)
@@ -328,17 +388,42 @@ def create_app(
 
     @app.post("/p/{pid}/reconcile", response_class=HTMLResponse)
     async def reconcile(request: Request, pid: int):
-        data = await form(request)
+        data = await form(request, recover_csrf=True)
         with Session(engine) as session:
             p = portfolio(session, pid)
+            if request.state.csrf_expired:
+                return expired_form(request, session, p, "reconcile.html", data)
             try:
                 snapshot = parse_snapshot(str(data.get("snapshot", "")).encode())
                 differences = compare(stored_units(session, pid), snapshot)
-            except FileProblem:
-                raise HTTPException(
-                    400, "Snapshot not read. Use CSV with Exchange, Code and Units columns."
-                ) from None
-            return render(request, session, "reconcile.html", portfolio=p, differences=differences)
+            except (FileProblem, RowProblem, ValueError):
+                return render(
+                    request,
+                    session,
+                    "reconcile.html",
+                    status_code=400,
+                    portfolio=p,
+                    values=data,
+                    errors={
+                        "snapshot": "Use CSV with Exchange, Code and Units columns. "
+                        "Check each listing and units value."
+                    },
+                    form_error="Snapshot not read. Check your entries and try again.",
+                )
+            message = (
+                "All holdings match the snapshot."
+                if not differences
+                else f"Comparison complete. {len(differences)} holdings differ."
+            )
+            return render(
+                request,
+                session,
+                "reconcile.html",
+                portfolio=p,
+                differences=differences,
+                values=data,
+                status_message=message,
+            )
 
     return app
 

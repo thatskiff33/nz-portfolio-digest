@@ -78,13 +78,13 @@ for boundaries, FIFO attribution, dividend treatment and percentage denominators
 
 ## Development
 
-Needs Python 3.11 or newer, and a throwaway Postgres for the database tests.
+Needs Python 3.11 or newer, uv, and a throwaway Postgres for the database tests.
+`uv sync --frozen` installs the versions in `uv.lock`, which is what CI and the server image use.
 
 ```sh
-python -m venv .venv
-.venv/bin/pip install -e ".[dev]"     # Windows: .venv\Scripts\pip
-ruff check . && ruff format --check .
-TEST_DATABASE_URL=postgresql+psycopg://postgres:pass@localhost:5432/test pytest
+uv sync --frozen --extra dev
+uv run ruff check . && uv run ruff format --check .
+TEST_DATABASE_URL=postgresql+psycopg://postgres:pass@localhost:5432/test uv run pytest
 ```
 
 The tests **wipe** the database in `TEST_DATABASE_URL`, so never point it at real data. As a

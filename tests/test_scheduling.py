@@ -419,6 +419,71 @@ def test_configuration_error_stops_scheduler_without_retry(tmp_path):
     assert json.loads(path.read_text())["weekly:retry"]["failures"] == 0
 
 
+@pytest.mark.parametrize("override", [False, True])
+def test_report_environment_precedence_and_private_legacy_warning(
+    no_settings_file, tmp_path, monkeypatch, caplog, override
+):
+    path = tmp_path / "schedules.toml"
+    legacy_url = "https://monitor.example.invalid/invented-token"
+    path.write_text(
+        f'recipients=["legacy@example.invalid"]\nkuma_push_url="{legacy_url}"\nschedules=[]'
+    )
+    monkeypatch.setenv(
+        "REPORT_RECIPIENTS",
+        " new@example.invalid, new@example.invalid ,other@example.invalid " if override else "  ",
+    )
+    monkeypatch.setenv(
+        "REPORT_KUMA_PUSH_URL", "https://new.example.invalid/token" if override else "  "
+    )
+    config = read_config(path)
+    assert config.recipients == (
+        ["new@example.invalid", "other@example.invalid"] if override else ["legacy@example.invalid"]
+    )
+    assert config.kuma_push_url.get_secret_value() == (
+        "https://new.example.invalid/token" if override else legacy_url
+    )
+    assert "REPORT_KUMA_PUSH_URL" in caplog.text
+    assert legacy_url not in caplog.text
+    assert "invented-token" not in caplog.text
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_empty_report_environment_keeps_owner_fallback(
+    no_settings_file, monkeypatch, tmp_path, value
+):
+    from portfolio_digest.mailers import MailSettings
+    from portfolio_digest.report_service import deliver_report
+
+    for setting in ("REPORT_RECIPIENTS", "REPORT_KUMA_PUSH_URL"):
+        monkeypatch.setenv(setting, value)
+    path = tmp_path / "schedule.toml"
+    path.write_text("schedules=[]")
+    config = read_config(path)
+    assert config.recipients == []
+    assert config.kuma_push_url is None
+    delivered = []
+    monkeypatch.setattr("portfolio_digest.report_service.send", lambda s, m, r: delivered.extend(r))
+    deliver_report(
+        config,
+        "Invented",
+        "Preview",
+        "Preview",
+        settings=MailSettings(
+            _env_file=None, mail_from="digest@example.invalid", mail_owner="owner@example.invalid"
+        ),
+    )
+    assert delivered == ["owner@example.invalid"]
+
+
+def test_invalid_report_recipients_are_sanitised(no_settings_file, monkeypatch, tmp_path):
+    monkeypatch.setenv("REPORT_RECIPIENTS", "invented-private-invalid-value")
+    path = tmp_path / "schedule.toml"
+    path.write_text("schedules=[]")
+    with pytest.raises(ConfigError) as caught:
+        read_config(path)
+    assert "invented-private" not in str(caught.value)
+
+
 def test_scheduler_writes_its_heartbeat_each_cycle(tmp_path, monkeypatch):
     config = ScheduleConfig(schedules=[weekly()])
     heartbeat = tmp_path / "heartbeat"

@@ -165,6 +165,12 @@ def evaluate(session, portfolio, config, now, skipped: list[tuple[str, str]] | N
                 if abs(movement) > limits.daily_percent
                 else None
             )
+        else:
+            _skip(
+                skipped,
+                f"daily:{label}",
+                "adjacent closing prices are missing, stale or not positive",
+            )
         fresh = session.scalar(
             select(func.max(Price.price_date)).where(
                 Price.instrument_id == instrument.id,

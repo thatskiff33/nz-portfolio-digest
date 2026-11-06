@@ -460,6 +460,25 @@ def test_dry_run_does_not_clear_sent_state(sample, monkeypatch):
     assert alerts.send.call_count == 1
 
 
+@pytest.mark.parametrize("missing_day", [15, 16])
+def test_missing_daily_close_is_logged_and_listed_in_dry_run(sample, caplog, missing_day):
+    session, _, instrument = sample
+    price = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id,
+            Price.price_date == date(2026, 10, missing_day),
+        )
+    )
+    session.delete(price)
+    session.flush()
+    with caplog.at_level("WARNING", logger="portfolio_digest.alerts"):
+        output = alerts.run_alerts(session, config(), dry_run=True, now=NOW)
+    reason = "adjacent closing prices are missing, stale or not positive"
+    assert f"Alert rule skipped (daily:NZX:MADEUP): {reason}." in caplog.text
+    assert f"daily:NZX:MADEUP: {reason}" in "\n".join(output)
+    assert alerts.send.call_count == 0
+
+
 def test_no_price_counts_staleness_from_first_trade(sample):
     session, portfolio, instrument = sample
     for price in session.scalars(select(Price).where(Price.instrument_id == instrument.id)):

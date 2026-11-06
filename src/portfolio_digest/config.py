@@ -104,7 +104,8 @@ class Settings(BaseSettings):
                 or _EXACT_HOSTNAME.fullmatch(name) is None
             ):
                 raise ValueError(
-                    "must be comma-separated exact hostnames, without a scheme, port, path or wildcard"
+                    "must be comma-separated exact hostnames, "
+                    "without a scheme, port, path or wildcard"
                 )
             lowered = name.lower()
             if lowered not in names:

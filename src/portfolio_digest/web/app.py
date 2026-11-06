@@ -64,7 +64,9 @@ def _current_target(request: Request) -> str:
     """Path and query as the app received them. Host and forwarded headers are ignored."""
     path = request.scope.get("path") or "/"
     raw_query = request.scope.get("query_string", b"")
-    query = raw_query.decode("latin-1", "ignore") if isinstance(raw_query, bytes) else str(raw_query)
+    query = (
+        raw_query.decode("latin-1", "ignore") if isinstance(raw_query, bytes) else str(raw_query)
+    )
     if query:
         return f"{path}?{query}"
     return path

@@ -24,8 +24,6 @@ from portfolio_digest.models import (
 )
 from portfolio_digest.returns import ReturnError, instrument_position
 from portfolio_digest.returns_loader import load_returns
-from urllib.parse import quote
-
 from portfolio_digest.web.app import create_app
 from portfolio_digest.web.binding import private_host
 from portfolio_digest.web.security import BrowserSession
@@ -449,8 +447,8 @@ def test_rotated_session_csrf_and_expiry(client):
     assert client.cookies.get("portfolio_session") != old_cookie
     assert client.post("/logout", data={"csrf": old_csrf}).status_code == 403
     security = client.app.state.security
-    security.sessions[client.cookies.get("portfolio_session")].expires = 0
-    assert client.get("/p/1/trade").status_code == 401
+    security.sessions[client.cookies.get("portfolio_session")].activity = -1800
+    assert client.get("/p/1/trade", follow_redirects=False).status_code == 303
 
 
 @pytest.mark.parametrize(
@@ -465,6 +463,7 @@ def test_rotated_session_csrf_and_expiry(client):
     ],
 )
 def test_invalid_queries(client, path, status):
+    sign_in(client)
     assert client.get(path).status_code == status
 
 
@@ -519,11 +518,34 @@ def test_login_csrf_and_form_size(client):
     assert client.post("/login", content=b"x" * 65537).status_code == 413
 
 
-def test_secure_cookie_option(engine_web):
+def test_secure_cookie_option(engine_web, monkeypatch):
     with TestClient(
-        create_app(engine_web, PASSWORD, secure_cookie=True), base_url="https://testserver"
+        create_app(engine_web, PASSWORD, secure_cookie=True), base_url="https://localhost"
     ) as secure_client:
-        assert "Secure" in secure_client.get("/login").headers["set-cookie"]
+        monkeypatch.setattr(secure_client.app.state.security, "_now", lambda: 10000)
+        response = secure_client.get("/login")
+        cookie = response.headers["set-cookie"]
+        assert cookie.startswith("__Host-portfolio_session=")
+        for attribute in ("Secure", "HttpOnly", "SameSite=strict", "Path=/", "Max-Age=600"):
+            assert attribute in cookie
+        assert "Domain=" not in cookie
+        original = secure_client.cookies.get("__Host-portfolio_session")
+        response = secure_client.post(
+            "/login",
+            data={"csrf": token(response), "password": PASSWORD},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert secure_client.cookies.get("__Host-portfolio_session") != original
+        assert "Max-Age=1800" in response.headers["set-cookie"]
+        csrf = token(secure_client.get("/p/1"))
+        assert secure_client.get("/logout").status_code == 405
+        assert secure_client.post("/logout", data={"csrf": "invalid"}).status_code == 403
+        response = secure_client.post("/logout", data={"csrf": csrf}, follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["set-cookie"].startswith('__Host-portfolio_session="";')
+        assert "Max-Age=0" in response.headers["set-cookie"]
+        assert not secure_client.cookies.get("__Host-portfolio_session")
 
 
 def test_empty_portfolio_list(engine_web):
@@ -540,7 +562,8 @@ def test_empty_portfolio_list(engine_web):
             copy.constraints.remove(constraint)
     metadata.create_all(empty)
     try:
-        with TestClient(create_app(empty, PASSWORD)) as empty_client:
+        with open_client(empty) as empty_client:
+            sign_in(empty_client)
             response = empty_client.get("/")
             assert response.status_code == 200
             assert "No portfolios yet" in response.text
@@ -549,6 +572,7 @@ def test_empty_portfolio_list(engine_web):
 
 
 def test_stored_text_is_escaped(client, engine_web):
+    sign_in(client)
     with Session(engine_web) as session:
         session.get(Instrument, 1).name = '<script>alert("private")</script>'
         session.commit()
@@ -558,24 +582,27 @@ def test_stored_text_is_escaped(client, engine_web):
 
 
 def test_session_capacity_returns_service_unavailable(client):
-    from portfolio_digest.web.security import BrowserSession
-
     security = client.app.state.security
-    security.sessions = {str(n): BrowserSession("fake", 10**12) for n in range(1024)}
-    response = client.get("/login")
+    now = security._now()
+    security.sessions = {str(n): BrowserSession("fake", now, now, True) for n in range(1024)}
+    csrf = token(client.get("/login"))
+    response = client.post(
+        "/login", data={"csrf": csrf, "password": PASSWORD}, follow_redirects=False
+    )
     assert response.status_code == 503
     assert response.headers["x-frame-options"] == "DENY"
+    assert sum(session.authenticated for session in security.sessions.values()) == 1024
 
 
 @pytest.mark.parametrize(
     "path,status",
-    [("/", 200), ("/p/1/imports", 200), ("/p/1/reconcile", 200), ("/missing", 404)],
+    [("/", 303), ("/p/1/imports", 303), ("/p/1/reconcile", 303), ("/missing", 303)],
 )
 def test_anonymous_requests_do_not_allocate_sessions(client, path, status):
     # A stream of clients without cookies must leave room for a new sign-in form.
     for _ in range(10):
         client.cookies.clear()
-        response = client.get(path)
+        response = client.get(path, follow_redirects=False)
         assert response.status_code == status
         assert "set-cookie" not in response.headers
     assert not client.app.state.security.sessions
@@ -586,20 +613,23 @@ def test_anonymous_requests_do_not_allocate_sessions(client, path, status):
     assert len(client.app.state.security.sessions) == 1
 
 
-def test_full_session_store_still_allows_anonymous_reads(client):
-    from portfolio_digest.web.security import BrowserSession
-
+def test_full_anonymous_pool_allows_sign_in_without_evicting_authenticated(client):
     security = client.app.state.security
-    security.sessions = {str(n): BrowserSession("fake", 10**12) for n in range(1024)}
-    assert client.get("/p/1").status_code == 200
-    assert client.post("/login", data={"csrf": "", "password": PASSWORD}).status_code == 403
-    assert len(security.sessions) == 1024
+    sign_in(client)
+    authenticated_id = client.cookies.get("portfolio_session")
+    for _ in range(1100):
+        client.cookies.clear()
+        assert client.get("/login").status_code == 200
+    assert len(security.sessions) == 1025
+    assert authenticated_id in security.sessions
+    sign_in(client)
+    assert sum(session.authenticated for session in security.sessions.values()) == 2
 
 
 def test_logout_does_not_allocate_replacement_session(client):
     csrf = sign_in(client)
-    response = client.post("/logout", data={"csrf": csrf})
-    assert response.status_code == 200
+    response = client.post("/logout", data={"csrf": csrf}, follow_redirects=False)
+    assert response.status_code == 303
     assert not client.app.state.security.sessions
     assert not client.cookies.get("portfolio_session")
 
@@ -618,7 +648,7 @@ def test_login_throttle_is_per_address_not_cookie_or_forwarded_header(client, en
         ).status_code
         == 429
     )
-    with TestClient(client.app, client=("100.100.20.30", 12345)) as other:
+    with TestClient(client.app, base_url=BASE_URL, client=("100.100.20.30", 12345)) as other:
         sign_in(other)
 
 
@@ -629,7 +659,9 @@ def test_login_global_ceiling_and_window_expiry(client, monkeypatch):
     monkeypatch.setattr(security_module.time, "monotonic", lambda: now)
     # Oversized passwords still count, without paying the scrypt cost for this test.
     for address in range(10):
-        with TestClient(client.app, client=(f"100.100.20.{address}", 12345)) as other:
+        with TestClient(
+            client.app, base_url=BASE_URL, client=(f"100.100.20.{address}", 12345)
+        ) as other:
             csrf = token(other.get("/login"))
             for _ in range(5):
                 assert (
@@ -662,3 +694,182 @@ def test_client_login_throttle_expires(client, monkeypatch):
 def test_dashboard_refuses_missing_or_short_password(engine_web, password):
     with pytest.raises(ValueError, match="at least 16"):
         create_app(engine_web, password)
+
+
+PROTECTED_PATHS = [
+    "/",
+    "/p/1",
+    "/p/1/holding/1",
+    "/p/1/imports",
+    "/p/1/reconcile",
+    "/p/1/trade",
+    "/missing",
+    "/logout",
+]
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("path", PROTECTED_PATHS)
+def test_signed_out_pages_redirect_before_loading_portfolios(client, engine_web, method, path):
+    from sqlalchemy import event
+
+    def no_query(*args):
+        pytest.fail("Signed-out requests must not query portfolio data")
+
+    event.listen(engine_web, "before_cursor_execute", no_query)
+    try:
+        response = client.request(method, path, follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/login?next=")
+        assert not client.app.state.security.sessions
+        login = client.get(response.headers["location"])
+        assert login.status_code == 200
+        assert "Kōwhai" not in login.text
+        assert "Fern Labs" not in login.text
+    finally:
+        event.remove(engine_web, "before_cursor_execute", no_query)
+
+
+@pytest.mark.parametrize("path", ["/p/1/trade", "/p/1/reconcile", "/missing", "/logout"])
+def test_signed_out_writes_require_login(client, path):
+    assert client.post(path, data={"csrf": ""}).status_code == 401
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD", "POST"])
+@pytest.mark.parametrize("path", PROTECTED_PATHS + ["/login", "/static/dashboard.css"])
+def test_untrusted_hosts_rejected_before_sessions(client, method, path):
+    response = client.request(
+        method, path, headers={"host": "evil.example:8000"}, follow_redirects=False
+    )
+    assert response.status_code == 400
+    assert "location" not in response.headers
+    assert not client.app.state.security.sessions
+
+
+@pytest.mark.parametrize(
+    "bind,extra,host",
+    [
+        ("127.0.0.1", "", "127.0.0.1"),
+        ("127.0.0.1", "", "127.0.0.1:8000"),
+        ("127.0.0.1", "", "localhost"),
+        ("127.0.0.1", "", "localhost:8000"),
+        ("100.100.20.30", "", "100.100.20.30:8000"),
+        ("::1", "", "[::1]"),
+        ("::1", "", "[::1]:8000"),
+        ("fd7a:115c:a1e0::1234", "", "[fd7a:115c:a1e0::1234]:8000"),
+        ("127.0.0.1", "machine.tailnet.ts.net", "machine.tailnet.ts.net"),
+        ("127.0.0.1", "machine.tailnet.ts.net", "machine.tailnet.ts.net:443"),
+    ],
+)
+def test_configured_hosts_are_accepted(engine_web, bind, extra, host):
+    with open_client(engine_web, bind=bind, hostnames=extra) as browser:
+        assert browser.get("/login", headers={"host": host}).status_code == 200
+        response = browser.get("/login", headers={"host": "unconfigured.example"})
+        assert response.status_code == 400
+        assert "location" not in response.headers
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/p/1/imports?sort=date&direction=desc",
+        "https://other.example/",
+        "//other.example/",
+        "/\\other.example/",
+        "/%2fother.example/",
+        "/%252fother.example/",
+        "/%5cother.example/",
+        "/%0d%0aother.example/",
+    ],
+)
+def test_login_validates_and_preserves_return_path(client, target):
+    expected = target if target.startswith("/p/") else "/"
+    response = client.get("/login", params={"next": target})
+    from html import unescape
+
+    carried = unescape(re.search(r'name="next" value="([^"]*)"', response.text).group(1))
+    assert carried == expected
+    csrf = token(response)
+    failure = client.post("/login", data={"csrf": csrf, "password": "wrong", "next": target})
+    assert failure.status_code == 401
+    assert unescape(re.search(r'name="next" value="([^"]*)"', failure.text).group(1)) == expected
+    response = client.post(
+        "/login",
+        data={"csrf": csrf, "password": PASSWORD, "next": target},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == expected
+
+
+@pytest.fixture
+def session_clock(client, monkeypatch):
+    clock = [10000]
+    monkeypatch.setattr(client.app.state.security, "_now", lambda: clock[0])
+    return clock
+
+
+def test_anonymous_session_expires_at_ten_minutes(client, session_clock):
+    response = client.get("/login")
+    first = client.cookies.get("portfolio_session")
+    assert "Max-Age=600" in response.headers["set-cookie"]
+    session_clock[0] += 599
+    assert client.get("/login").status_code == 200
+    assert client.cookies.get("portfolio_session") == first
+    session_clock[0] += 1
+    assert client.get("/login").status_code == 200
+    assert client.cookies.get("portfolio_session") != first
+    assert first not in client.app.state.security.sessions
+
+
+def test_authenticated_idle_expiry_and_static_does_not_refresh(client, session_clock):
+    sign_in(client)
+    ident = client.cookies.get("portfolio_session")
+    session_clock[0] += 1799
+    assert client.get("/p/1").status_code == 200
+    session_clock[0] += 1799
+    assert client.get("/static/dashboard.css").status_code == 200
+    session_clock[0] += 1
+    response = client.get("/p/1", follow_redirects=False)
+    assert response.status_code == 303
+    assert ident not in client.app.state.security.sessions
+
+
+def test_activity_does_not_extend_absolute_expiry(client, session_clock):
+    sign_in(client)
+    ident = client.cookies.get("portfolio_session")
+    for _ in range(28):
+        session_clock[0] += 1000
+        assert client.get("/p/1").status_code == 200
+    session_clock[0] += 799
+    response = client.get("/p/1")
+    assert response.status_code == 200
+    assert "Max-Age=1;" in response.headers["set-cookie"]
+    session_clock[0] += 1
+    assert client.get("/p/1", follow_redirects=False).status_code == 303
+    assert ident not in client.app.state.security.sessions
+
+
+def test_anonymous_pool_evicts_oldest_and_reclaims_expired(client, session_clock):
+    security = client.app.state.security
+    for n in range(1024):
+        security.sessions[str(n)] = BrowserSession("fake", session_clock[0], session_clock[0])
+    client.get("/login")
+    assert "0" not in security.sessions
+    assert "1" in security.sessions
+    assert len(security.sessions) == 1024
+    session_clock[0] += 600
+    client.cookies.clear()
+    client.get("/login")
+    assert len(security.sessions) == 1
+
+
+def test_expired_authenticated_pool_allows_new_login(client, session_clock):
+    security = client.app.state.security
+    security.sessions = {
+        str(n): BrowserSession("fake", session_clock[0], session_clock[0], True)
+        for n in range(1024)
+    }
+    session_clock[0] += 1800
+    sign_in(client)
+    assert len(security.sessions) == 1

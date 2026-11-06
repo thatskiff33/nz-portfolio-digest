@@ -12,7 +12,7 @@ from pathlib import Path
 
 from portfolio_digest.alerts import push
 from portfolio_digest.config import ConfigError
-from portfolio_digest.mailers import MailError, mail_settings, message, send
+from portfolio_digest.mailers import mail_settings, message, send
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +81,6 @@ def deliver_operations_notice(config, text: str, *, recovered: bool) -> None:
             send(settings, message(settings.mail_from, recipients, subject, html, text), recipients)
         else:
             logger.info("Operations notice was not emailed because mail is not configured.")
-    except (ConfigError, MailError):
-        logger.warning("Operations notice could not be emailed.")
     except Exception:
         logger.warning("Operations notice could not be emailed.")
     push(text)

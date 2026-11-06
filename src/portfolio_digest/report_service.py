@@ -1,6 +1,7 @@
 """Report orchestration, shared by the CLI and scheduler."""
 
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -113,6 +114,21 @@ def run_report(
         ping_kuma(config)
 
 
+def _write_private(path: Path, content: str) -> None:
+    if os.name != "posix":
+        path.write_text(content, encoding="utf-8")
+        return
+    # Tighten permissions before truncating an existing preview.
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.ftruncate(descriptor, 0)
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as stream:
+            stream.write(content)
+    finally:
+        os.close(descriptor)
+
+
 def deliver_report(
     config: ScheduleConfig,
     subject: str,
@@ -129,10 +145,10 @@ def deliver_report(
     _validate_preview(dry_run, out)
     if dry_run:
         try:
-            out.write_text(html, encoding="utf-8")
-            out.with_suffix(".txt").write_text(text, encoding="utf-8")
+            _write_private(out, html)
+            _write_private(out.with_suffix(".txt"), text)
             if csv is not None:
-                out.with_suffix(".csv").write_text(csv, encoding="utf-8")
+                _write_private(out.with_suffix(".csv"), csv)
         except OSError:
             raise ReportError(
                 "Cannot write report preview files. Check the output directory."

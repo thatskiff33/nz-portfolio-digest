@@ -1028,7 +1028,8 @@ def test_dashboard_cli_and_email_round_the_same_value_half_up():
         session.commit()
         cli = render_table(load_returns(session, "Tōtara Fund", "all", DAY))
         email_html, email_text = render_email(build_report(session, start, DAY))
-    with TestClient(create_app(engine, PASSWORD)) as client:
+    with TestClient(create_app(engine, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
         dashboard = client.get(f"/p/1?period=custom&start={start}&end={DAY}").text
     engine.dispose()
     for channel in (dashboard, cli, email_html, email_text):

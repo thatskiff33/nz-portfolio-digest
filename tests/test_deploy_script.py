@@ -70,7 +70,8 @@ def deploy(deployment, password=None, container="", fail=""):
     )
     assert "invented-secret" not in result.stdout + result.stderr
     assert (root / "schedules.toml").read_text() == "private schedule"
-    assert (root / "schedules.toml").stat().st_mode & 0o777 == 0o644
+    if os.name != "nt":
+        assert (root / "schedules.toml").stat().st_mode & 0o777 == 0o644
     return result, (root / "log").read_text().splitlines()
 
 

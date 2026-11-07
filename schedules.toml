@@ -4,6 +4,8 @@ timezone = "Pacific/Auckland"
 # Non-empty environment overrides this list; an empty list falls back to MAIL_OWNER.
 recipients = []
 # Set optional REPORT_KUMA_PUSH_URL in the server .env, never put its URL here.
+# Set optional REPORT_PRICES_KUMA_PUSH_URL in the server .env for price fetches. It is
+# pinged only when every instrument and rate succeeded. Use a 26-hour heartbeat.
 
 [[schedules]]
 name = "prices-morning"

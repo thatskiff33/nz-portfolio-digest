@@ -6,7 +6,7 @@ from html import escape
 
 from portfolio_digest.formatting import display_number
 from portfolio_digest.parcels import financial_math
-from portfolio_digest.year_end import NOTES, YearEnd
+from portfolio_digest.year_end import FIF_THRESHOLD_TEXT, NOTES, YearEnd
 
 COLUMNS = (
     ("gains", "Realised gains"),
@@ -59,7 +59,9 @@ def render_csv(report: YearEnd) -> str:
             report.foreign_peak_day.isoformat(),
         ]
     )
-    writer.writerow(["Over NZ$50,000 FIF threshold", "Yes" if report.fif_exceeded else "No"])
+    writer.writerow(
+        [f"Over {FIF_THRESHOLD_TEXT} FIF threshold", "Yes" if report.fif_exceeded else "No"]
+    )
     for note in (*NOTES, *report.flags):
         writer.writerow(["Note", safe_cell(note)])
     return output.getvalue()
@@ -110,9 +112,9 @@ def render_html(report: YearEnd, name: str) -> str:
     notes = "".join(f"<li>{escape(n)}</li>" for n in NOTES)
     flags = "".join(f"<li>{escape(n)}</li>" for n in report.flags)
     warning = (
-        "Over the NZ$50,000 FIF threshold. Check whether FIF rules apply."
+        f"Over the {FIF_THRESHOLD_TEXT} FIF threshold. Check whether FIF rules apply."
         if report.fif_exceeded
-        else "This portfolio did not exceed NZ$50,000."
+        else f"This portfolio did not exceed {FIF_THRESHOLD_TEXT}."
     )
     return f"""<!doctype html>
 <html lang="en-NZ"><head><meta charset="utf-8">
@@ -171,7 +173,7 @@ def render_text(report: YearEnd, name: str) -> str:
             "",
             f"Peak foreign historical cost: NZ$ {display_number(report.foreign_peak)} "
             f"on {report.foreign_peak_day}.",
-            "Over NZ$50,000 FIF threshold: " + ("Yes" if report.fif_exceeded else "No"),
+            f"Over {FIF_THRESHOLD_TEXT} FIF threshold: " + ("Yes" if report.fif_exceeded else "No"),
             "",
             *NOTES,
             *report.flags,

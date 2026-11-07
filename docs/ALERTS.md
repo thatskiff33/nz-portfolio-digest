@@ -7,7 +7,7 @@ in `schedules.toml`. Email uses the existing `MAILER` and report recipients, wit
 optional ntfy or Pushover notification configured through environment variables.
 
 ```bash
-portfolio-digest alerts check --dry-run  # print due alerts without sending or recording
+portfolio-digest alerts check --dry-run  # print due alerts and skipped rules, without sending
 portfolio-digest alerts check            # send due alerts now
 ```
 

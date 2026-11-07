@@ -26,7 +26,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from portfolio_digest.db import session_scope
-from portfolio_digest.models import FxRate, Instrument, Price, Split, Trade
+from portfolio_digest.models import MONEY_SCALE, FxRate, Instrument, Price, Split, Trade
 from portfolio_digest.prices import calendars
 from portfolio_digest.prices.http import RateLimited, SourceError
 from portfolio_digest.prices.sources import FxSource, Listing, PriceSource, _fits_numeric
@@ -480,7 +480,7 @@ def _update_instrument(
     )
     valid_stale = {}
     for day, value in stale.items():
-        if _fits_numeric(value, 6):
+        if _fits_numeric(value, MONEY_SCALE):
             valid_stale[day] = value
         else:
             error = f"out-of-range carried price for {day}"

@@ -138,6 +138,13 @@ they point at `localhost`, a loopback address or a Tailscale address (100.64.0.0
 Redirects count as a failed ping and are never followed. Ping failures are logged without
 the URL and do not fail the send.
 
+An optional `REPORT_PRICES_KUMA_PUSH_URL` in the server `.env` is pinged only after a
+scheduled price fetch in which every instrument and rate succeeded. Give that Push monitor
+a 26-hour heartbeat. Prices run twice a day, so one missed run stays quiet and a day
+without a clean fetch raises an alert. A non-empty value overrides any legacy TOML
+`prices_kuma_push_url`, which also emits a warning without the URL. Ping failures are
+logged without the URL and do not fail the job.
+
 Each `[[schedules]]` needs a unique `name`, `kind` (`prices` or `report`), `frequency`
 (`daily`, `weekly`, `monthly` or `yearly`) and local `at = "HH:MM"`. Weekly schedules use a
 lower-case `weekday`; monthly schedules use `day` (1 to 28). Reports use `days` (1 to 3660, default 7)
@@ -161,6 +168,20 @@ Only configuration or scheduler-state errors stop the process with a non-zero ex
 State writes flush and sync the temporary file before replacing the saved state.
 Changing a schedule's timing or kind, or removing it, discards its pending occurrence
 with a log entry; unrelated configuration fields preserve it.
+
+A failed job, including a price fetch that finishes with failed
+instruments, also sends one operations email through the configured mailer to the report
+recipients, or to `MAIL_OWNER` when that list is empty. The optional ntfy or Pushover
+push used for alerts is included when it is set. The message names the job and the failing
+instrument labels, with the date, and leaves out balances, prices and links. Digits in
+job and instrument names are spelt out, so the date is the only numeric text. While the
+failure continues, that email is sent at most once every 24 hours. The throttle is stored
+in the scheduler state file, next to the pending run the scheduler retries. The next successful
+run sends one recovered notice. If the notice cannot be sent, that is logged and the
+scheduler continues its delayed retries. Notices are on whenever the mailer is
+configured. The `migrate` service mounts the same state volume, so a manual `prices fetch`
+or the Akahu sync can persist its once-a-day limit there too. Overlapping standalone
+commands share a lock; successful manual fetches also send a recovery notice.
 
 Mail delivery is at least once: a crash after provider acceptance but before saving
 state or committing the database can cause a duplicate. Postmark attempts every recipient
@@ -446,7 +467,15 @@ that user can read them.
 
 Dumps older than `BACKUP_KEEP_DAYS` (default 14) are deleted, but only straight after a
 new dump succeeds. If backups start failing, the old ones stay until it is fixed, and the
-service tries again every 5 minutes.
+service tries again every 5 minutes. Docker's health check only marks the container
+unhealthy. It does not send a message.
+
+To hear about a failure without signing in to the server, set `BACKUP_PUSH_URL` in `.env`
+to a Uptime Kuma push URL and create a Push monitor with a 26-hour heartbeat. The URL is
+a secret. After each dump is written, the service pings it with a short timeout and logs
+only "monitoring ping sent" or "monitoring ping failed". It never prints the URL, and it
+does not ping when the dump fails, so a missed heartbeat means dumps have stopped. A failed
+ping does not by itself fail the dump.
 
 ```sh
 docker compose ps backup        # "healthy" means a dump was written in the last 26 hours
@@ -575,6 +604,11 @@ the optional dashboard, set a random password of at least 16 characters in the
 server's private `.env`. The dashboard refuses to start with a missing or shorter
 password.
 
+If your existing dashboard uses Tailscale Serve, set `DASHBOARD_HOSTNAMES` in the
+server's private `.env` to its dashboard hostname before redeploying `web`, for
+example `DASHBOARD_HOSTNAMES=dashboard.example.ts.net` (a placeholder, without a
+scheme or port). Otherwise, the Host allow-list rejects requests with HTTP 400.
+
 ## Private dashboard over Tailscale
 
 The `web` service shares the app package and database. It runs FastAPI on container port
@@ -676,8 +710,10 @@ docker compose run --rm migrate alerts check --dry-run
 The existing scheduler checks alerts immediately after every scheduled price fetch,
 including partial fetches. Manual `prices fetch` does not send alerts. Use
 `alerts check` for an explicit check. No additional timer or scheduler is needed.
-The dry-run prints only alerts currently due and neither sends notifications nor changes
-suppression state. Its terminal output contains portfolio figures, so keep it private.
+The dry-run prints alerts currently due, and any rules skipped because units or a valuation
+could not be checked. It neither sends notifications nor changes suppression state.
+Its terminal output contains portfolio figures, so keep it private. Skipped rules are also
+written to the log, with the rule name and the reason, and without prices or values.
 
 Set these rules in the server's `schedules.toml`, then restart the scheduler:
 
@@ -716,7 +752,8 @@ ends on the most recent date completed by all portfolio markets and, when needed
 the FX market, so a close that is not yet due does not suppress the check. This is a
 value-drop rule: sales and withdrawals can reduce it, purchases can offset falls,
 and it is not a cash-flow-adjusted performance percentage. Incomplete or stale
-valuations suppress that evaluation rather than inventing figures.
+valuations suppress that evaluation rather than inventing figures. A skipped rule is
+logged and, on `alerts check --dry-run`, printed with the rule name and the reason.
 
 Emails list the triggering figures and a reminder to open the private dashboard over
 Tailscale. They reuse `MAILER`, sender and `recipients` (or `MAIL_OWNER` when empty).

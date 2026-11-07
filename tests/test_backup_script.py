@@ -113,3 +113,69 @@ def test_refuses_a_missing_backup_dir(fake_bin, tmp_path):
     result = run(fake_bin, tmp_path / "missing")
     assert result.returncode != 0
     assert "cannot write" in result.stderr
+
+
+def install_wget(fake_bin: Path) -> None:
+    """A wget that records its arguments and can echo them, as a noisy real wget might."""
+    wget = fake_bin / "wget"
+    wget.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" >> "$WGET_LOG"\n'
+        'printf "%s\\n" "$@"\n'
+        'printf "%s\\n" "$@" >&2\n'
+        '[ -n "${WGET_FAIL:-}" ] && exit 1\n'
+        "exit 0\n"
+    )
+    wget.chmod(0o755)
+
+
+def test_monitor_is_pinged_once_after_a_successful_dump(fake_bin, dump_dir, tmp_path):
+    install_wget(fake_bin)
+    log = tmp_path / "wget.log"
+    url = "https://kuma.example.invalid/api/push/SECRETTOKEN"
+    result = run(fake_bin, dump_dir, BACKUP_PUSH_URL=url, WGET_LOG=str(log))
+    assert result.returncode == 0, result.stderr
+    assert "monitoring ping sent" in result.stdout
+    assert url not in result.stdout
+    assert url not in result.stderr
+    assert log.read_text().count(url) == 1
+
+
+def test_monitor_is_not_pinged_after_a_failed_dump(fake_bin, dump_dir, tmp_path):
+    install_wget(fake_bin)
+    log = tmp_path / "wget.log"
+    url = "https://kuma.example.invalid/api/push/SECRETTOKEN"
+    result = run(
+        fake_bin,
+        dump_dir,
+        FAKE_PG_DUMP_FAIL="1",
+        BACKUP_PUSH_URL=url,
+        WGET_LOG=str(log),
+    )
+    assert result.returncode != 0
+    assert "FAILED" in result.stderr
+    assert "monitoring ping" not in result.stdout
+    assert "monitoring ping" not in result.stderr
+    assert url not in result.stdout
+    assert url not in result.stderr
+    assert not log.exists()
+
+
+def test_a_failed_monitor_ping_does_not_fail_the_dump_or_print_the_url(
+    fake_bin, dump_dir, tmp_path
+):
+    install_wget(fake_bin)
+    log = tmp_path / "wget.log"
+    url = "https://kuma.example.invalid/api/push/SECRETTOKEN"
+    result = run(
+        fake_bin,
+        dump_dir,
+        BACKUP_PUSH_URL=url,
+        WGET_LOG=str(log),
+        WGET_FAIL="1",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "monitoring ping failed" in result.stderr
+    assert url not in result.stdout
+    assert url not in result.stderr
+    assert log.read_text().count(url) == 1

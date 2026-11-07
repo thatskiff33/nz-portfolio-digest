@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from portfolio_digest import cli, report_service
+from portfolio_digest import cli, pings, report_service
 from portfolio_digest.mailers import MailError, MailSettings
 from portfolio_digest.reports import Report, ValuePoint, render
 from portfolio_digest.returns import Components, Result, subtotal
@@ -87,6 +87,17 @@ def test_html_and_text_match_reviewable_synthetic_snapshots():
     assert html.count("Subtotal") == 4
     assert "(stale)" in html
     assert "Currency gain" in text
+
+
+def test_sold_units_and_subcent_prices_stay_readable():
+    base = example_report()
+    sold = replace(base.returns.holdings[0], units=D("0E-8"), price=D("0.0012"))
+    returns = replace(base.returns, holdings=(sold, base.returns.holdings[1]))
+    html, text = render(replace(base, returns=returns))
+    assert "(0 units)" in html and "(0 units)" in text
+    assert "0E-8" not in html and "0E-8" not in text
+    assert "0.0012 AUD" in html and "0.0012 AUD" in text
+    assert "0.00 AUD" not in html and "0.00 AUD" not in text
 
 
 def test_html_escapes_untrusted_instrument_labels():
@@ -196,7 +207,7 @@ def test_failed_monitoring_is_nonfatal_and_never_logs_secret_url(monkeypatch, ca
     def fail(*a, **kw):
         raise OSError("https://example.invalid/private-token")
 
-    monkeypatch.setattr(report_service, "urlopen", fail)
+    monkeypatch.setattr(pings._opener, "open", fail)
     report_service.ping_kuma(config)
     assert "monitoring push failed" in caplog.text
     assert "private-token" not in caplog.text
@@ -221,6 +232,72 @@ def test_shared_change_retains_decimal_precision():
     with localcontext() as context:
         context.prec = 10
         assert row.change == D(".01")
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_preview_files_are_private_even_with_permissive_umask(tmp_path, overwrite):
+    import os
+    import stat
+
+    if os.name != "posix":
+        pytest.skip("POSIX permissions only")
+    out = tmp_path / "annual.html"
+    if overwrite:
+        for suffix in (".html", ".txt", ".csv"):
+            path = out.with_suffix(suffix)
+            path.write_text("old")
+            path.chmod(0o666)
+    previous = os.umask(0)
+    try:
+        report_service.deliver_report(
+            report_config(),
+            "Invented",
+            "<p>Preview</p>",
+            "Preview",
+            dry_run=True,
+            out=out,
+            csv="invented,value\n",
+        )
+    finally:
+        os.umask(previous)
+    for suffix, content in (
+        (".html", "<p>Preview</p>"),
+        (".txt", "Preview"),
+        (".csv", "invented,value\n"),
+    ):
+        path = out.with_suffix(suffix)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.read_text() == content
+
+
+def test_year_end_preview_uses_private_shared_delivery(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    from portfolio_digest import year_end_service
+
+    if os.name != "posix":
+        pytest.skip("POSIX permissions only")
+    monkeypatch.setattr(year_end_service, "load_year_end", lambda *args: object())
+    monkeypatch.setattr(year_end_service, "render_html", lambda *args: "Invented HTML")
+    monkeypatch.setattr(year_end_service, "render_text", lambda *args: "Invented text")
+    monkeypatch.setattr(year_end_service, "render_csv", lambda *args: "Invented CSV")
+    out = tmp_path / "annual.html"
+    previous = os.umask(0)
+    try:
+        year_end_service.run_year_end(
+            None, report_config(), "Invented", 2026, dry_run=True, out=out
+        )
+    finally:
+        os.umask(previous)
+    for suffix, content in (
+        (".html", "Invented HTML"),
+        (".txt", "Invented text"),
+        (".csv", "Invented CSV"),
+    ):
+        path = out.with_suffix(suffix)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert path.read_text() == content
 
 
 def test_split_warning_is_actionable_and_escaped_in_email():

@@ -24,10 +24,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, build_opener
 
-from portfolio_digest.akahu import NoRedirect
 from portfolio_digest.config import GmailSettings
 from portfolio_digest.importers.asb import TRADE_SOURCE, NotAContractNote, parse_contract_note
 from portfolio_digest.importers.base import FileProblem, ParseResult, RowError, RowProblem
+from portfolio_digest.pings import NoRedirect
 
 SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"

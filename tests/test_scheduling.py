@@ -178,17 +178,17 @@ def test_changing_config_replaces_pending_time_on_restart(tmp_path):
     )
 
 
-def test_annual_year_end_runs_once_at_nine_auckland_across_dst_and_leap_year():
+def test_annual_year_end_runs_once_at_nineteen_auckland_across_dst_and_leap_year():
     from pathlib import Path
 
     schedule = read_config(Path("schedules.toml")).named_report("year-end")
     assert schedule.period == "tax_year"
     # 1 April is still NZDT in 2026 and 2027, but NZST in 2029.
-    first = datetime(2026, 3, 31, 20, tzinfo=UTC)
+    first = datetime(2026, 4, 1, 6, tzinfo=UTC)
     assert schedule.next_run(datetime(2026, 1, 1, tzinfo=UTC)) == first
-    assert schedule.next_run(first) == datetime(2027, 3, 31, 20, tzinfo=UTC)
-    assert schedule.next_run(datetime(2028, 3, 31, 20, tzinfo=UTC)) == datetime(
-        2029, 3, 31, 21, tzinfo=UTC
+    assert schedule.next_run(first) == datetime(2027, 4, 1, 6, tzinfo=UTC)
+    assert schedule.next_run(datetime(2028, 4, 1, 6, tzinfo=UTC)) == datetime(
+        2029, 4, 1, 7, tzinfo=UTC
     )
 
 
@@ -419,6 +419,71 @@ def test_configuration_error_stops_scheduler_without_retry(tmp_path):
     assert json.loads(path.read_text())["weekly:retry"]["failures"] == 0
 
 
+@pytest.mark.parametrize("override", [False, True])
+def test_report_environment_precedence_and_private_legacy_warning(
+    no_settings_file, tmp_path, monkeypatch, caplog, override
+):
+    path = tmp_path / "schedules.toml"
+    legacy_url = "https://monitor.example.invalid/invented-token"
+    path.write_text(
+        f'recipients=["legacy@example.invalid"]\nkuma_push_url="{legacy_url}"\nschedules=[]'
+    )
+    monkeypatch.setenv(
+        "REPORT_RECIPIENTS",
+        " new@example.invalid, new@example.invalid ,other@example.invalid " if override else "  ",
+    )
+    monkeypatch.setenv(
+        "REPORT_KUMA_PUSH_URL", "https://new.example.invalid/token" if override else "  "
+    )
+    config = read_config(path)
+    assert config.recipients == (
+        ["new@example.invalid", "other@example.invalid"] if override else ["legacy@example.invalid"]
+    )
+    assert config.kuma_push_url.get_secret_value() == (
+        "https://new.example.invalid/token" if override else legacy_url
+    )
+    assert "REPORT_KUMA_PUSH_URL" in caplog.text
+    assert legacy_url not in caplog.text
+    assert "invented-token" not in caplog.text
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_empty_report_environment_keeps_owner_fallback(
+    no_settings_file, monkeypatch, tmp_path, value
+):
+    from portfolio_digest.mailers import MailSettings
+    from portfolio_digest.report_service import deliver_report
+
+    for setting in ("REPORT_RECIPIENTS", "REPORT_KUMA_PUSH_URL"):
+        monkeypatch.setenv(setting, value)
+    path = tmp_path / "schedule.toml"
+    path.write_text("schedules=[]")
+    config = read_config(path)
+    assert config.recipients == []
+    assert config.kuma_push_url is None
+    delivered = []
+    monkeypatch.setattr("portfolio_digest.report_service.send", lambda s, m, r: delivered.extend(r))
+    deliver_report(
+        config,
+        "Invented",
+        "Preview",
+        "Preview",
+        settings=MailSettings(
+            _env_file=None, mail_from="digest@example.invalid", mail_owner="owner@example.invalid"
+        ),
+    )
+    assert delivered == ["owner@example.invalid"]
+
+
+def test_invalid_report_recipients_are_sanitised(no_settings_file, monkeypatch, tmp_path):
+    monkeypatch.setenv("REPORT_RECIPIENTS", "invented-private-invalid-value")
+    path = tmp_path / "schedule.toml"
+    path.write_text("schedules=[]")
+    with pytest.raises(ConfigError) as caught:
+        read_config(path)
+    assert "invented-private" not in str(caught.value)
+
+
 def test_scheduler_writes_its_heartbeat_each_cycle(tmp_path, monkeypatch):
     config = ScheduleConfig(schedules=[weekly()])
     heartbeat = tmp_path / "heartbeat"
@@ -443,3 +508,86 @@ def test_scheduler_writes_its_heartbeat_each_cycle(tmp_path, monkeypatch):
         )
     assert cycles == 2
     assert heartbeat.stat().st_mtime > datetime.now().timestamp() - 30
+
+
+@pytest.mark.parametrize(
+    "report_time,price_time,price_frequency,price_options,warns",
+    [
+        ("08:00", "10:30", "daily", {}, True),
+        ("10:30", "10:30", "daily", {}, True),
+        ("19:00", "10:30", "daily", {}, False),
+        ("19:00", "10:30", "weekly", {"weekday": "monday"}, True),
+        ("19:00", "10:30", "monthly", {"day": 2}, True),
+        ("19:00", "10:30", "monthly", {"day": 1}, False),
+        ("19:00", "10:30", "yearly", {"day": 1, "month": 4}, True),
+    ],
+)
+def test_report_timing_warning_at_startup(
+    tmp_path, caplog, report_time, price_time, price_frequency, price_options, warns
+):
+    config = ScheduleConfig(
+        schedules=[
+            Schedule(name="monthly", kind="report", frequency="monthly", at=report_time),
+            Schedule(
+                name="prices",
+                kind="prices",
+                frequency=price_frequency,
+                at=price_time,
+                **price_options,
+            ),
+        ]
+    )
+
+    class StopLoop(Exception):
+        pass
+
+    def stop(_):
+        raise StopLoop
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, tmp_path / "state.json").run(
+            lambda *args: 0, now=lambda: datetime(2026, 11, 1, tzinfo=UTC), sleep=stop
+        )
+    assert ("Report monthly at" in caplog.text) == warns
+    if warns:
+        assert caplog.text.count("Report monthly at") == 1
+        assert report_time in caplog.text
+
+
+def test_default_report_times_and_startup_have_no_timing_warnings(tmp_path, caplog):
+    from datetime import time
+    from pathlib import Path
+
+    config = read_config(Path("schedules.toml"))
+    assert config.named_report("monthly").at == time(19)
+    assert config.named_report("year-end").at == time(19)
+    assert config.report_timing_warnings() == []
+
+    class StopLoop(Exception):
+        pass
+
+    def stop(_):
+        raise StopLoop
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, tmp_path / "state.json").run(
+            lambda *args: 0, now=lambda: datetime(2026, 11, 1, tzinfo=UTC), sleep=stop
+        )
+    assert not caplog.records
+
+
+def test_collective_weekly_fetches_cover_daily_reports():
+    from portfolio_digest.scheduling import WEEKDAYS
+
+    config = ScheduleConfig(
+        schedules=[
+            Schedule(name="daily", kind="report", frequency="daily", at="19:00"),
+            *(
+                Schedule(name=day, kind="prices", frequency="weekly", weekday=day, at="10:30")
+                for day in WEEKDAYS
+            ),
+        ]
+    )
+    assert config.report_timing_warnings() == []
+    config.schedules.pop()
+    assert config.report_timing_warnings()

@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from html import escape
+from typing import Literal
 from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request, build_opener
 from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr, ValidationError
@@ -15,8 +16,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError
+from portfolio_digest.formatting import display_price
 from portfolio_digest.mailers import MailError, mail_settings, message, send
 from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
+from portfolio_digest.pings import NoRedirect
 from portfolio_digest.prices.calendars import FX, for_exchange
 from portfolio_digest.returns import ReturnError, units_at
 from portfolio_digest.returns_loader import load_returns
@@ -33,24 +36,32 @@ class PushSettings(BaseSettings):
     alert_ntfy_token: SecretStr | None = None
     alert_pushover_token: SecretStr | None = None
     alert_pushover_user: SecretStr | None = None
+    # "minimal" pushes only a count; "full" pushes the email text with its figures.
+    alert_push_detail: Literal["minimal", "full"] = "minimal"
 
 
-class _NoPushRedirects(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # A redirected POST could leak the bearer token or portfolio figures.
-        return None
+# A redirected POST could leak the bearer token or portfolio figures.
+_push_opener = build_opener(NoRedirect())
 
 
-_push_opener = build_opener(_NoPushRedirects())
+def minimal_push_text(count: int) -> str:
+    plural = "" if count == 1 else "s"
+    return f"{count} new portfolio alert{plural}. Open your email or the dashboard for details."
 
 
-def push(text: str) -> None:
-    """Optional HTTPS notifications. Never log URLs, payloads or provider exceptions."""
+def push(text: str, count: int) -> None:
+    """Optional HTTPS notifications. Never log URLs, payloads or provider exceptions.
+
+    `text` is the full alert email text and `count` the number of alerts in it. Unless
+    ALERT_PUSH_DETAIL is "full", only the count leaves for the push provider.
+    """
     try:
         settings = PushSettings()
     except ValidationError:
         logger.warning("Invalid alert push settings.")
         return
+    if settings.alert_push_detail != "full":
+        text = minimal_push_text(count)
     try:
         if settings.alert_ntfy_url:
             url = settings.alert_ntfy_url.get_secret_value()
@@ -160,7 +171,8 @@ def evaluate(session, portfolio, config, now):
                 Trigger(
                     key,
                     f"{label} moved {movement:+.2f}% ({start} to {end}); "
-                    f"closing prices {opening} to {prices[end]} {instrument.currency} "
+                    f"closing prices {display_price(opening)} to {display_price(prices[end])} "
+                    f"{instrument.currency} "
                     "(split-adjusted).",
                     close_dates=(start, end),
                 )
@@ -241,7 +253,7 @@ def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
                 portfolio = session.scalar(query)
                 if portfolio is None:
                     continue
-                text = _run_portfolio(session, portfolio, config, now, dry_run)
+                result = _run_portfolio(session, portfolio, config, now, dry_run)
                 if not dry_run:
                     # Includes cleared rules and evaluations with no email due.
                     session.commit()
@@ -255,10 +267,10 @@ def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
             if not dry_run:
                 if checkpoint:
                     checkpoint.complete(portfolio_id)
-                if text:
-                    push(text)
-            if text:
-                output.append(text)
+                if result:
+                    push(*result)
+            if result:
+                output.append(result[0])
     if failed:
         raise MailError("Some portfolio alerts failed. Check alert data and delivery settings.")
     return output
@@ -324,7 +336,8 @@ def _record_delivery(session, portfolio, saved, trigger, now) -> None:
         previous.sent_at = now
 
 
-def _run_portfolio(session, portfolio, config, now, dry_run):
+def _run_portfolio(session, portfolio, config, now, dry_run) -> tuple[str, int] | None:
+    """Email any due alerts. Returns the alert text and how many alerts it holds."""
     states = {
         s.rule_key: s
         for s in session.scalars(select(AlertState).where(AlertState.portfolio_id == portfolio.id))
@@ -344,7 +357,7 @@ def _run_portfolio(session, portfolio, config, now, dry_run):
     text = f"Portfolio alerts | {portfolio.name}\n\n" + "\n".join(t.text for t in due)
     text += "\n\nOpen your dashboard over Tailscale for details."
     if dry_run:
-        return text
+        return text, len(due)
     settings = mail_settings()
     recipients = config.recipients or ([settings.mail_owner] if settings.mail_owner else [])
     html = (
@@ -359,4 +372,4 @@ def _run_portfolio(session, portfolio, config, now, dry_run):
     )
     for trigger in due:
         _record_delivery(session, portfolio, states, trigger, now)
-    return text
+    return text, len(due)

@@ -124,6 +124,41 @@ def test_portfolio_add_rejects_bad_input_without_touching_the_database(engine, c
     assert "No portfolios yet" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("command", "descriptions"),
+    [
+        (
+            ["trade", "add"],
+            [
+                "Portfolio name",
+                "Trade or action date",
+                "Trade type",
+                "Listing exchange",
+                "Instrument code",
+                "adjustments may be signed",
+                "Price per unit",
+                "ISO currency code",
+                "Brokerage and fees",
+                "Instrument name",
+                "Private notes",
+            ],
+        ),
+        (["scheduler"], ["Schedule configuration file path", "Scheduler state file path"]),
+        (["alerts", "check"], ["Schedule configuration file path", "Preview without sending"]),
+        (["alerts"], ["Check and send due alerts"]),
+        (["dividends"], ["Reject a pending dividend suggestion"]),
+        (["dividends", "reject"], ["Pending dividend suggestion ID"]),
+    ],
+)
+def test_help_describes_options_without_a_database(no_settings_file, capsys, command, descriptions):
+    with pytest.raises(SystemExit) as exc:
+        main([*command, "--help"])
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    for description in descriptions:
+        assert description in output
+
+
 @pytest.mark.parametrize("ok", [False, True])
 def test_manual_price_fetch_records_failure_and_recovery(monkeypatch, ok):
     from contextlib import nullcontext

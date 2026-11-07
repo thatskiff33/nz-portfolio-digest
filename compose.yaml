@@ -59,6 +59,7 @@ services:
       AKAHU_APP_TOKEN: ${AKAHU_APP_TOKEN:-}
       AKAHU_USER_TOKEN: ${AKAHU_USER_TOKEN:-}
       AKAHU_ACCOUNT_IDS: ${AKAHU_ACCOUNT_IDS:-[]}
+      # Optional read-only ASB contract-note import from Gmail.
       GMAIL_CLIENT_ID: ${GMAIL_CLIENT_ID:-}
       GMAIL_CLIENT_SECRET: ${GMAIL_CLIENT_SECRET:-}
       GMAIL_REFRESH_TOKEN: ${GMAIL_REFRESH_TOKEN:-}

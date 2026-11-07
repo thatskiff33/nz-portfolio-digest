@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from portfolio_digest import operations
+from portfolio_digest import alerts, operations
 from portfolio_digest.mailers import MailError, MailSettings
 from portfolio_digest.scheduling import ScheduleConfig
 
@@ -59,8 +59,19 @@ def test_missing_state_directory_is_created_and_throttle_survives_retries(tmp_pa
     assert missing.parent.is_dir()
 
 
-def test_notice_email_failure_is_logged_and_push_still_runs(monkeypatch, caplog):
-    pushed = []
+@pytest.mark.parametrize("detail", [None, "minimal", "full"])
+def test_notice_email_failure_is_logged_and_push_still_runs(monkeypatch, caplog, detail):
+    from unittest.mock import MagicMock
+
+    for name in ("ALERT_PUSH_DETAIL", "ALERT_NTFY_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALERT_NTFY_URL", "https://push.example.invalid/topic")
+    if detail is not None:
+        monkeypatch.setenv("ALERT_PUSH_DETAIL", detail)
+    response = MagicMock()
+    response.__enter__.return_value.status = 200
+    request = MagicMock(return_value=response)
+    monkeypatch.setattr(alerts._push_opener, "open", request)
     monkeypatch.setattr(
         operations,
         "mail_settings",
@@ -75,7 +86,6 @@ def test_notice_email_failure_is_logged_and_push_still_runs(monkeypatch, caplog)
         raise MailError("provider down")
 
     monkeypatch.setattr(operations, "send", fail)
-    monkeypatch.setattr(operations, "push", pushed.append)
     text = operations.failure_text("weekly", WHEN, "Pacific/Auckland", ("NZX:MADEUP",))
     with caplog.at_level("WARNING"):
         operations.deliver_operations_notice(
@@ -83,7 +93,13 @@ def test_notice_email_failure_is_logged_and_push_still_runs(monkeypatch, caplog)
             text,
             recovered=False,
         )
-    assert pushed == [text]
+    request.assert_called_once()
+    pushed = request.call_args.args[0].data.decode()
+    if detail == "full":
+        assert pushed == text
+    else:
+        assert pushed == "A portfolio job failed. Check your email for details."
+        assert "NZX:MADEUP" not in pushed
     assert "could not be emailed" in caplog.text
     assert "NZX:MADEUP" in text
     assert not re.search(r"\d", digits_outside_dates(text))

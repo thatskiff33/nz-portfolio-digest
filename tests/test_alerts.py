@@ -496,7 +496,7 @@ def test_operations_notice_push_respects_detail(monkeypatch, recovered, detail):
     if detail == "full":
         assert sent == text
     else:
-        assert sent == "A portfolio job notice is available. Check your email for details."
+        assert sent == "A portfolio job failed. Check your email for details."
         assert "NZX:MADEUP" not in sent
         assert "prices" not in sent
 

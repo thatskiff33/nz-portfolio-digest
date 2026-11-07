@@ -65,7 +65,7 @@ def push(text: str, count: int | None = None) -> None:
         text = (
             minimal_push_text(count)
             if count is not None
-            else "A portfolio job notice is available. Check your email for details."
+            else "A portfolio job failed. Check your email for details."
         )
     try:
         if settings.alert_ntfy_url:

@@ -379,6 +379,11 @@ the optional dashboard, set a random password of at least 16 characters in the
 server's private `.env`. The dashboard refuses to start with a missing or shorter
 password.
 
+If your existing dashboard uses Tailscale Serve, set `DASHBOARD_HOSTNAMES` in the
+server's private `.env` to its dashboard hostname before redeploying `web`, for
+example `DASHBOARD_HOSTNAMES=dashboard.example.ts.net` (a placeholder, without a
+scheme or port). Otherwise, the Host allow-list rejects requests with HTTP 400.
+
 ## Private dashboard over Tailscale
 
 The `web` service shares the app package and database. It runs FastAPI on container port

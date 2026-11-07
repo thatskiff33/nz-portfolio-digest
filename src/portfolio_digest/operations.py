@@ -1,10 +1,10 @@
 """Short operations notices for failed jobs. No balances, prices or links."""
 
-import fcntl
 import json
 import logging
 import os
 import re
+import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from html import escape
@@ -152,9 +152,15 @@ def note_outcome(
     Used by commands that do not run inside the scheduler. The timestamp lives next to
     the scheduler state. A lock serialises overlapping manual and Akahu commands so
     they cannot send duplicate notices or overwrite each other's throttle state.
+    Windows skips the Unix-only lock.
     """
     try:
         path = _notices_path()
+        if sys.platform == "win32":
+            _note_outcome(config, job, failed=failed, labels=labels, now=now, path=path)
+            return
+        import fcntl
+
         with path.with_suffix(".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             _note_outcome(config, job, failed=failed, labels=labels, now=now, path=path)

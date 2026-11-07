@@ -464,14 +464,25 @@ def test_full_push_detail_sends_the_alert_text(monkeypatch):
 
 
 @pytest.mark.parametrize("recovered", [False, True])
-@pytest.mark.parametrize("detail", ["minimal", "full"])
-def test_operations_notice_push_keeps_failure_and_recovery_text(monkeypatch, recovered, detail):
+@pytest.mark.parametrize("detail", [None, "minimal", "full"])
+def test_operations_notice_push_respects_detail(monkeypatch, recovered, detail):
     from portfolio_digest import operations
     from portfolio_digest.mailers import MailSettings
 
     request = _captured_push(monkeypatch)
-    monkeypatch.setenv("ALERT_PUSH_DETAIL", detail)
-    monkeypatch.setattr(operations, "mail_settings", lambda: MailSettings(_env_file=None))
+    if detail is not None:
+        monkeypatch.setenv("ALERT_PUSH_DETAIL", detail)
+    monkeypatch.setattr(
+        operations,
+        "mail_settings",
+        lambda: MailSettings(
+            _env_file=None,
+            mail_from="sender@example.invalid",
+            mail_owner="reader@example.invalid",
+        ),
+    )
+    send = Mock()
+    monkeypatch.setattr(operations, "send", send)
     when = datetime(2026, 11, 6, 7, tzinfo=UTC)
     text = (
         operations.recovery_text("prices", when, "Pacific/Auckland")
@@ -479,7 +490,15 @@ def test_operations_notice_push_keeps_failure_and_recovery_text(monkeypatch, rec
         else operations.failure_text("prices", when, "Pacific/Auckland", ("NZX:MADEUP",))
     )
     operations.deliver_operations_notice(ScheduleConfig(schedules=[]), text, recovered=recovered)
-    assert _pushed_message(request) == text
+    email = send.call_args.args[1]
+    assert email.get_body(preferencelist=("plain",)).get_content().strip() == text
+    sent = _pushed_message(request)
+    if detail == "full":
+        assert sent == text
+    else:
+        assert sent == "A portfolio job notice is available. Check your email for details."
+        assert "NZX:MADEUP" not in sent
+        assert "prices" not in sent
 
 
 def test_unknown_push_detail_sends_nothing(monkeypatch, caplog):

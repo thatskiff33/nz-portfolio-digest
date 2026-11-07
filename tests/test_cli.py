@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import pytest
 from sqlalchemy import text
 
@@ -196,3 +199,17 @@ def test_main_suppresses_http_request_details(monkeypatch, caplog):
     finally:
         for logger, level in zip(loggers, levels, strict=True):
             logger.setLevel(level)
+
+
+def test_cli_imports_without_fcntl():
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['fcntl'] = None; import portfolio_digest.cli",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

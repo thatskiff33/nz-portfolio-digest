@@ -3,6 +3,8 @@
 import re
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from portfolio_digest import operations
 from portfolio_digest.mailers import MailError, MailSettings
 from portfolio_digest.scheduling import ScheduleConfig
@@ -14,7 +16,11 @@ def digits_outside_dates(text: str) -> str:
     return re.sub(r"\d{4}-\d{2}-\d{2}", "", text)
 
 
-def test_standalone_failure_is_once_a_day_then_one_recovery(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_standalone_failure_is_once_a_day_then_one_recovery(tmp_path, monkeypatch, platform):
+    monkeypatch.setattr(operations.sys, "platform", platform)
+    if platform == "win32":
+        monkeypatch.setitem(operations.sys.modules, "fcntl", None)
     monkeypatch.setenv("SCHEDULER_STATE", str(tmp_path / "scheduler.json"))
     sent = []
     monkeypatch.setattr(

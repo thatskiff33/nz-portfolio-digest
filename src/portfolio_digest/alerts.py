@@ -54,15 +54,19 @@ def push(text: str, count: int | None = None) -> None:
 
     `text` is the full alert email text and `count` the number of alerts in it. Unless
     ALERT_PUSH_DETAIL is "full", only the count leaves for the push provider.
-    Operations notices pass no count because their text already excludes figures and links.
+    Operations notices pass no count and use a fixed notice in minimal mode.
     """
     try:
         settings = PushSettings()
     except ValidationError:
         logger.warning("Invalid alert push settings.")
         return
-    if count is not None and settings.alert_push_detail != "full":
-        text = minimal_push_text(count)
+    if settings.alert_push_detail != "full":
+        text = (
+            minimal_push_text(count)
+            if count is not None
+            else "A portfolio job notice is available. Check your email for details."
+        )
     try:
         if settings.alert_ntfy_url:
             url = settings.alert_ntfy_url.get_secret_value()

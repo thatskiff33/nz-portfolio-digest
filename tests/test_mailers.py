@@ -220,7 +220,9 @@ def test_empty_compose_api_keys_do_not_select_ses_api(monkeypatch, msg):
     assert calls == ["smtp"]
 
 
-@pytest.mark.parametrize("failure", ["rejection", "http", "timeout", "json", "shape"])
+@pytest.mark.parametrize(
+    "failure", ["rejection", "http", "timeout", "json", "shape", "boolean_code", "float_code"]
+)
 @pytest.mark.parametrize("failed_index", [0, 1])
 def test_postmark_attempts_every_recipient_and_retries_only_failures(
     monkeypatch, msg, failure, failed_index
@@ -245,6 +247,10 @@ def test_postmark_attempts_every_recipient_and_retries_only_failures(
                 return httpx.Response(200, text="private-token")
             if failure == "shape":
                 return httpx.Response(200, json=[])
+            if failure == "boolean_code":
+                return httpx.Response(200, json={"ErrorCode": False})
+            if failure == "float_code":
+                return httpx.Response(200, json={"ErrorCode": 0.0})
             return httpx.Response(200, json={"ErrorCode": 406, "Message": "private-token"})
         return httpx.Response(200, json={"ErrorCode": 0})
 

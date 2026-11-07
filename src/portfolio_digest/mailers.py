@@ -177,7 +177,8 @@ class PostmarkMailer:
                     )
                     response.raise_for_status()
                     result = response.json()
-                    accepted = isinstance(result, dict) and result.get("ErrorCode") == 0
+                    code = result.get("ErrorCode") if isinstance(result, dict) else None
+                    accepted = type(code) is int and code == 0
                 except (httpx.HTTPError, ValueError):
                     accepted = False
                 if not accepted:

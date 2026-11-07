@@ -15,6 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError, runtime_settings
+from portfolio_digest.delivery import portfolio_delivery
 from portfolio_digest.formatting import display_price
 from portfolio_digest.mailers import MailError, mail_settings, message, send
 from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
@@ -252,7 +253,8 @@ def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
                 portfolio = session.scalar(query)
                 if portfolio is None:
                     continue
-                result = _run_portfolio(session, portfolio, config, now, dry_run)
+                with portfolio_delivery(portfolio_id):
+                    result = _run_portfolio(session, portfolio, config, now, dry_run)
                 if not dry_run:
                     # Includes cleared rules and evaluations with no email due.
                     session.commit()

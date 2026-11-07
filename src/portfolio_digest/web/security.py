@@ -14,6 +14,10 @@ from fastapi import HTTPException, Request
 
 COOKIE = "portfolio_session"
 LIFETIME = 8 * 60 * 60
+ANONYMOUS_LIFETIME = 10 * 60
+IDLE_TIMEOUT = 30 * 60
+ANONYMOUS_CAPACITY = 1024
+AUTHENTICATED_CAPACITY = 1024
 LOGIN_WINDOW = 300
 CLIENT_FAILURE_LIMIT = 5
 GLOBAL_FAILURE_LIMIT = 50
@@ -24,12 +28,14 @@ class BrowserSession:
     csrf: str
     expires: int
     authenticated: bool = False
+    last_seen: int = 0
 
 
 class Security:
-    def __init__(self, password: str):
+    def __init__(self, password: str, *, secure_cookie: bool = False):
         if len(password) < 16:
             raise ValueError("DASHBOARD_PASSWORD must contain at least 16 characters.")
+        self.cookie = "__Host-" + COOKIE if secure_cookie else COOKIE
         self.salt = secrets.token_bytes(16)
         self.expected = self.digest(password)
         self.sessions: dict[str, BrowserSession] = {}
@@ -42,15 +48,23 @@ class Security:
     def browser(self, request: Request, *, create: bool = False) -> tuple[str, BrowserSession]:
         now = int(time.monotonic())
         with self.lock:
-            self.sessions = {k: v for k, v in self.sessions.items() if v.expires > now}
-            ident = request.cookies.get(COOKIE, "")
+            self.sessions = {
+                k: v
+                for k, v in self.sessions.items()
+                if v.expires > now and (not v.authenticated or v.last_seen + IDLE_TIMEOUT > now)
+            }
+            ident = request.cookies.get(self.cookie, "")
             if ident not in self.sessions:
                 if not create:
                     return "", BrowserSession("", 0)
-                if len(self.sessions) >= 1024:
-                    raise HTTPException(503, "Too many browser sessions. Try again later.")
+                anonymous = [k for k, v in self.sessions.items() if not v.authenticated]
+                if len(anonymous) >= ANONYMOUS_CAPACITY:
+                    self.sessions.pop(anonymous[0])
                 ident = secrets.token_urlsafe(32)
-                self.sessions[ident] = BrowserSession(secrets.token_urlsafe(32), now + LIFETIME)
+                self.sessions[ident] = BrowserSession(
+                    secrets.token_urlsafe(32), now + ANONYMOUS_LIFETIME
+                )
+            self.sessions[ident].last_seen = now
             return ident, self.sessions[ident]
 
     def csrf(self, request: Request, token: str) -> None:
@@ -61,7 +75,7 @@ class Security:
 
     def require_login(self, request: Request) -> None:
         if not request.state.browser.authenticated:
-            raise HTTPException(401, "Sign in to make changes.")
+            raise HTTPException(401, "Sign in to view your portfolio.")
 
     def login(self, request: Request, password: str) -> None:
         now = int(time.monotonic())
@@ -78,9 +92,11 @@ class Security:
             ):
                 self.failures.append((now, address))
                 raise HTTPException(401, "Password not recognised.")
+            if sum(v.authenticated for v in self.sessions.values()) >= AUTHENTICATED_CAPACITY:
+                raise HTTPException(503, "Too many signed-in sessions. Try again later.")
             # Rotate the opaque ID and CSRF token, preventing session fixation.
             self.sessions.pop(request.state.session_id, None)
             ident = secrets.token_urlsafe(32)
-            browser = BrowserSession(secrets.token_urlsafe(32), now + LIFETIME, True)
+            browser = BrowserSession(secrets.token_urlsafe(32), now + LIFETIME, True, now)
             self.sessions[ident] = browser
             request.state.session_id, request.state.browser = ident, browser

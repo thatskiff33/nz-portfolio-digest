@@ -37,6 +37,7 @@ private-preview/
 *.qif
 *.sql
 *.sql.gz
+# Scheduler and operations notice state written at runtime.
 state/
 client_secret*.json
 # Project assets and invented fixtures must remain visible to git.

@@ -2,7 +2,12 @@
 
 from decimal import Decimal, getcontext
 
-from portfolio_digest.formatting import display_number, display_price, display_quantity
+from portfolio_digest.formatting import (
+    display_number,
+    display_price,
+    display_quantity,
+    display_signed_number,
+)
 
 
 def test_rounded_zero_drops_the_minus_sign():
@@ -17,6 +22,13 @@ def test_rounded_zero_drops_the_minus_sign():
     assert display_number(Decimal("1.224")) == "1.22"
     assert display_number(Decimal("1234.5")) == "1,234.50"
     assert display_number(Decimal("1234567890123.456")) == "1,234,567,890,123.46"
+
+
+def test_signed_number_rounds_half_up_and_always_shows_a_sign():
+    assert display_signed_number(Decimal("8.125")) == "+8.13"
+    assert display_signed_number(Decimal("-0.125")) == "-0.13"
+    assert display_signed_number(Decimal("-0.001")) == "+0.00"
+    assert display_signed_number(Decimal("1234.5")) == "+1,234.50"
 
 
 def test_quantity_and_price_are_trimmed_fixed_point():

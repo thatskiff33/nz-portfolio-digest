@@ -177,6 +177,7 @@ class ReportSettings(BaseSettings):
 
     recipients: str = ""
     kuma_push_url: SecretStr | None = None
+    prices_kuma_push_url: SecretStr | None = None
 
 
 def get_report_settings() -> ReportSettings:

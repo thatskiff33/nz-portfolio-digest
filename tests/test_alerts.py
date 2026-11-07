@@ -463,6 +463,49 @@ def test_full_push_detail_sends_the_alert_text(monkeypatch):
     assert _pushed_message(request) == FULL_ALERT
 
 
+@pytest.mark.parametrize("recovered", [False, True])
+@pytest.mark.parametrize("detail", [None, "minimal", "full"])
+def test_operations_notice_push_respects_detail(monkeypatch, recovered, detail):
+    from portfolio_digest import operations
+    from portfolio_digest.mailers import MailSettings
+
+    request = _captured_push(monkeypatch)
+    if detail is not None:
+        monkeypatch.setenv("ALERT_PUSH_DETAIL", detail)
+    monkeypatch.setattr(
+        operations,
+        "mail_settings",
+        lambda: MailSettings(
+            _env_file=None,
+            mail_from="sender@example.invalid",
+            mail_owner="reader@example.invalid",
+        ),
+    )
+    send = Mock()
+    monkeypatch.setattr(operations, "send", send)
+    when = datetime(2026, 11, 6, 7, tzinfo=UTC)
+    text = (
+        operations.recovery_text("prices", when, "Pacific/Auckland")
+        if recovered
+        else operations.failure_text("prices", when, "Pacific/Auckland", ("NZX:MADEUP",))
+    )
+    operations.deliver_operations_notice(ScheduleConfig(schedules=[]), text, recovered=recovered)
+    email = send.call_args.args[1]
+    assert email.get_body(preferencelist=("plain",)).get_content().strip() == text
+    sent = _pushed_message(request)
+    if detail == "full":
+        assert sent == text
+    else:
+        expected = (
+            "A portfolio job recovered. Check your email for details."
+            if recovered
+            else "A portfolio job failed. Check your email for details."
+        )
+        assert sent == expected
+        assert "NZX:MADEUP" not in sent
+        assert "prices" not in sent
+
+
 def test_unknown_push_detail_sends_nothing(monkeypatch, caplog):
     request = _captured_push(monkeypatch)
     monkeypatch.setenv("ALERT_PUSH_DETAIL", "everything")
@@ -520,13 +563,143 @@ def test_scheduler_checks_alerts_after_success_or_partial_fetch(monkeypatch, err
     )
 
     def run(_, execute):
-        return execute(
+        code, labels = execute(
             Schedule(name="prices", kind="prices", frequency="daily", at=time(18)), NOW, checkpoint
         )
+        assert labels == tuple(outcome.label for outcome in report.outcomes if outcome.error)
+        return code
 
     monkeypatch.setattr(cli.Scheduler, "run", run)
     assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == fetch_result
     assert events == ["fetch committed", ("session", rules, checkpoint)]
+
+
+def test_suppressed_portfolio_is_logged_and_listed_on_dry_run(sample, monkeypatch, caplog, capsys):
+    from contextlib import nullcontext
+
+    from portfolio_digest import cli
+
+    session, _, instrument = sample
+    price = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id, Price.price_date == date(2026, 10, 16)
+        )
+    )
+    price.is_stale = True
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext(session))
+    monkeypatch.setattr(cli, "read_config", lambda _: config())
+    run = alerts.run_alerts
+    monkeypatch.setattr(cli, "run_alerts", lambda *a, **kw: run(*a, **kw, now=NOW))
+    with caplog.at_level("WARNING", logger="portfolio_digest.alerts"):
+        assert cli.main(["alerts", "check", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "Suppressed rules | Imaginary" in out
+    assert "portfolio: valuation is incomplete or stale" in out
+    assert any(
+        record.message == "Alert rule skipped (portfolio): valuation is incomplete or stale."
+        for record in caplog.records
+    )
+    suppressed = [
+        line
+        for line in out.splitlines()
+        if line.startswith("Suppressed") or line.startswith("portfolio:")
+    ]
+    assert suppressed
+    assert not any(char.isdigit() for line in suppressed for char in line)
+    alerts.send.assert_not_called()
+
+
+def test_units_error_is_logged_and_listed_without_figures(sample, monkeypatch, caplog):
+    from portfolio_digest.returns import ReturnError
+
+    monkeypatch.setattr(
+        alerts,
+        "units_at",
+        lambda *a, **k: (_ for _ in ()).throw(ReturnError("held 99 units")),
+    )
+    session, _, _ = sample
+    with caplog.at_level("WARNING", logger="portfolio_digest.alerts"):
+        output = alerts.run_alerts(session, config(), dry_run=True, now=NOW)
+    assert "held 99 units" not in caplog.text
+    assert (
+        "Alert rule skipped (daily:NZX:MADEUP): holding units could not be calculated."
+        in caplog.text
+    )
+    assert (
+        "Alert rule skipped (stale:NZX:MADEUP): holding units could not be calculated."
+        in caplog.text
+    )
+    text = "\n".join(output)
+    assert "daily:NZX:MADEUP: holding units could not be calculated" in text
+    assert "stale:NZX:MADEUP: holding units could not be calculated" in text
+    assert "held 99" not in text
+
+
+def test_return_error_suppresses_portfolio_without_logging_figures(sample, monkeypatch, caplog):
+    from portfolio_digest.returns import ReturnError
+
+    monkeypatch.setattr(
+        alerts,
+        "load_returns",
+        lambda *a, **k: (_ for _ in ()).throw(ReturnError("missing price 123.45")),
+    )
+    session, _, _ = sample
+    with caplog.at_level("WARNING", logger="portfolio_digest.alerts"):
+        output = alerts.run_alerts(session, config(), dry_run=True, now=NOW)
+    assert "123.45" not in caplog.text
+    assert "Alert rule skipped (portfolio): valuation could not be calculated." in caplog.text
+    text = "\n".join(output)
+    assert "portfolio: valuation could not be calculated" in text
+    assert "123.45" not in text
+
+
+def test_price_monitor_pings_only_after_a_clean_fetch(monkeypatch):
+    from argparse import Namespace
+    from contextlib import nullcontext
+    from datetime import time
+
+    from pydantic import SecretStr
+
+    from portfolio_digest import cli
+    from portfolio_digest.scheduling import Schedule
+
+    url = SecretStr("https://monitor.example.invalid/prices-private")
+    rules = config()
+    rules.prices_kuma_push_url = url
+    pings = []
+    monkeypatch.setattr(cli, "read_config", lambda _: rules)
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "session_scope", lambda _: nullcontext("session"))
+    monkeypatch.setattr(cli, "run_alerts", lambda *a, **kw: None)
+    monkeypatch.setattr(cli, "ping_monitor", pings.append)
+    from portfolio_digest.prices.fetch import FetchReport, Outcome
+
+    failed = Outcome("NZX:MADEUP", error="failed")
+    clean = Outcome("NZX:MADEUP")
+    outcomes = [
+        FetchReport(outcomes=[failed], instrument_outcomes=[failed]),
+        FetchReport(outcomes=[clean], instrument_outcomes=[clean]),
+    ]
+
+    def fetch(*_args, **_kwargs):
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(cli, "_fetch_prices", fetch)
+
+    def run(_, execute):
+        return execute(
+            Schedule(name="prices", kind="prices", frequency="daily", at=time(10, 30)), NOW, None
+        )
+
+    monkeypatch.setattr(cli.Scheduler, "run", run)
+    assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == (
+        1,
+        ("NZX:MADEUP",),
+    )
+    assert pings == []
+    assert cli.cmd_scheduler(Namespace(config="schedules.toml", state="unused")) == (0, ())
+    assert pings == [url]
 
 
 def test_portfolio_threshold_is_strict(sample):
@@ -549,6 +722,25 @@ def test_dry_run_does_not_clear_sent_state(sample, monkeypatch):
     assert not alerts.run_alerts(session, config(), dry_run=True, now=NOW)
     assert session.get(AlertState, (1, "daily:NZX:MADEUP:2026-10-15:2026-10-16")) is not None
     assert alerts.send.call_count == 1
+
+
+@pytest.mark.parametrize("missing_day", [15, 16])
+def test_missing_daily_close_is_logged_and_listed_in_dry_run(sample, caplog, missing_day):
+    session, _, instrument = sample
+    price = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id,
+            Price.price_date == date(2026, 10, missing_day),
+        )
+    )
+    session.delete(price)
+    session.flush()
+    with caplog.at_level("WARNING", logger="portfolio_digest.alerts"):
+        output = alerts.run_alerts(session, config(), dry_run=True, now=NOW)
+    reason = "adjacent closing prices are missing, stale or not positive"
+    assert f"Alert rule skipped (daily:NZX:MADEUP): {reason}." in caplog.text
+    assert f"daily:NZX:MADEUP: {reason}" in "\n".join(output)
+    assert alerts.send.call_count == 0
 
 
 def test_no_price_counts_staleness_from_first_trade(sample):
@@ -698,7 +890,7 @@ def test_alert_checkpoint_skips_completed_portfolios_even_after_cooldown(sample,
     saved = []
     checkpoint = DeliveryCheckpoint(set(), lambda: saved.append(set(checkpoint.delivered)))
 
-    def evaluate(session, portfolio, config, now):
+    def evaluate(session, portfolio, config, now, skipped=None):
         checked.append(portfolio.id)
         if portfolio.id == 2:
             raise RuntimeError("invented-private-token")
@@ -721,7 +913,7 @@ def test_alert_checkpoint_failure_stops_before_next_portfolio(sample, monkeypatc
     session.commit()
     checked = []
 
-    def evaluate(session, portfolio, config, now):
+    def evaluate(session, portfolio, config, now, skipped=None):
         checked.append(portfolio.id)
         return {"invented": alerts.Trigger("invented", "Invented move")}
 
@@ -801,6 +993,27 @@ def test_cli_partial_fetch_advances_but_total_failure_remains_pending(
     due = datetime.fromisoformat(state["prices"])
     assert (due > NOW) is partial
     assert (state["prices:retry"]["retry_at"] is None) is partial
+
+
+@pytest.mark.parametrize(
+    ("closing", "percent", "values"),
+    [("9.1875", "-8.13%", "100.00 to 91.88 NZD"), ("9.9875", "-0.13%", "100.00 to 99.88 NZD")],
+)
+def test_alert_percentages_round_half_up_like_other_channels(sample, closing, percent, values):
+    session, portfolio, instrument = sample
+    price = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id, Price.price_date == date(2026, 10, 16)
+        )
+    )
+    price.close = D(closing)
+    session.commit()
+    states = alerts.evaluate(
+        session, portfolio, config(daily_percent=D("0.1"), portfolio_drop_percent=D("0.1")), NOW
+    )
+    assert f"moved {percent} " in states["daily:NZX:MADEUP"].text
+    assert f"changed {percent} " in states["portfolio"].text
+    assert values in states["portfolio"].text
 
 
 @pytest.mark.parametrize("extra_alert", [False, True])

@@ -12,6 +12,7 @@ from urllib.request import Request, build_opener
 
 from pydantic import SecretStr
 
+from portfolio_digest.models import QUANTITY_LIMIT
 from portfolio_digest.pings import NoRedirect, PingError, ping
 
 
@@ -28,7 +29,7 @@ def exact_units(value: Any) -> Decimal:
         raise AkahuError("Akahu returned invalid units.") from None
     if (
         not units.is_finite()
-        or units.copy_abs() >= Decimal("1e16")
+        or units.copy_abs() >= QUANTITY_LIMIT
         or units.as_tuple().exponent < -24
     ):
         raise AkahuError("Akahu returned invalid units.")

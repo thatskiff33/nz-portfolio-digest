@@ -152,6 +152,5 @@ Missing prices or FX raise an explicit error; stale observations are flagged. Se
 [period returns](RETURNS.md) for attribution and denominator conventions. Report labels
 use current instrument codes. Email and dashboard consumers can reuse the shared report.
 
-The original `returns.report` lifetime API also remains available for units,
-weighted-average cost base, market value, net/gross dividends, tax, imputation and
-monetary gain. Neither report is a tax return or a time-weighted or money-weighted return.
+Reports are not tax returns or time-weighted or money-weighted returns. Use the
+period returns API for performance and the year-end API for historical FIFO cost.

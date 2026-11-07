@@ -139,7 +139,7 @@ def sample_engine(engine=None):
     return engine
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.database)])
 def engine_web(request):
     engine = sample_engine(
         request.getfixturevalue("engine") if request.param == "postgres" else None
@@ -906,7 +906,7 @@ def test_dashboard_refuses_missing_or_short_password(engine_web, password):
 
 
 def test_overview_series_values_match_linear_lookup(engine_web, monkeypatch):
-    from portfolio_digest import returns
+    from portfolio_digest import parcels, returns
 
     with Session(engine_web) as session:
         dashboard = Dashboard(session, session.get(Portfolio, 1), DAY - timedelta(days=10), DAY)
@@ -916,11 +916,11 @@ def test_overview_series_values_match_linear_lookup(engine_web, monkeypatch):
             point = max((p for p in points if p.day <= day), key=lambda p: p.day, default=None)
             if point is None:
                 raise ReturnError(f"Missing {label} on or before {day}.")
-            if point.stale or returns._skips_trading_day(calendar, point.day, day, as_of=as_of):
+            if point.stale or parcels._skips_trading_day(calendar, point.day, day, as_of=as_of):
                 flags.add(f"Carried forward {label} for {day} (source {point.day})")
             return point.value
 
-        monkeypatch.setattr(returns, "_lookup", linear_lookup)
+        monkeypatch.setattr(returns, "lookup", linear_lookup)
         assert dashboard.series(DAY - timedelta(days=10), DAY) == actual
 
 

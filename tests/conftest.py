@@ -70,3 +70,9 @@ def no_settings_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if "database_url" in item.fixturenames:
+            item.add_marker(pytest.mark.database)

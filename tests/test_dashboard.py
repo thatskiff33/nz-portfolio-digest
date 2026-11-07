@@ -941,7 +941,6 @@ def test_holding_bounds_chart_and_table_and_ignores_unrelated_bad_inputs(engine_
         session.commit()
     with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
         sign_in(client)
-        sign_in(client)
         response = client.get("/p/1/holding/1")
     assert response.status_code == 200
     series = response.context["series"]
@@ -958,7 +957,6 @@ def test_holding_input_error_is_explained(engine_web):
         session.scalar(select(Trade).where(Trade.instrument_id == 1)).currency = "AUD"
         session.commit()
     with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
-        sign_in(client)
         sign_in(client)
         response = client.get("/p/1/holding/1")
     assert response.status_code == 200

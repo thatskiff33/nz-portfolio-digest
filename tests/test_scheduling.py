@@ -284,6 +284,10 @@ def test_changed_or_removed_schedule_logs_discard(tmp_path, caplog, removed):
         {"delivered": [0]},
         {"delivered": [1, 1]},
         {"delivered": {}},
+        {"recipients": ["invented-private-token"]},
+        {"recipients": {}},
+        {"recipients": [True]},
+        {"recipients": ["a" * 64, "a" * 64]},
     ],
 )
 def test_invalid_retry_state_is_fatal_and_sanitised(tmp_path, retry):
@@ -591,6 +595,118 @@ def test_collective_weekly_fetches_cover_daily_reports():
     assert config.report_timing_warnings() == []
     config.schedules.pop()
     assert config.report_timing_warnings()
+
+
+@pytest.mark.parametrize("portfolio_ids", [[None], [1, 2]])
+def test_postmark_recipient_success_survives_restart_until_next_occurrence(
+    tmp_path, monkeypatch, portfolio_ids
+):
+    import httpx
+
+    from portfolio_digest import mailers
+    from portfolio_digest.delivery import portfolio_delivery, recipient_progress
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+    recipients = ["first@example.invalid", "second@example.invalid"]
+    attempted = []
+    rejecting = True
+
+    def handle(request):
+        recipient = json.loads(request.content)["To"]
+        attempted.append(recipient)
+        if rejecting and recipient == recipients[1]:
+            return httpx.Response(200, json={"ErrorCode": 406})
+        return httpx.Response(200, json={"ErrorCode": 0})
+
+    factory = httpx.Client
+    monkeypatch.setattr(
+        mailers.httpx, "Client", lambda **kw: factory(transport=httpx.MockTransport(handle))
+    )
+    settings = mailers.MailSettings(
+        _env_file=None,
+        mailer="postmark",
+        postmark_server_token="test-only-token",  # noqa: S106
+    )
+
+    def execute(schedule, at, checkpoint):
+        failed = False
+        for portfolio_id in portfolio_ids:
+            try:
+                msg = mailers.message("sender@example.invalid", recipients, "Report", "Hi", "Hi")
+                if portfolio_id is None:
+                    mailers.send(settings, msg, recipients)
+                else:
+                    with portfolio_delivery(portfolio_id):
+                        mailers.send(settings, msg, recipients)
+            except mailers.MailError:
+                failed = True
+        return int(failed)
+
+    for minutes in [0, 30]:
+        with pytest.raises(StopLoop):
+            Scheduler(config, path).run(
+                execute, now=lambda minutes=minutes: due + timedelta(minutes=minutes), sleep=stop
+            )
+        assert recipient_progress() is None
+    assert attempted == recipients * len(portfolio_ids) + [recipients[1]] * len(portfolio_ids)
+    state_text = path.read_text()
+    assert "@" not in state_text
+    assert len(json.loads(state_text)["weekly:retry"]["recipients"]) == len(portfolio_ids)
+    rejecting = False
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: due + timedelta(minutes=90), sleep=stop)
+    assert json.loads(path.read_text())["weekly:retry"]["recipients"] == []
+    attempted.clear()
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: due + timedelta(days=7), sleep=stop)
+    assert attempted == recipients * len(portfolio_ids)
+
+
+def test_postmark_recipient_checkpoint_write_failure_stops_delivery(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import httpx
+
+    from portfolio_digest import mailers
+    from portfolio_digest.scheduling import SchedulerStateError
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+    attempted = []
+    factory = httpx.Client
+
+    def handle(request):
+        attempted.append(json.loads(request.content)["To"])
+        return httpx.Response(200, json={"ErrorCode": 0})
+
+    monkeypatch.setattr(
+        mailers.httpx, "Client", lambda **kw: factory(transport=httpx.MockTransport(handle))
+    )
+
+    def execute(*args):
+        def fail(*args):
+            raise OSError("invented-private-token")
+
+        monkeypatch.setattr(Path, "replace", fail)
+        mailers.send(
+            mailers.MailSettings(
+                _env_file=None,
+                mailer="postmark",
+                postmark_server_token="test-only-token",  # noqa: S106 - fictitious sentinel
+            ),
+            mailers.message("sender@example.invalid", [], "Report", "Hi", "Hi"),
+            ["first@example.invalid", "second@example.invalid"],
+        )
+
+    with pytest.raises(SchedulerStateError, match="Cannot write scheduler state"):
+        Scheduler(config, path).run(execute, now=lambda: due, sleep=stop)
+    assert attempted == ["first@example.invalid"]
+    assert json.loads(path.read_text())["weekly:retry"]["recipients"] == []
 
 
 @pytest.mark.parametrize(

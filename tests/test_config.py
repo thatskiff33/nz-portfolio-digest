@@ -103,3 +103,32 @@ def test_report_settings_are_independent_and_mask_secrets(
     assert settings.recipients == values["REPORT_RECIPIENTS"]
     assert settings.kuma_push_url.get_secret_value() == values["REPORT_KUMA_PUSH_URL"]
     assert "invented-token" not in repr(settings)
+
+
+def test_runtime_calendar_and_schedule_paths_come_from_settings(monkeypatch):
+    from datetime import UTC, date, datetime
+
+    from portfolio_digest.config import runtime_settings
+    from portfolio_digest.year_end_service import latest_ended_year
+
+    monkeypatch.setenv("TIMEZONE", "America/New_York")
+    monkeypatch.setenv("SCHEDULE_CONFIG", "custom.toml")
+    monkeypatch.setenv("SCHEDULER_STATE", "custom.json")
+    settings = runtime_settings()
+    now = datetime(2026, 4, 1, 1, tzinfo=UTC)
+    assert settings.today(now) == date(2026, 3, 31)
+    assert latest_ended_year(now) == 2025
+    assert settings.schedule_config == "custom.toml"
+    assert settings.scheduler_state == "custom.json"
+
+
+def test_scheduler_rejects_timezone_mismatch_before_running(tmp_path, monkeypatch):
+    from portfolio_digest.config import ConfigError
+    from portfolio_digest.scheduling import ScheduleConfig, Scheduler
+
+    monkeypatch.setenv("TIMEZONE", "UTC")
+    scheduler = Scheduler(
+        ScheduleConfig(timezone="Pacific/Auckland", schedules=[]), tmp_path / "state.json"
+    )
+    with pytest.raises(ConfigError, match="TIMEZONE and schedules.toml timezone must agree"):
+        scheduler.run(lambda *args: pytest.fail("must not execute"))

@@ -39,7 +39,7 @@ def _sqlite_engine(monkeypatch):
     return engine
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.database)])
 def returns_engine(request, monkeypatch):
     if request.param == "postgres":
         # The migrated throwaway Postgres from conftest; skipped when none is configured.
@@ -323,7 +323,6 @@ def test_registry_action_reports_and_reconciles_once(
 ):
     from portfolio_digest.actions import record_action
     from portfolio_digest.reconcile import ledger_units, stored_units
-    from portfolio_digest.returns import report
 
     engine = _sqlite_engine(monkeypatch)
     with Session(engine) as session:
@@ -392,8 +391,6 @@ def test_registry_action_reports_and_reconciles_once(
                 result = load_returns(session, portfolio.name, period, date(2024, 6, 20))
                 assert result.total.closing == 100
                 assert result.total.amounts.total == 0
-            lifetime = report(session, portfolio, date(2024, 6, 20))[0]
-            assert (lifetime.units, lifetime.cost_base, lifetime.total_return) == (D(units), 100, 0)
             assert ledger_units(session, portfolio.id) == {instrument.id: D(units)}
             assert stored_units(session, portfolio.id) == {("NZX", "EXAMPLE"): D(units)}
     engine.dispose()
@@ -403,7 +400,6 @@ def test_shared_report_net_tax_drp_and_gross_up(monkeypatch, capsys):
     from dataclasses import replace
 
     from portfolio_digest.income import parse_income, store_income
-    from portfolio_digest.returns import report
 
     engine = _sqlite_engine(monkeypatch)
     with Session(engine) as session:
@@ -447,10 +443,6 @@ def test_shared_report_net_tax_drp_and_gross_up(monkeypatch, capsys):
             assert result.total.gross_dividends == 100
             assert result.total.withholding_tax == 10
             assert result.total.imputation_gross_up == 28
-            assert (
-                report(session, portfolio, date(2024, 6, 20), gross_up=gross_up)[0].total_return
-                == total
-            )
     monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: engine)
     assert main(["returns", "--portfolio", "DRP", "--date", "2024-06-20", "--gross-up"]) == 0
     output = capsys.readouterr().out

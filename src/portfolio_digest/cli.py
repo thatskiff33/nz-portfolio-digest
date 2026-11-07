@@ -3,7 +3,6 @@
 import argparse
 import json
 import logging
-import os
 import sys
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -23,6 +22,7 @@ from portfolio_digest.config import (
     akahu_account_ids,
     get_gmail_settings,
     get_settings,
+    runtime_settings,
 )
 from portfolio_digest.db import make_engine, session_scope
 from portfolio_digest.dividends import decide, suggest
@@ -179,7 +179,7 @@ def cmd_year_end(args: argparse.Namespace) -> int:
             raise ReturnError("--dry-run requires --out DIR.")
         if args.portfolio:
             validation.portfolio_name(args.portfolio)
-        config = read_config(args.config)
+        config = read_config(Path(args.config or runtime_settings().schedule_config))
         with session_scope(make_engine()) as session:
             names = (
                 [args.portfolio]
@@ -212,7 +212,7 @@ def cmd_year_end(args: argparse.Namespace) -> int:
 def cmd_returns(args: argparse.Namespace) -> int:
     try:
         validation.portfolio_name(args.portfolio)
-        period_range(args.period, date.today())
+        period_range(args.period, runtime_settings().today())
         with session_scope(make_engine()) as session:
             report = load_returns(
                 session, args.portfolio, args.period, args.date, gross_up=args.gross_up
@@ -305,7 +305,7 @@ def cmd_prices_check(args: argparse.Namespace) -> int:
 
 
 def cmd_report_send(args: argparse.Namespace) -> int:
-    config = read_config(Path(args.config))
+    config = read_config(Path(args.config or runtime_settings().schedule_config))
     with session_scope(make_engine()) as session:
         run_report(
             session,
@@ -318,7 +318,7 @@ def cmd_report_send(args: argparse.Namespace) -> int:
 
 
 def cmd_alerts_check(args: argparse.Namespace) -> int:
-    config = read_config(Path(args.config))
+    config = read_config(Path(args.config or runtime_settings().schedule_config))
     with session_scope(make_engine()) as session:
         results = run_alerts(session, config, dry_run=args.dry_run)
     print("\n\n".join(results) if results else "No alerts to send.")
@@ -326,7 +326,7 @@ def cmd_alerts_check(args: argparse.Namespace) -> int:
 
 
 def cmd_scheduler(args: argparse.Namespace) -> int:
-    config = read_config(Path(args.config))
+    config = read_config(Path(args.config or runtime_settings().schedule_config))
 
     def execute(schedule, scheduled, checkpoint):
         if schedule.kind == "prices":
@@ -343,7 +343,7 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
             run_report(session, config, schedule.name, now=scheduled, checkpoint=checkpoint)
         return 0
 
-    return Scheduler(config, Path(args.state)).run(execute)
+    return Scheduler(config, Path(args.state or runtime_settings().scheduler_state)).run(execute)
 
 
 def _show_outcome(outcome) -> None:
@@ -512,7 +512,9 @@ def cmd_dividends(args):
                 symbol = source.symbol(
                     Listing(instrument.exchange, instrument.code, instrument.yahoo_symbol)
                 )
-                events = source.dividends(symbol, args.start, args.end, instrument.currency)
+                events = source.dividends(
+                    symbol, args.start, args.end or runtime_settings().today(), instrument.currency
+                )
             for item in suggest(session, portfolio, instrument, events):
                 print(f"{item.id}\t{item.ex_date}\t{item.gross_amount}\t{item.status}")
         elif args.dividend_command == "reject":
@@ -571,9 +573,7 @@ def build_parser() -> argparse.ArgumentParser:
     year_end.add_argument("--year", type=int, help="Year ending 31 March; --all defaults to latest")
     year_end.add_argument("--dry-run", action="store_true")
     year_end.add_argument("--out", type=Path)
-    year_end.add_argument(
-        "--config", type=Path, default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml")
-    )
+    year_end.add_argument("--config", type=Path, default=None)
     year_end.set_defaults(func=cmd_year_end)
 
     returns = sub.add_parser("returns", help="Report capital, dividend and currency returns")
@@ -691,7 +691,7 @@ def build_parser() -> argparse.ArgumentParser:
     suggestion.add_argument("--portfolio", required=True)
     suggestion.add_argument("--instrument", type=_instrument_label, required=True)
     suggestion.add_argument("--start", type=_date, required=True)
-    suggestion.add_argument("--end", type=_date, default=date.today())
+    suggestion.add_argument("--end", type=_date, default=None)
     suggestion.set_defaults(func=cmd_dividends)
     reject = dsub.add_parser("reject")
     reject.add_argument("id", type=int)
@@ -710,7 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
     rsub = report.add_subparsers(dest="report_command", required=True)
     send_now = rsub.add_parser("send-now", help="Run a configured report now")
     send_now.add_argument("--schedule", required=True)
-    send_now.add_argument("--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"))
+    send_now.add_argument("--config", default=None)
     send_now.add_argument("--dry-run", action="store_true")
     send_now.add_argument("--out")
     send_now.set_defaults(func=cmd_report_send)
@@ -718,17 +718,13 @@ def build_parser() -> argparse.ArgumentParser:
     alerts = sub.add_parser("alerts", help="Check price and portfolio alerts")
     alert_sub = alerts.add_subparsers(dest="alerts_command", required=True)
     alert_check = alert_sub.add_parser("check")
-    alert_check.add_argument(
-        "--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml")
-    )
+    alert_check.add_argument("--config", default=None)
     alert_check.add_argument("--dry-run", action="store_true")
     alert_check.set_defaults(func=cmd_alerts_check)
 
     scheduler = sub.add_parser("scheduler", help="Run the shared price and report scheduler")
-    scheduler.add_argument("--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"))
-    scheduler.add_argument(
-        "--state", default=os.environ.get("SCHEDULER_STATE", "state/scheduler.json")
-    )
+    scheduler.add_argument("--config", default=None)
+    scheduler.add_argument("--state", default=None)
     scheduler.set_defaults(func=cmd_scheduler)
 
     return parser

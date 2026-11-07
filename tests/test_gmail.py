@@ -88,6 +88,7 @@ def test_gmail_feed_can_return_duplicate_contract_notes_for_storage_to_deduplica
     ]
 
 
+@pytest.mark.posix
 def test_save_refresh_token_refuses_existing_file_and_force_replaces_privately(tmp_path):
     from portfolio_digest.gmail import save_refresh_token
 
@@ -104,6 +105,7 @@ def test_save_refresh_token_refuses_existing_file_and_force_replaces_privately(t
 
 @pytest.mark.parametrize("force", [False, True])
 @pytest.mark.parametrize("dangling", [False, True])
+@pytest.mark.posix
 def test_save_refresh_token_refuses_symlinks(tmp_path, force, dangling):
     from portfolio_digest.gmail import save_refresh_token
 
@@ -121,6 +123,7 @@ def test_save_refresh_token_refuses_symlinks(tmp_path, force, dangling):
     assert not target.exists() if dangling else target.read_text() == "preserve-me"
 
 
+@pytest.mark.posix
 def test_save_refresh_token_creates_private_file(tmp_path):
     from portfolio_digest.gmail import save_refresh_token
 
@@ -131,6 +134,7 @@ def test_save_refresh_token_creates_private_file(tmp_path):
         assert path.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.posix
 def test_authorise_cli_passes_force_and_names_env_variable_without_exposing_token(
     tmp_path, monkeypatch, capsys
 ):

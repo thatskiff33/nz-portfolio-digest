@@ -12,7 +12,10 @@ SCRIPT = Path(__file__).parent.parent / "scripts" / "backup.sh"
 DAY = 86400
 SH = shutil.which("sh")
 
-pytestmark = pytest.mark.skipif(SH is None, reason="needs a POSIX shell")
+pytestmark = [
+    pytest.mark.posix,
+    pytest.mark.skipif(os.name == "nt" or SH is None, reason="needs POSIX"),
+]
 
 
 @pytest.fixture

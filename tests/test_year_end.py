@@ -1092,6 +1092,117 @@ def test_scheduled_delivery_checkpoints_survive_three_failed_restarts(
     assert json.loads(path.read_text())["year-end:retry"]["delivered"] == []
 
 
+def test_scheduled_year_end_retry_keeps_recipient_checkpoints_per_portfolio(
+    year_engine, monkeypatch, tmp_path
+):
+    import json
+    from datetime import timedelta
+
+    import httpx
+
+    from portfolio_digest import mailers, report_service
+    from portfolio_digest.delivery import RecipientProgress
+    from portfolio_digest.scheduling import Scheduler
+
+    with Session(year_engine) as session:
+        first = session.query(Portfolio).filter_by(name="Invented").one()
+        second = Portfolio(name="Second invented", base_currency="NZD")
+        session.add(second)
+        session.flush()
+        portfolio_ids = [first.id, second.id]
+        session.commit()
+    recipients = ["accepted@example.invalid", "retry@example.invalid"]
+    config = ScheduleConfig(
+        schedules=[read_config(Path("schedules.toml")).named_report("year-end")],
+        recipients=recipients,
+    )
+    schedule = config.schedules[0]
+    due = datetime(2026, 4, 1, 6, tzinfo=UTC)
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                schedule.name: due.isoformat(),
+                schedule.name + ":config": schedule.model_dump_json() + config.timezone,
+            }
+        )
+    )
+    subjects = [
+        f"Portfolio Digest: {name}, year ended 31 March 2026"
+        for name in ["Invented", "Second invented"]
+    ]
+    attempted = []
+    accepted = []
+
+    def handle(request):
+        payload = json.loads(request.content)
+        delivery = (payload["Subject"], payload["To"])
+        attempted.append(delivery)
+        # Refuse only the first attempt for this recipient on portfolio 1.
+        if delivery == (subjects[0], recipients[1]) and attempted.count(delivery) == 1:
+            return httpx.Response(200, json={"ErrorCode": 406})
+        accepted.append(delivery)
+        return httpx.Response(200, json={"ErrorCode": 0})
+
+    factory = httpx.Client
+    monkeypatch.setattr(
+        mailers.httpx, "Client", lambda **kw: factory(transport=httpx.MockTransport(handle))
+    )
+    settings = MailSettings(
+        _env_file=None,
+        mailer="postmark",
+        mail_from="digest@example.invalid",
+        postmark_server_token="test-only-token",  # noqa: S106 - fictitious sentinel
+    )
+
+    class Stop(Exception):
+        pass
+
+    def stop(_):
+        raise Stop
+
+    def execute(schedule, at, checkpoint):
+        with Session(year_engine) as session:
+            report_service.run_report(
+                session, config, schedule.name, now=at, settings=settings, checkpoint=checkpoint
+            )
+        return 0
+
+    def run(instant):
+        # Construct a new scheduler so the retry must reload its saved checkpoints.
+        with pytest.raises(Stop):
+            Scheduler(config, path).run(
+                execute, now=lambda: instant, sleep=stop, notify=lambda _: None
+            )
+
+    run(due)
+    expected = [(subject, recipient) for subject in subjects for recipient in recipients]
+    assert attempted == expected
+    assert accepted == [expected[0], expected[2], expected[3]]
+    state = json.loads(path.read_text())
+    assert state["year-end"] == due.isoformat()
+    assert state["year-end:retry"]["delivered"] == [portfolio_ids[1]]
+    # Subjects also distinguish messages. Check the saved portfolio scopes explicitly
+    # so removing portfolio_delivery cannot hide behind those distinct subjects.
+    expected_checkpoints = set()
+    for portfolio_id, subject in zip(portfolio_ids, subjects, strict=True):
+        progress = RecipientProgress(
+            set(), lambda: None, scope=f"portfolio:{portfolio_id}", message_id=f"{subject}\0"
+        )
+        for recipient in recipients:
+            if (subject, recipient) in accepted:
+                expected_checkpoints.add(progress.key(recipient))
+    assert set(state["year-end:retry"]["recipients"]) == expected_checkpoints
+
+    run(due + timedelta(minutes=30))
+    assert attempted == expected + [(subjects[0], recipients[1])]
+    assert sorted(accepted) == sorted(expected)
+    state = json.loads(path.read_text())
+    assert datetime.fromisoformat(state["year-end"]) > due
+    assert state["year-end:retry"]["recipients"] == []
+    assert state["year-end:retry"]["delivered"] == []
+
+
 def test_year_end_checkpoint_failure_stops_before_next_delivery(year_engine, monkeypatch):
     from portfolio_digest import report_service, year_end_service
     from portfolio_digest.scheduling import DeliveryCheckpoint, SchedulerStateError

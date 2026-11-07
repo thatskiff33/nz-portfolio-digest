@@ -1,9 +1,10 @@
 """All figures and securities are invented; expected answers are hand-worked."""
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal as D
 from decimal import getcontext, localcontext
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -682,3 +683,33 @@ def test_us_venues_do_not_flag_thanksgiving_as_missing(exchange):
     wednesday, thanksgiving = date(2026, 11, 25), date(2026, 11, 26)
     h = replace(holding(), exchange=exchange, prices=(Observation(wednesday, D(50)),))
     assert not holding_return(h, wednesday, thanksgiving, {}).flags
+
+
+@pytest.mark.parametrize(
+    "day,exchange,currency,close_hour,close_minute",
+    [
+        (date(2026, 11, 3), "NZX", "NZD", 17, 0),
+        (date(2026, 11, 3), "ASX", "AUD", 18, 15),
+        (date(2026, 7, 14), "NZX", "NZD", 17, 0),
+        (date(2026, 7, 14), "ASX", "AUD", 18, 15),
+        # NZ daylight saving starts before Sydney's, putting its close an hour later.
+        (date(2026, 9, 29), "ASX", "AUD", 19, 15),
+    ],
+)
+def test_live_nzx_and_asx_prices_become_due_at_local_close(
+    day, exchange, currency, close_hour, close_minute
+):
+    monday = day - timedelta(days=1)
+    h = replace(holding(currency), exchange=exchange, prices=(Observation(monday, D(50)),))
+    rates = {"AUD": (Observation(monday, D("1.1")),)} if currency == "AUD" else {}
+    close = datetime(
+        day.year, day.month, day.day, close_hour, close_minute, tzinfo=ZoneInfo("Pacific/Auckland")
+    )
+    before = holding_return(h, monday, day, rates, as_of=close - timedelta(seconds=1))
+    assert before.flags == ()
+    for instant in (close, close + timedelta(minutes=1)):
+        overdue = holding_return(h, monday, day, rates, as_of=instant)
+        assert len(overdue.flags) == 1
+        assert "price" in overdue.flags[0]
+        refreshed = replace(h, prices=(*h.prices, Observation(day, D(51))))
+        assert holding_return(refreshed, monday, day, rates, as_of=instant).flags == ()

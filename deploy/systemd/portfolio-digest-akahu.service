@@ -4,4 +4,5 @@ Description=Confirm portfolio holdings with Akahu
 [Service]
 Type=oneshot
 WorkingDirectory=%h/portfolio-digest
+# A failed run emails an operations notice when the mailer is configured. See docs/AKAHU.md.
 ExecStart=/usr/bin/env docker compose run --rm migrate akahu sync --portfolio Personal

@@ -104,7 +104,13 @@ private. Enable user lingering as described in the deployment guide so the timer
 while you are logged out.
 
 The Compose command reads credentials from the project's `.env`. Build the image and run
-migrations after deploying changes. Use your scheduler's non-zero exit alerts for drift.
+migrations after deploying changes. A failed sync, including drift, a fetch error or missing
+tokens, sends one operations email to the report recipients (or `MAIL_OWNER`) and the
+optional ntfy or Pushover push when that is configured. The message names the akahu job and
+the date only: no unit counts, values or links. Repeats are limited to one a day while it
+keeps failing, remembered on the scheduler state volume, and a later successful match sends
+one recovered notice. If that notice cannot be sent, the failure is logged and the sync
+result is unchanged.
 Optionally create a Push monitor in Uptime Kuma with a heartbeat interval longer than a day
 (e.g. 26 hours) and set `UPTIME_KUMA_PUSH_URL` to its full push URL in `.env`. It must use
 HTTPS unless it points at `localhost` or a Tailscale address; redirects count as a failure. A successful

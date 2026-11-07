@@ -86,6 +86,8 @@ class ScheduleConfig(BaseModel):
     timezone: str = "Pacific/Auckland"
     recipients: list[str] = Field(default_factory=list)
     kuma_push_url: SecretStr | None = None
+    # Pinged only after a price fetch in which every instrument and rate succeeded.
+    prices_kuma_push_url: SecretStr | None = None
     schedules: list[Schedule]
     alerts: AlertConfig = Field(default_factory=AlertConfig)
 
@@ -166,11 +168,18 @@ def read_config(path: Path) -> ScheduleConfig:
         data = tomllib.loads(path.read_text())
         if "kuma_push_url" in data:
             logger.warning("Move the monitoring setting from TOML to REPORT_KUMA_PUSH_URL in .env.")
+        if "prices_kuma_push_url" in data:
+            logger.warning(
+                "Move the price monitor setting from TOML to REPORT_PRICES_KUMA_PUSH_URL in .env."
+            )
         overrides = get_report_settings()
         if overrides.recipients.strip():
             data["recipients"] = [value.strip() for value in overrides.recipients.split(",")]
         if overrides.kuma_push_url and overrides.kuma_push_url.get_secret_value().strip():
             data["kuma_push_url"] = overrides.kuma_push_url
+        prices_url = overrides.prices_kuma_push_url
+        if prices_url and prices_url.get_secret_value().strip():
+            data["prices_kuma_push_url"] = prices_url
         return ScheduleConfig.model_validate(data)
     except (OSError, ValueError, KeyError, ValidationError):
         raise ConfigError(
@@ -278,7 +287,9 @@ class Scheduler:
     config: ScheduleConfig
     state_path: Path
 
-    def run(self, execute, *, now=None, sleep=clock.sleep) -> int:
+    def run(self, execute, *, now=None, sleep=clock.sleep, notify=None) -> int:
+        from portfolio_digest.operations import THROTTLE, failure_text, recovery_text
+
         if self.config.timezone != runtime_settings().timezone:
             raise ConfigError(
                 "TIMEZONE and schedules.toml timezone must agree before starting the scheduler."
@@ -298,9 +309,10 @@ class Scheduler:
             for key in state:
                 if ":" in key:
                     name, suffix = key.split(":", 1)
-                    if name not in state or suffix not in {"config", "retry"}:
+                    if name not in state or suffix not in {"config", "retry", "notice"}:
                         raise ValueError
             pending = {}
+            notices = {}
             for name in state:
                 if ":" in name:
                     continue
@@ -308,6 +320,8 @@ class Scheduler:
                 identity = _stored_identity(state[name + ":config"])
                 if name in identities and identity == identities[name]:
                     pending[name] = saved
+                    if name + ":notice" in state:
+                        notices[name] = _timestamp(state[name + ":notice"])
                 else:
                     logger.warning(
                         "Discarded pending scheduler occurrence after configuration change."
@@ -330,6 +344,10 @@ class Scheduler:
                             **{name: item.due.isoformat() for name, item in pending.items()},
                             **{name + ":config": identity for name, identity in identities.items()},
                             **{
+                                name + ":notice": stamp.isoformat()
+                                for name, stamp in notices.items()
+                            },
+                            **{
                                 name + ":retry": item.retry_state()
                                 for name, item in pending.items()
                             },
@@ -344,6 +362,33 @@ class Scheduler:
                     "Cannot write scheduler state. Check the state volume."
                 ) from None
 
+        def emit(text: str, *, recovered: bool) -> None:
+            try:
+                if notify is not None:
+                    notify(text)
+                else:
+                    from portfolio_digest.operations import deliver_operations_notice
+
+                    deliver_operations_notice(self.config, text, recovered=recovered)
+            except Exception:
+                logger.warning("Operations notice could not be delivered.")
+
+        def remember_failure(name: str, instant: datetime, labels: tuple[str, ...]) -> None:
+            last = notices.get(name)
+            if last is not None and instant < last + THROTTLE:
+                return
+            emit(
+                failure_text(name, instant, self.config.timezone, labels),
+                recovered=False,
+            )
+            notices[name] = instant
+
+        def remember_recovery(name: str, instant: datetime) -> None:
+            if name not in notices:
+                return
+            emit(recovery_text(name, instant, self.config.timezone), recovered=True)
+            del notices[name]
+
         save()
         while True:
             _write_heartbeat(heartbeat)
@@ -355,13 +400,22 @@ class Scheduler:
                 checkpoint = DeliveryCheckpoint(item.delivered, save)
                 try:
                     with track_recipients(RecipientProgress(item.recipients, save)):
-                        failed = execute(schedule, item.due, checkpoint) != 0
+                        outcome = execute(schedule, item.due, checkpoint)
+                    code, labels = outcome if isinstance(outcome, tuple) else (outcome, ())
+                    if isinstance(labels, str):
+                        labels = (labels,)
+                    failed = code != 0
                 except ConfigError:
                     raise
                 except Exception:
                     # Job exceptions may contain portfolio figures or provider secrets.
                     failed = True
+                    labels = ()
                 finished = now()
+                if failed or labels:
+                    remember_failure(schedule.name, finished, tuple(labels))
+                else:
+                    remember_recovery(schedule.name, finished)
                 if failed:
                     item.failures += 1
                     delay = min(30 * 2 ** min(item.failures - 1, 4), 360)

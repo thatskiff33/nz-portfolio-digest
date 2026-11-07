@@ -904,6 +904,7 @@ def test_default_morning_fetch_follows_us_price_and_fx_closes(day):
         assert calendar.latest_closed_day(due) == day - timedelta(days=1)
 
 
+@pytest.mark.posix
 @pytest.mark.parametrize("preexisting", [False, True])
 def test_scheduler_state_and_key_are_private_before_writing(tmp_path, monkeypatch, preexisting):
     from portfolio_digest import scheduling

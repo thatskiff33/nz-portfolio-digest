@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from sqlalchemy import Engine, create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -13,6 +14,9 @@ from portfolio_digest.config import ConfigError, get_settings
 def make_engine(url: str | None = None) -> Engine:
     url = url or get_settings().database_url.get_secret_value()
     try:
+        parsed = make_url(url)
+        if parsed.get_backend_name() == "postgresql":
+            return create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 10})
         return create_engine(url, pool_pre_ping=True)
     except (ArgumentError, ValueError, ImportError):
         # The original message can quote the URL, password and all. ImportError means a

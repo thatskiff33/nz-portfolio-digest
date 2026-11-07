@@ -870,8 +870,8 @@ def test_loader_passes_stored_withholding_components(year_engine):
     assert all("ASX:GUM" not in flag for flag in loaded.flags)
 
 
-def test_notes_and_readme_state_withholding_drp_and_split_rules():
-    readme = " ".join(Path("README.md").read_text().split())
+def test_notes_and_year_end_guide_state_withholding_drp_and_split_rules():
+    guide = " ".join(Path("docs/YEAR-END.md").read_text().split())
     rules = (
         "Resident and foreign withholding follow the components stored from broker or "
         "registry evidence.",
@@ -891,17 +891,17 @@ def test_notes_and_readme_state_withholding_drp_and_split_rules():
     notes = " ".join(" ".join(NOTES).split())
     for rule in rules:
         assert rule in notes
-        readme_rule = (
+        guide_rule = (
             "This summary is information, not tax advice."
             if rule == "This is information, not tax advice."
             else rule
         )
-        assert readme_rule in readme
+        assert guide_rule in guide
     assert "This is information, not tax advice." in notes
     assert "Splits require a matching quantity adjustment" not in notes
     assert "recorded combined withholding field" not in notes
     assert "reinvested units must also have a recorded buy" not in notes
-    assert "includes gross dividends" not in readme
+    assert "includes gross dividends" not in guide
 
 
 def test_csv_decimals_keep_full_fixed_point_precision():

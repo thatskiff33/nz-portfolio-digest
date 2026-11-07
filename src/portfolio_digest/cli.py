@@ -554,7 +554,9 @@ def cmd_dividends(args):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="portfolio-digest")
-    parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument(
+        "--version", action="version", version=__version__, help="Show the installed version"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("migrate", help="Bring the database up to date").set_defaults(func=cmd_migrate)
@@ -564,20 +566,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     year_end = sub.add_parser("year-end", help="NZ tax-year HTML email and CSV summary")
     scope = year_end.add_mutually_exclusive_group(required=True)
-    scope.add_argument("--portfolio")
+    scope.add_argument("--portfolio", help="Portfolio name")
     scope.add_argument(
         "--all", action="store_true", help="All portfolios, latest completed tax year by default"
     )
     year_end.add_argument("--year", type=int, help="Year ending 31 March; --all defaults to latest")
-    year_end.add_argument("--dry-run", action="store_true")
-    year_end.add_argument("--out", type=Path)
     year_end.add_argument(
-        "--config", type=Path, default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml")
+        "--dry-run", action="store_true", help="Preview without sending or recording changes"
+    )
+    year_end.add_argument("--out", type=Path, help="Private preview output path")
+    year_end.add_argument(
+        "--config",
+        type=Path,
+        default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"),
+        help="Schedule configuration file path",
     )
     year_end.set_defaults(func=cmd_year_end)
 
     returns = sub.add_parser("returns", help="Report capital, dividend and currency returns")
-    returns.add_argument("--portfolio", required=True)
+    returns.add_argument("--portfolio", required=True, help="Portfolio name")
     returns.add_argument("--period", default="all", help="week|month|ytd|all|YYYY-MM-DD:YYYY-MM-DD")
     returns.add_argument("--date", type=_date, help="Report end date (defaults to today)")
     returns.add_argument("--gross-up", action="store_true", help="Include NZ imputation in totals")
@@ -586,7 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
     portfolio = sub.add_parser("portfolio", help="Manage portfolios")
     psub = portfolio.add_subparsers(dest="portfolio_command", required=True)
     add = psub.add_parser("add", help="Add a portfolio")
-    add.add_argument("name")
+    add.add_argument("name", help="Portfolio name")
     add.add_argument(
         "--base-currency", help="ISO currency code (default: the BASE_CURRENCY setting, NZD)"
     )
@@ -596,7 +603,7 @@ def build_parser() -> argparse.ArgumentParser:
     akahu = sub.add_parser("akahu", help="Confirm ledger holdings using Akahu")
     asub = akahu.add_subparsers(dest="akahu_command", required=True)
     sync_parser = asub.add_parser("sync", help="Store holdings and report unit drift")
-    sync_parser.add_argument("--portfolio", required=True)
+    sync_parser.add_argument("--portfolio", required=True, help="Portfolio name")
     sync_parser.set_defaults(func=cmd_akahu_sync)
 
     prices = sub.add_parser("prices", help="Fetch and check daily prices and exchange rates")
@@ -618,7 +625,7 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.set_defaults(func=cmd_prices_fetch)
 
     symbol = price_sub.add_parser("symbol", help="Set an instrument's Yahoo symbol override")
-    symbol.add_argument("instrument", type=_instrument_label)
+    symbol.add_argument("instrument", type=_instrument_label, help="Listing as EXCHANGE:CODE")
     symbol_group = symbol.add_mutually_exclusive_group(required=True)
     symbol_group.add_argument("symbol", nargs="?", help="Yahoo symbol, for example AIRRG.NZ")
     symbol_group.add_argument("--clear", action="store_true", help="Return to automatic mapping")
@@ -636,98 +643,133 @@ def build_parser() -> argparse.ArgumentParser:
     isub = importing.add_subparsers(dest="source", required=True)
     for name, importer in FILE_IMPORTERS.items():
         command = isub.add_parser(name, help=importer.summary)
-        command.add_argument("file")
-        command.add_argument("--portfolio", required=True)
+        command.add_argument("file", help="Input file path")
+        command.add_argument("--portfolio", required=True, help="Portfolio name")
         command.set_defaults(func=cmd_import)
     gmail_import = isub.add_parser("asb-gmail", help=AsbGmailImporter.summary)
-    gmail_import.add_argument("--portfolio", required=True)
+    gmail_import.add_argument("--portfolio", required=True, help="Portfolio name")
     gmail_import.set_defaults(func=cmd_import, file=None)
     isub.add_parser("list", help="List import runs").set_defaults(func=cmd_import_list)
     undo = isub.add_parser("undo", help="Undo a successful import")
-    undo.add_argument("id", type=int)
+    undo.add_argument("id", type=int, help="Record ID")
     undo.set_defaults(func=cmd_import_undo)
 
     trade = sub.add_parser("trade", help="Manage manually entered trades")
     tsub = trade.add_subparsers(dest="trade_command", required=True)
     add_trade = tsub.add_parser("add", help="Add a correction, gift or opening balance")
-    add_trade.add_argument("--portfolio", required=True)
-    add_trade.add_argument("--date", required=True)
-    add_trade.add_argument("--type", required=True, choices=[kind.value for kind in TradeType])
-    add_trade.add_argument("--exchange", required=True)
-    add_trade.add_argument("--code", required=True)
-    add_trade.add_argument("--quantity", required=True)
-    add_trade.add_argument("--price", default="0")
-    add_trade.add_argument("--currency")
-    add_trade.add_argument("--fees", default="0")
-    add_trade.add_argument("--name")
-    add_trade.add_argument("--notes")
+    add_trade.add_argument("--portfolio", required=True, help="Portfolio name")
+    add_trade.add_argument("--date", required=True, help="Trade or action date (YYYY-MM-DD)")
+    add_trade.add_argument(
+        "--type", required=True, choices=[kind.value for kind in TradeType], help="Trade type"
+    )
+    add_trade.add_argument("--exchange", required=True, help="Listing exchange, for example NZX")
+    add_trade.add_argument("--code", required=True, help="Instrument code")
+    add_trade.add_argument("--quantity", required=True, help="Units; adjustments may be signed")
+    add_trade.add_argument("--price", default="0", help="Price per unit (default: 0)")
+    add_trade.add_argument("--currency", help="ISO currency code; defaults to listing currency")
+    add_trade.add_argument("--fees", default="0", help="Brokerage and fees (default: 0)")
+    add_trade.add_argument("--name", help="Instrument name")
+    add_trade.add_argument("--notes", help="Private notes for this trade")
     add_trade.set_defaults(func=cmd_trade_add)
 
     reconcile = sub.add_parser("reconcile", help="Compare holdings with a snapshot CSV")
     reconcile.add_argument("source", help="Broker or registry name shown in the report")
-    reconcile.add_argument("file")
-    reconcile.add_argument("--portfolio", required=True)
+    reconcile.add_argument("file", help="Input file path")
+    reconcile.add_argument("--portfolio", required=True, help="Portfolio name")
     reconcile.set_defaults(func=cmd_reconcile)
 
     gmail = sub.add_parser("gmail", help="Set up read-only Gmail access")
     gsub = gmail.add_subparsers(dest="gmail_command", required=True)
     auth = gsub.add_parser("authorise", help="Create a read-only Gmail refresh token")
-    auth.add_argument("--output", default=".env.gmail")
+    auth.add_argument(
+        "--output", default=".env.gmail", help="Private token file path (default: .env.gmail)"
+    )
     auth.add_argument("--force", action="store_true", help="Replace an existing token file")
     auth.set_defaults(func=cmd_gmail_authorise)
 
     actions = sub.add_parser("corporate-actions", help="Record registry corporate actions")
-    actions.add_argument("kind", choices=KINDS)
-    actions.add_argument("instrument", type=_instrument_label)
-    actions.add_argument("--date", required=True, type=_date)
-    actions.add_argument("--reference", required=True)
-    actions.add_argument("--portfolio")
+    actions.add_argument("kind", choices=KINDS, help="Corporate action kind")
+    actions.add_argument("instrument", type=_instrument_label, help="Listing as EXCHANGE:CODE")
+    actions.add_argument(
+        "--date", required=True, type=_date, help="Trade or action date (YYYY-MM-DD)"
+    )
+    actions.add_argument("--reference", required=True, help="Stable broker or registry reference")
+    actions.add_argument("--portfolio", help="Portfolio name")
     actions.add_argument("--details", default="{}", help="JSON event terms; see docs/dividends.md")
     actions.set_defaults(func=cmd_action)
 
     dividends = sub.add_parser("dividends", help="Review missing-dividend suggestions")
     dsub = dividends.add_subparsers(dest="dividend_command", required=True)
     suggestion = dsub.add_parser("suggest", help="Fetch pending Yahoo estimates")
-    suggestion.add_argument("--portfolio", required=True)
-    suggestion.add_argument("--instrument", type=_instrument_label, required=True)
-    suggestion.add_argument("--start", type=_date, required=True)
-    suggestion.add_argument("--end", type=_date, default=date.today())
+    suggestion.add_argument("--portfolio", required=True, help="Portfolio name")
+    suggestion.add_argument(
+        "--instrument", type=_instrument_label, required=True, help="Listing as EXCHANGE:CODE"
+    )
+    suggestion.add_argument("--start", type=_date, required=True, help="First date (YYYY-MM-DD)")
+    suggestion.add_argument(
+        "--end", type=_date, default=date.today(), help="Last date (defaults to today)"
+    )
     suggestion.set_defaults(func=cmd_dividends)
-    reject = dsub.add_parser("reject")
-    reject.add_argument("id", type=int)
+    reject = dsub.add_parser("reject", help="Reject a pending dividend suggestion")
+    reject.add_argument("id", type=int, help="Pending dividend suggestion ID")
     reject.set_defaults(func=cmd_dividends)
     confirm = dsub.add_parser("confirm", help="Confirm actual broker or registry amounts")
-    confirm.add_argument("id", type=int)
-    confirm.add_argument("--evidence", required=True, choices=("broker", "registry"))
-    confirm.add_argument("--reference", required=True)
-    confirm.add_argument("--paid-date", required=True, type=_date)
-    confirm.add_argument("--gross", required=True)
-    confirm.add_argument("--net", required=True)
+    confirm.add_argument("id", type=int, help="Record ID")
+    confirm.add_argument(
+        "--evidence",
+        required=True,
+        choices=("broker", "registry"),
+        help="Source of the confirmed amounts",
+    )
+    confirm.add_argument("--reference", required=True, help="Stable broker or registry reference")
+    confirm.add_argument("--paid-date", required=True, type=_date, help="Payment date (YYYY-MM-DD)")
+    confirm.add_argument("--gross", required=True, help="Gross dividend amount")
+    confirm.add_argument("--net", required=True, help="Net dividend amount")
     for name in ("tax", "rwt", "foreign-tax", "imputation", "franking", "drp"):
-        confirm.add_argument("--" + name, default="")
+        confirm.add_argument(
+            "--" + name,
+            default="",
+            help="Confirmed tax, credit or reinvestment amount (blank if absent)",
+        )
     confirm.set_defaults(func=cmd_dividends)
     report = sub.add_parser("report", help="Email or preview a portfolio report")
     rsub = report.add_subparsers(dest="report_command", required=True)
     send_now = rsub.add_parser("send-now", help="Run a configured report now")
-    send_now.add_argument("--schedule", required=True)
-    send_now.add_argument("--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"))
-    send_now.add_argument("--dry-run", action="store_true")
-    send_now.add_argument("--out")
+    send_now.add_argument("--schedule", required=True, help="Schedule name from the configuration")
+    send_now.add_argument(
+        "--config",
+        default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"),
+        help="Schedule configuration file path",
+    )
+    send_now.add_argument(
+        "--dry-run", action="store_true", help="Preview without sending or recording changes"
+    )
+    send_now.add_argument("--out", help="Private preview output path")
     send_now.set_defaults(func=cmd_report_send)
 
     alerts = sub.add_parser("alerts", help="Check price and portfolio alerts")
     alert_sub = alerts.add_subparsers(dest="alerts_command", required=True)
-    alert_check = alert_sub.add_parser("check")
+    alert_check = alert_sub.add_parser("check", help="Check and send due alerts")
     alert_check.add_argument(
-        "--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml")
+        "--config",
+        default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"),
+        help="Schedule configuration file path",
     )
-    alert_check.add_argument("--dry-run", action="store_true")
+    alert_check.add_argument(
+        "--dry-run", action="store_true", help="Preview without sending or recording changes"
+    )
     alert_check.set_defaults(func=cmd_alerts_check)
 
     scheduler = sub.add_parser("scheduler", help="Run the shared price and report scheduler")
-    scheduler.add_argument("--config", default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"))
     scheduler.add_argument(
-        "--state", default=os.environ.get("SCHEDULER_STATE", "state/scheduler.json")
+        "--config",
+        default=os.environ.get("SCHEDULE_CONFIG", "schedules.toml"),
+        help="Schedule configuration file path",
+    )
+    scheduler.add_argument(
+        "--state",
+        default=os.environ.get("SCHEDULER_STATE", "state/scheduler.json"),
+        help="Scheduler state file path",
     )
     scheduler.set_defaults(func=cmd_scheduler)
 

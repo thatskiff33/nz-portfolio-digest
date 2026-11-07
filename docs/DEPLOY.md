@@ -101,7 +101,7 @@ Existing servers preserve their private `schedules.toml` during deployment. Edit
 the monthly and year-end entries there to `at = "19:00"`, then restart the scheduler
 with `docker compose restart scheduler`.
 
-If you previously installed the price systemd timer or PR #29's year-end timer, disable
+If you previously installed the price systemd timer or the standalone year-end timer used before November 2026, disable
 them before starting the container, so each job has just one scheduler:
 
 ```sh
@@ -166,6 +166,18 @@ reports it healthy while that file is less than 30 minutes old, so a slow price 
 does not look like a crash. The migrate, scheduler and web containers have a read-only
 root filesystem, no extra capabilities and a 512 MB memory cap. `/tmp` is writable, and
 so is the scheduler state volume.
+
+### Systemd user timers
+
+The Akahu sync uses a systemd user timer, separate from the shared Compose price and
+report scheduler. Enable lingering so user timers keep running while you are logged out:
+
+```sh
+loginctl enable-linger $USER
+```
+
+Install only the Akahu units from `deploy/systemd/`; see [Akahu setup](AKAHU.md#nightly-run-and-monitoring).
+Archived price units in `deploy/legacy/` are historical reference only. Keep them disabled.
 
 ## Email reports
 
@@ -239,7 +251,7 @@ For year-end delivery, use `--schedule year-end`. Its preview writes one
 `report-portfolio-ID.html`, `.txt` and `.csv` per portfolio. It uses the same mail
 settings, recipients and preview boundary as weekly/monthly delivery. The CSV is attached
 for Gmail, SMTP, Postmark and SES. Explicit historical years remain available through
-`year-end --portfolio NAME --year YYYY`; see the [summary guide](../README.md#nz-tax-year-summary).
+`year-end --portfolio NAME --year YYYY`; see the [summary guide](YEAR-END.md).
 
 When upgrading an existing server, the deploy action preserves its private schedule.
 Add this entry to that file if it is missing, then restart the scheduler:
@@ -255,7 +267,7 @@ at = "19:00"
 period = "tax_year"
 ```
 
-If migrating PR #29's SMTP settings, use `MAILER=smtp`, move `SMTP_SENDER` to
+If migrating SMTP settings from the standalone year-end timer used before November 2026, use `MAILER=smtp`, move `SMTP_SENDER` to
 `MAIL_FROM` and `SMTP_RECIPIENT` to `MAIL_OWNER`. Retain the host, port and authentication
 settings, then remove the two obsolete variables. The annual systemd units have been
 removed; the deploy script disables an installed legacy year-end timer before restarting
@@ -295,63 +307,215 @@ Keep database backups and any separately exported logs private as well.
 
 ## Updating
 
-Take a fresh backup first, so a migration that goes wrong costs nothing:
+Keep the pre-update dump and its release metadata together. First record the current
+commit and database revision, then take a fresh backup before updating code. Run each
+step only if the previous one succeeded. On migration or health failure, leave scheduler
+and web stopped and use the rollback procedure below.
 
 ```sh
 cd ~/portfolio-digest
-git pull
-docker compose run --rm backup --once            # stop here unless it prints "backup: wrote"
-docker compose up -d db backup
-docker compose run --rm --build migrate
-docker compose run --rm migrate health
-docker compose up -d --build scheduler
+previous_release=$(git rev-parse HEAD)
+previous_revision=$(docker compose exec -T db psql -U portfolio -d portfolio -Atc \
+  'SELECT version_num FROM alembic_version')
+docker compose run --rm backup --once            # stop unless it prints "backup: wrote"
+# Write private metadata beside the new dump, including its filename from that output.
+# Substitute the actual dump filename and BACKUP_DIR if configured differently.
+umask 077
+printf '%s\n%s\n' "$previous_release" "$previous_revision" > backups/portfolio-YYYYMMDDTHHMMSSZ.release.txt
 ```
+
+Detect dashboard use before stopping anything. An existing container, even when stopped,
+or a non-empty password in the server's `.env` enables it. Read the file as data, never
+source it or print its contents. This is the same detection used by `scripts/deploy.sh`:
+
+```sh
+web_enabled=false
+web_container=$(docker compose ps --all --quiet web)
+if [ -n "$web_container" ]; then
+    web_enabled=true
+elif [ -f .env ] && awk '
+    /^[[:space:]]*(export[[:space:]]+)?DASHBOARD_PASSWORD[[:space:]]*=/ {
+        value = $0
+        sub(/^[^=]*=[[:space:]]*/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        quote = substr(value, 1, 1)
+        if (quote == "\042" || quote == "\047") {
+            value = substr(value, 2)
+            end = index(value, quote)
+            if (end) value = substr(value, 1, end - 1)
+        } else {
+            sub(/[[:space:]]+#.*/, "", value)
+            if (value ~ /^#/) value = ""
+        }
+        enabled = length(value) > 0
+    }
+    END { exit !enabled }
+' .env; then
+    web_enabled=true
+fi
+```
+
+Preserve the private `schedules.toml` before a fast-forward update, as the deploy script
+does. Restore the private copy afterwards and add any newly documented schedule entries.
+Keep this copy outside git with owner-only access.
+
+```sh
+# After preserving schedules.toml:
+git restore schedules.toml
+git pull --ff-only origin main
+# Restore the private schedules.toml now.
+set -- migrate scheduler
+if [ "$web_enabled" = true ]; then set -- "$@" web; fi
+docker compose build "$@"
+docker compose stop scheduler web
+docker compose run --rm migrate
+docker compose run --rm migrate health
+# Only after both commands succeeded:
+set -- db backup scheduler
+if [ "$web_enabled" = true ]; then set -- "$@" web; fi
+docker compose up -d --no-deps "$@"
+```
+
+Disable any legacy year-end timer using the commands under
+[the shared schedule](#shared-price-and-report-schedule) before migration. Also stop the
+Akahu timer during maintenance if installed; restart it only after health passes.
+
+### Failed-migration rollback
+
+A code checkout alone cannot roll back a database schema. Keep scheduler, web, backup
+and any Akahu timer stopped. Use the recorded previous commit and the pre-update dump.
+Do not use `git pull` during rollback or recovery: it selects newer code that may not
+match the saved schema. Preserve the private schedule around each checkout.
+
+```sh
+docker compose stop scheduler web backup
+git checkout "$previous_release"
+set -- migrate scheduler
+if [ "$web_enabled" = true ]; then set -- "$@" web; fi
+docker compose build "$@"
+docker compose exec -T db pg_restore -U portfolio --clean --if-exists --single-transaction \
+  -d portfolio < backups/portfolio-YYYYMMDDTHHMMSSZ.dump
+docker compose run --rm migrate health
+# Only after restore and health succeed, without running migrate:
+set -- db backup scheduler
+if [ "$web_enabled" = true ]; then set -- "$@" web; fi
+docker compose up -d --no-deps "$@"
+```
+
+Use the metadata file to recover `previous_release` in a new shell. A failed transaction
+leaves the database as it was before that restore attempt; leave writers stopped and
+investigate rather than restarting them against an uncertain schema.
 
 ## Backups
 
 The `backup` service dumps the database when it starts and every 24 hours after that, into
 `BACKUP_DIR` (default `./backups`). The files belong to `BACKUP_UID:BACKUP_GID` and only
-that user can read them. Copy the folder into your normal off-server backups.
+that user can read them.
 
 Dumps older than `BACKUP_KEEP_DAYS` (default 14) are deleted, but only straight after a
 new dump succeeds. If backups start failing, the old ones stay until it is fixed, and the
 service tries again every 5 minutes.
-
-To check backups are working:
 
 ```sh
 docker compose ps backup        # "healthy" means a dump was written in the last 26 hours
 docker compose logs backup      # one line per dump, and the reason for any failure
 ```
 
+### Encrypted off-site copies
+
+Copy dumps and their release metadata to a separate location off the server. Encrypt them
+before transfer, for example with `age` or `gpg`. Keep the decryption key separately from
+both the server and the backup destination, with a recoverable private copy. For example,
+using an invented recipient placeholder:
+
+```sh
+age -r '<backup recipient public key>' -o portfolio.dump.age backups/portfolio-YYYYMMDDTHHMMSSZ.dump
+```
+
+Transfer the encrypted file and encrypted metadata through your normal secure copy
+process. Never put passwords or private keys in commands or git. Periodically retrieve,
+decrypt and test a copy using the scratch procedure below, including access to the
+separately stored key. Retention on the server is not off-site retention.
+
+### Test a restore
+
+Use a disposable database whose name contains `restoretest`. This does not touch the
+production database. The administrator creates it for the unprivileged `portfolio` role:
+
+```sh
+docker compose exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+CREATE DATABASE portfolio_restoretest OWNER portfolio;
+REVOKE ALL ON DATABASE portfolio_restoretest FROM PUBLIC;
+SQL
+docker compose exec -T db pg_restore -U portfolio --clean --if-exists --single-transaction \
+  -d portfolio_restoretest < backups/portfolio-YYYYMMDDTHHMMSSZ.dump
+docker compose exec -T db psql -U portfolio -d portfolio_restoretest -Atc \
+  'SELECT version_num FROM alembic_version'
+```
+
+Select the release recorded with the dump and verify that its Alembic head matches the
+restored revision. If metadata is missing, use the isolated restore's `alembic_version`
+and release history to identify a compatible release; never infer it from the filename.
+Use a separate maintenance window for checking out that release, with scheduler, web,
+backup and any Akahu timer stopped and the private schedule preserved. Rebuild `migrate`,
+then run health against only the scratch database. This override reuses the private
+container credentials without putting a password in arguments or output:
+
+```sh
+git checkout <matching-release-commit>
+docker compose build migrate
+docker compose run --rm --entrypoint python migrate -c '
+import os
+from sqlalchemy.engine import make_url
+from portfolio_digest.cli import main
+url = make_url(os.environ["DATABASE_URL"]).set(database="portfolio_restoretest")
+os.environ["DATABASE_URL"] = url.render_as_string(hide_password=False)
+raise SystemExit(main(["health"]))
+'
+docker compose exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c 'DROP DATABASE portfolio_restoretest'
+```
+
+Do not migrate the scratch database before health: that would conceal a release mismatch.
+Return to the original release and rebuild its images before resuming services. If any
+step fails, inspect it and remove the scratch database once finished. Leave production
+writers stopped until their own release and health are verified.
+
 ## Restoring
 
-Restore into the running database. `--single-transaction` means a restore that fails
-part-way changes nothing. The restore runs as the `portfolio` role, which owns everything in
-the dump, rather than the superuser, so nothing in a backup can run with more rights than
-the app already has.
+First detect optional dashboard use with the snippet in [Updating](#updating). Stop
+scheduler, web and backup, and any installed Akahu timer, before restoring. Check out
+and rebuild the release matching the dump's Alembic revision, preserving the private
+schedule. Do not use `git pull`. For dumps without release metadata, first use
+[Test a restore](#test-a-restore) to identify a matching release.
+
+`--single-transaction` means a restore that fails part-way changes nothing. Restore as
+`portfolio`, which owns the dump's objects, so the dump cannot run with superuser rights.
+Run each command only after the preceding one succeeds. `--no-deps` prevents Compose
+from starting the one-off migration service again after health has passed:
 
 ```sh
-docker compose stop backup
+docker compose stop scheduler web backup
+git checkout <matching-release-commit>
+set -- migrate scheduler
+if [ "$web_enabled" = true ]; then set -- "$@" web; fi
+docker compose build "$@"
+docker compose up -d --wait db
 docker compose exec -T db pg_restore -U portfolio --clean --if-exists --single-transaction \
   -d portfolio < backups/portfolio-YYYYMMDDTHHMMSSZ.dump
 docker compose run --rm migrate health
-docker compose start backup
+# Only after health succeeds; do not migrate the restored schema forward:
+set -- db backup scheduler
+if [ "$web_enabled" = true ]; then set -- "$@" web; fi
+docker compose up -d --no-deps "$@"
 ```
 
-To move to a new server, follow **First install** with the same passwords in `.env`, but
-stop after `mkdir -p backups`. Then start only the database, restore as above, and carry on
-from `migrate`:
-
-```sh
-docker compose up -d --wait db                   # waits until the database is ready
-docker compose exec -T db pg_restore -U portfolio --clean --if-exists --single-transaction \
-  -d portfolio < backups/portfolio-YYYYMMDDTHHMMSSZ.dump
-docker compose up -d backup
-docker compose run --rm --build migrate
-docker compose run --rm migrate health
-docker compose up -d --build scheduler
-```
+On a new server, follow [First install](#first-install) only through creating `.env`
+and the backup folder. Copy the private schedule and dump securely. Set the dashboard
+password only if needed, then use the same detection, matching-release checkout, build,
+database start, restore, health and service start sequence above. Do not create a new
+schema with `migrate` before or after restoring. Restart any Akahu timer only after health
+passes. Leave services stopped on restore or health failure.
 
 ## Notes
 
@@ -440,8 +604,10 @@ The deployment identity needs access to that checkout and Docker. Mail and datab
 credentials stay in the server's `.env`; the action does not receive them.
 
 The script preserves the server's schedule configuration, fast-forwards `main`, takes a
-backup, builds the app, stops the scheduler while migrating, checks database health and
-starts the services. If a migration fails, the scheduler stays stopped for investigation.
+backup and records recovery metadata before updating code. It builds the app and optional
+web, stops scheduler and web before migrating, checks database health, then starts the
+services including web when enabled. Migration or health failure leaves scheduler and web
+stopped for investigation.
 Deployment does not run automatically on merge.
 
 ### Price and movement alerts

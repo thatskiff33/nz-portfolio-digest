@@ -91,13 +91,19 @@ def test_postmark_http_contract_and_token_header(monkeypatch, msg, with_attachme
         msg,
         ["reader@example.invalid", "second@example.invalid"],
     )
-    assert requests[0].url == "https://api.postmarkapp.com/email"
-    assert requests[0].headers["X-Postmark-Server-Token"] == "test-only-token"
     import json
 
-    payload = json.loads(requests[0].content)
-    assert payload["To"] == "reader@example.invalid"
-    assert payload["Bcc"] == "second@example.invalid"
+    payloads = [json.loads(request.content) for request in requests]
+    # Each recipient gets their own message, so no address is disclosed to another.
+    assert [payload["To"] for payload in payloads] == [
+        "reader@example.invalid",
+        "second@example.invalid",
+    ]
+    assert not any("Bcc" in payload or "Cc" in payload for payload in payloads)
+    assert all(request.url == "https://api.postmarkapp.com/email" for request in requests)
+    assert all(r.headers["X-Postmark-Server-Token"] == "test-only-token" for r in requests)
+    assert payloads[0] == {**payloads[1], "To": "reader@example.invalid"}
+    payload = payloads[0]
     assert payload["TextBody"].strip() == "Hello"
     assert payload["HtmlBody"].strip() == "<p>Hello</p>"
     if with_attachment:

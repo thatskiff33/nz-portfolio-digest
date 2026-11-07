@@ -122,7 +122,9 @@ To migrate an existing server, move recipients and the monitoring URL from its
 any TOML `kuma_push_url` emits a warning recommending `REPORT_KUMA_PUSH_URL`, even when
 an environment value overrides it. The warning never includes the URL.
 The deploy script continues preserving existing server schedules for compatibility.
-Monitoring is pinged only after successful delivery. Ping failures are logged without
+Monitoring is pinged only after successful delivery. Monitoring URLs must use HTTPS unless
+they point at `localhost`, a loopback address or a Tailscale address (100.64.0.0/10).
+Redirects count as a failed ping and are never followed. Ping failures are logged without
 the URL and do not fail the send.
 
 Each `[[schedules]]` needs a unique `name`, `kind` (`prices` or `report`), `frequency`
@@ -511,8 +513,11 @@ atomically.
 Push is off by default. In the server's private `.env`, set `ALERT_NTFY_URL` to an HTTPS
 topic URL and optionally `ALERT_NTFY_TOKEN`, or set both `ALERT_PUSHOVER_TOKEN` and
 `ALERT_PUSHOVER_USER`. ntfy takes precedence if both providers are configured. Recreate
-the scheduler container after changing environment values. Push providers receive the
-same portfolio figures as the email; use only a private topic or account. Never put
+the scheduler container after changing environment values. By default
+(`ALERT_PUSH_DETAIL=minimal`) a push says only how many new alerts there are and points
+to your email or the dashboard, so no portfolio names, holdings or figures reach the push
+provider. Set `ALERT_PUSH_DETAIL=full` to push the same text as the email instead; then use
+only a private topic or account. Never put
 private URLs or tokens in TOML, commands or git. Legacy report monitoring in TOML
 is supported only for migration; move it to `REPORT_KUMA_PUSH_URL` in `.env`. Push requests
 refuse redirects to protect tokens and portfolio figures.

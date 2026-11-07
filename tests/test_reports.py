@@ -370,3 +370,56 @@ def test_email_dry_run_includes_engine_split_warning(tmp_path, monkeypatch):
     assert message in out.with_suffix(".txt").read_text()
     assert "FERN&lt;&amp;&gt;" in out.read_text()
     assert "FERN<&>" in out.with_suffix(".txt").read_text()
+
+
+def test_report_checkpoints_distinguish_periods_and_subjects(monkeypatch):
+    import json
+
+    import httpx
+
+    from portfolio_digest import mailers
+    from portfolio_digest.delivery import RecipientProgress, track_recipients
+
+    settings = MailSettings(
+        _env_file=None,
+        mailer="postmark",
+        mail_from="sender@example.invalid",
+        postmark_server_token="test-only-token",  # noqa: S106 - fictitious sentinel
+    )
+    recipients = ["first@example.invalid", "second@example.invalid"]
+    config = report_config()
+    config.recipients = recipients
+    attempted = []
+    rejecting = True
+
+    def handle(request):
+        recipient = json.loads(request.content)["To"]
+        attempted.append(recipient)
+        code = 406 if rejecting and recipient == recipients[1] else 0
+        return httpx.Response(200, json={"ErrorCode": code})
+
+    factory = httpx.Client
+    monkeypatch.setattr(
+        mailers.httpx, "Client", lambda **kw: factory(transport=httpx.MockTransport(handle))
+    )
+    with track_recipients(RecipientProgress(set(), lambda: None)):
+        with pytest.raises(MailError):
+            report_service.deliver_report(
+                config, "Report", "Original", "Original", settings=settings, message_id="week-1"
+            )
+        rejecting = False
+        # Refreshed figures in the same reporting period do not resend to the first recipient.
+        report_service.deliver_report(
+            config, "Report", "Refreshed", "Refreshed", settings=settings, message_id="week-1"
+        )
+        assert attempted == recipients + [recipients[1]]
+        attempted.clear()
+        report_service.deliver_report(
+            config, "Report", "Next", "Next", settings=settings, message_id="week-2"
+        )
+        assert attempted == recipients
+        attempted.clear()
+        report_service.deliver_report(
+            config, "Different report", "Next", "Next", settings=settings, message_id="week-2"
+        )
+        assert attempted == recipients

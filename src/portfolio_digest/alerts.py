@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError, runtime_settings
-from portfolio_digest.delivery import portfolio_delivery
+from portfolio_digest.delivery import message_delivery, portfolio_delivery
 from portfolio_digest.formatting import display_number, display_price, display_signed_number
 from portfolio_digest.mailers import MailError, mail_settings, message, send
 from portfolio_digest.models import (
@@ -407,11 +407,15 @@ def _run_portfolio(session, portfolio, config, now, dry_run) -> tuple[str, int] 
         + "".join(f"<p>{escape(line)}</p>" for line in text.splitlines() if line)
         + "</body></html>"
     )
-    send(
-        settings,
-        message(settings.mail_from, recipients, "Portfolio alerts", html, text),
-        recipients,
-    )
+    # Delivery keys include daily close-date pairs. Sorting makes retries independent
+    # of evaluation order, while a changed set of due alerts sends to everyone.
+    message_id = "\0".join(sorted(_delivery_key(trigger) for trigger in due))
+    with message_delivery(message_id):
+        send(
+            settings,
+            message(settings.mail_from, recipients, "Portfolio alerts", html, text),
+            recipients,
+        )
     for trigger in due:
         _record_delivery(session, portfolio, states, trigger, now)
     return text, len(due)

@@ -147,7 +147,8 @@ restarts run one catch-up per schedule for a missed occurrence, retaining its or
 report period, then resume future runs. Intervening skipped occurrences are logged.
 Each failed job stays pending while other schedules continue. Retries start 30 minutes
 after the failed attempt finishes, then wait 60, 120, 240 and at most 360 minutes.
-Retry times, failure counts and successful portfolio deliveries are saved in the existing
+Retry times, failure counts, successful portfolio deliveries and Postmark recipient
+checkpoints are saved in the existing
 JSON file and survive restarts. A partial instrument price fetch advances with warnings;
 if every instrument fails, the price job retries even when FX succeeds. No holdings counts
 as success. Alerts still evaluate committed data after partial fetches.
@@ -157,8 +158,12 @@ Changing a schedule's timing or kind, or removing it, discards its pending occur
 with a log entry; unrelated configuration fields preserve it.
 
 Mail delivery is at least once: a crash after provider acceptance but before saving
-state or committing the database can cause a duplicate. Partial recipient rejection
-also fails the send; some recipients may already have received it. Check the provider
+state or committing the database can cause a duplicate. Postmark attempts every recipient
+and reports only the number of failures. Scheduled retries skip recipients already accepted
+for that report or portfolio, including after a restart or alert transaction rollback.
+Recipient checkpoints store hashes, with no addresses or message contents, and expire when
+the occurrence completes. Manual sends do not use scheduler checkpoints. SMTP partial
+refusals can still leave some recipients with the email. Check the provider
 before a manual retry. Keep the state volume and run only one scheduler replica.
 Inspect it with `docker compose logs scheduler`.
 The scheduler writes `/tmp/scheduler-heartbeat` every time around its loop. Compose

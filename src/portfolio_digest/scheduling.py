@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, f
 
 from portfolio_digest.alert_config import AlertConfig
 from portfolio_digest.config import ConfigError, get_report_settings
+from portfolio_digest.delivery import RecipientProgress, track_recipients
 from portfolio_digest.mailers import address
 
 logger = logging.getLogger(__name__)
@@ -228,6 +229,7 @@ class Pending:
     failures: int = 0
     retry_at: datetime | None = None
     delivered: set[int] = field(default_factory=set)
+    recipients: set[str] = field(default_factory=set)
 
     @classmethod
     def load(cls, due, retry):
@@ -236,12 +238,21 @@ class Pending:
         failures = retry.get("failures", 0)
         delivered = retry.get("delivered", [])
         retry_at = retry.get("retry_at")
+        recipients = retry.get("recipients", [])
         if (
             type(failures) is not int
             or failures < 0
             or not isinstance(delivered, list)
             or any(type(value) is not int or value <= 0 for value in delivered)
             or len(set(delivered)) != len(delivered)
+            or not isinstance(recipients, list)
+            or any(
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(c not in "0123456789abcdef" for c in value)
+                for value in recipients
+            )
+            or len(set(recipients)) != len(recipients)
             or bool(failures) != (retry_at is not None)
         ):
             raise ValueError
@@ -250,6 +261,7 @@ class Pending:
             failures,
             _timestamp(retry_at) if retry_at is not None else None,
             set(delivered),
+            set(recipients),
         )
 
     def retry_state(self):
@@ -257,6 +269,7 @@ class Pending:
             "failures": self.failures,
             "retry_at": self.retry_at.isoformat() if self.retry_at else None,
             "delivered": sorted(self.delivered),
+            "recipients": sorted(self.recipients),
         }
 
 
@@ -337,7 +350,8 @@ class Scheduler:
                     continue
                 checkpoint = DeliveryCheckpoint(item.delivered, save)
                 try:
-                    failed = execute(schedule, item.due, checkpoint) != 0
+                    with track_recipients(RecipientProgress(item.recipients, save)):
+                        failed = execute(schedule, item.due, checkpoint) != 0
                 except ConfigError:
                     raise
                 except Exception:

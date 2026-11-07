@@ -286,6 +286,7 @@ def test_changed_or_removed_schedule_logs_discard(tmp_path, caplog, removed):
         {"delivered": [0]},
         {"delivered": [1, 1]},
         {"delivered": {}},
+        {"recipients_keyed": "true"},
         {"recipients": ["invented-private-token"]},
         {"recipients": {}},
         {"recipients": [True]},
@@ -368,14 +369,14 @@ def test_checkpoint_write_error_is_fatal_and_preserves_previous_file(tmp_path, m
         elif stage == "replace":
             monkeypatch.setattr(Path, "replace", fail)
         else:
-            original_open = Path.open
+            original_open = scheduling.os.open
 
             def open_file(path, *args, **kwargs):
-                if path.suffix == ".new":
+                if str(path).endswith(".new"):
                     fail()
                 return original_open(path, *args, **kwargs)
 
-            monkeypatch.setattr(Path, "open", open_file)
+            monkeypatch.setattr(scheduling.os, "open", open_file)
         checkpoint.complete(1)
 
     with pytest.raises(SchedulerStateError, match="Cannot write scheduler state"):
@@ -901,3 +902,110 @@ def test_default_morning_fetch_follows_us_price_and_fx_closes(day):
     assert due.astimezone(ZoneInfo(config.timezone)).date() == day
     for calendar in (for_exchange("NYSE"), FX):
         assert calendar.latest_closed_day(due) == day - timedelta(days=1)
+
+
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_scheduler_state_and_key_are_private_before_writing(tmp_path, monkeypatch, preexisting):
+    from portfolio_digest import scheduling
+
+    path = tmp_path / "state.json"
+    key_path = tmp_path / "state.json.key"
+    temporary = path.with_suffix(".new")
+    if preexisting:
+        path.write_text("{}")
+        temporary.write_text("old temporary file")
+        key_path.write_bytes(b"k" * 32)
+        for file in (path, temporary, key_path):
+            file.chmod(0o666)
+    dump = scheduling.json.dump
+
+    def private_dump(*args, **kwargs):
+        assert temporary.stat().st_mode & 0o777 == 0o600
+        assert key_path.stat().st_mode & 0o777 == 0o600
+        return dump(*args, **kwargs)
+
+    monkeypatch.setattr(scheduling.json, "dump", private_dump)
+    previous_umask = os.umask(0)
+    try:
+        with pytest.raises(StopLoop):
+            Scheduler(ScheduleConfig(schedules=[weekly()]), path).run(
+                lambda *a: 0,
+                now=lambda: datetime(2026, 10, 25, 0, tzinfo=UTC),
+                sleep=stop,
+            )
+    finally:
+        os.umask(previous_umask)
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert len(key_path.read_bytes()) == 32
+
+
+def test_legacy_recipient_checkpoints_are_keyed_without_resending(tmp_path):
+    from hashlib import sha256
+
+    from portfolio_digest.delivery import message_delivery, portfolio_delivery, recipient_progress
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+    recipient = "first@example.invalid"
+    legacy = sha256(f"portfolio:7\0report-identity\0{recipient}".encode()).hexdigest()
+    state = json.loads(path.read_text())
+    state["weekly:retry"] = {"recipients": [legacy]}
+    path.write_text(json.dumps(state))
+    seen = []
+
+    def execute(*args):
+        with portfolio_delivery(7), message_delivery("report-identity"):
+            progress = recipient_progress()
+            assert progress.key(recipient) in progress.delivered
+            seen.append(progress.key(recipient))
+        return 1
+
+    for minutes in (0, 30):
+        with pytest.raises(StopLoop):
+            Scheduler(config, path).run(
+                execute, now=lambda minutes=minutes: due + timedelta(minutes=minutes), sleep=stop
+            )
+        assert legacy not in path.read_text()
+        assert json.loads(path.read_text())["weekly:retry"]["recipients_keyed"] is True
+    assert seen[0] == seen[1]
+    # The same candidate and scope give a different checkpoint on another install.
+    other_path = tmp_path / "other.json"
+    seed(other_path, config, due)
+    other = []
+
+    def capture(*args):
+        with portfolio_delivery(7), message_delivery("report-identity"):
+            other.append(recipient_progress().key(recipient))
+        return 1
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, other_path).run(capture, now=lambda: due, sleep=stop)
+    assert other[0] != seen[0]
+
+
+@pytest.mark.parametrize("key_contents", [None, b"", b"short", b"k" * 33])
+def test_missing_or_invalid_key_stops_scheduler_without_resetting_progress(tmp_path, key_contents):
+    from portfolio_digest.delivery import recipient_progress
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+
+    def execute(*args):
+        recipient_progress().complete("first@example.invalid")
+        return 1
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: due, sleep=stop)
+    previous = path.read_bytes()
+    key_path = tmp_path / "state.json.key"
+    if key_contents is None:
+        key_path.unlink()
+    else:
+        key_path.write_bytes(key_contents)
+    with pytest.raises(ConfigError, match="checkpoint key"):
+        Scheduler(config, path).run(lambda *a: pytest.fail("Sent without key"))
+    assert path.read_bytes() == previous

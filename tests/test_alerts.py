@@ -1071,7 +1071,7 @@ def test_postmark_partial_failure_keeps_progress_after_alert_rollback(
     # An unchanged set in a different order must still use the same checkpoint.
     monkeypatch.setattr(alerts, "evaluate", lambda *a: dict(reversed(list(evaluated.items()))))
     # Recreate progress as on restart, without retaining an EmailMessage or adapter.
-    with track_recipients(RecipientProgress(set(saved[-1]), lambda: None)):
+    with track_recipients(RecipientProgress(set(saved[-1]), lambda: None, secret=progress.secret)):
         assert alerts.run_alerts(session, rules, now=NOW + timedelta(minutes=30))
     assert attempted == recipients + (recipients if extra_alert else [recipients[1]])
     if extra_alert:

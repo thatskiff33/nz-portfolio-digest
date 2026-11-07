@@ -762,3 +762,26 @@ def test_collective_weekly_fetches_cover_daily_reports():
     assert config.report_timing_warnings() == []
     config.schedules.pop()
     assert config.report_timing_warnings()
+
+
+@pytest.mark.parametrize(
+    "day",
+    [
+        date(2027, 1, 12),  # NZ daylight saving, New York standard time.
+        date(2027, 3, 23),  # Both on daylight saving.
+        date(2027, 7, 13),  # NZ standard time, New York daylight saving.
+    ],
+)
+def test_default_morning_fetch_follows_us_price_and_fx_closes(day):
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+
+    from portfolio_digest.prices.calendars import FX, for_exchange
+
+    config = read_config(Path(__file__).parent.parent / "schedules.toml")
+    morning = next(s for s in config.schedules if s.name == "prices-morning")
+    midnight = datetime.combine(day, datetime.min.time(), ZoneInfo(config.timezone))
+    due = morning.next_run(midnight, config.timezone)
+    assert due.astimezone(ZoneInfo(config.timezone)).date() == day
+    for calendar in (for_exchange("NYSE"), FX):
+        assert calendar.latest_closed_day(due) == day - timedelta(days=1)

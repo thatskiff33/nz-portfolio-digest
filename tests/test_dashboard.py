@@ -3,6 +3,7 @@
 import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -138,7 +139,7 @@ def sample_engine(engine=None):
     return engine
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+@pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.database)])
 def engine_web(request):
     engine = sample_engine(
         request.getfixturevalue("engine") if request.param == "postgres" else None
@@ -755,7 +756,7 @@ def test_dashboard_refuses_missing_or_short_password(engine_web, password):
 
 
 def test_overview_series_values_match_linear_lookup(engine_web, monkeypatch):
-    from portfolio_digest import returns
+    from portfolio_digest import parcels, returns
 
     with Session(engine_web) as session:
         dashboard = Dashboard(session, session.get(Portfolio, 1), DAY - timedelta(days=10), DAY)
@@ -765,11 +766,11 @@ def test_overview_series_values_match_linear_lookup(engine_web, monkeypatch):
             point = max((p for p in points if p.day <= day), key=lambda p: p.day, default=None)
             if point is None:
                 raise ReturnError(f"Missing {label} on or before {day}.")
-            if point.stale or returns._skips_trading_day(calendar, point.day, day, as_of=as_of):
+            if point.stale or parcels._skips_trading_day(calendar, point.day, day, as_of=as_of):
                 flags.add(f"Carried forward {label} for {day} (source {point.day})")
             return point.value
 
-        monkeypatch.setattr(returns, "_lookup", linear_lookup)
+        monkeypatch.setattr(returns, "lookup", linear_lookup)
         assert dashboard.series(DAY - timedelta(days=10), DAY) == actual
 
 
@@ -865,3 +866,63 @@ def test_live_routes_and_dashboard_reuse_frozen_instant(engine_web, monkeypatch,
     assert len(clocks) == 2
     assert len(seen) > 2  # Includes sampled series calculations.
     assert all(value == instant for value in seen)
+
+
+def test_default_morning_fetch_leaves_no_fx_flag_on_summer_tuesday(engine_web, monkeypatch):
+    from portfolio_digest.prices.calendars import FX, for_exchange
+    from portfolio_digest.scheduling import read_config
+    from portfolio_digest.web import app as web_app
+
+    zone = ZoneInfo("Pacific/Auckland")
+    midnight = datetime(2027, 1, 12, tzinfo=zone)
+    instant = midnight.replace(hour=14)
+    config = read_config(Path(__file__).parent.parent / "schedules.toml")
+    fetches = [
+        schedule.next_run(midnight, config.timezone)
+        for schedule in config.schedules
+        if schedule.kind == "prices"
+    ]
+    last_fetch = max(due for due in fetches if due <= instant)
+    # Model a successful provider response containing only sessions closed by the fetch.
+    # At the former 10:30 time, Monday's FX fix would still be unavailable.
+    with Session(engine_web) as session:
+        session.add_all(
+            [
+                Price(
+                    instrument_id=1,
+                    price_date=for_exchange("NZX").latest_closed_day(last_fetch),
+                    close=Decimal("5.25"),
+                    source="test",
+                ),
+                Price(
+                    instrument_id=2,
+                    price_date=for_exchange("NYSE").latest_closed_day(last_fetch),
+                    close=Decimal("22.5"),
+                    source="test",
+                ),
+                FxRate(
+                    rate_date=FX.latest_closed_day(last_fetch),
+                    currency="USD",
+                    base_currency="NZD",
+                    rate=Decimal("1.6"),
+                    source="test",
+                ),
+            ]
+        )
+        session.commit()
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz)
+
+    monkeypatch.setattr(web_app, "datetime", FrozenDatetime)
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        page = client.get("/p/1?period=all")
+    assert page.status_code == 200
+    report = page.context["report"]
+    assert report is not None
+    foreign = next(row for row in report.holdings if row.label == "NYSE:FERN")
+    assert foreign.closing == Decimal("360")
+    assert foreign.flags == ()
+    assert not any("FX" in flag for flag in report.total.flags)

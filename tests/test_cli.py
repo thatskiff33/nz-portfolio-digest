@@ -8,7 +8,7 @@ from portfolio_digest import __version__
 from portfolio_digest.cli import main
 from portfolio_digest.validation import PORTFOLIO_NAME_MAX
 
-UNREACHABLE = "postgresql+psycopg://user:s3cret-pass@127.0.0.1:1/nowhere"
+UNREACHABLE = "postgresql+psycopg://user:s3cret-pass@127.0.0.1:1/nowhere?connect_timeout=2"
 
 
 def test_version(capsys):
@@ -213,3 +213,66 @@ def test_cli_imports_without_fcntl():
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_dividend_suggestion_default_date_is_resolved_when_command_runs(monkeypatch):
+    from contextlib import nullcontext
+    from datetime import UTC, date, datetime
+
+    from sqlalchemy.orm import Session
+    from test_returns_loader import _sqlite_engine
+
+    from portfolio_digest import cli, config
+    from portfolio_digest.models import Instrument, Portfolio
+
+    class ParserDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 11, 6)
+
+    # Build once, then cross Auckland midnight before running the command.
+    monkeypatch.setattr(cli, "date", ParserDate)
+    args = cli.build_parser().parse_args(
+        [
+            "dividends",
+            "suggest",
+            "--portfolio",
+            "Example",
+            "--instrument",
+            "NZX:FERN",
+            "--start",
+            "2026-01-01",
+        ]
+    )
+    engine = _sqlite_engine(monkeypatch)
+    with Session(engine) as session, session.begin():
+        session.add_all(
+            [
+                Portfolio(name="Example"),
+                Instrument(exchange="NZX", code="FERN", name="Fern", currency="NZD"),
+            ]
+        )
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 6, 12, tzinfo=UTC).astimezone(tz)
+
+    class Source:
+        def symbol(self, listing):
+            return listing.code
+
+        def dividends(self, symbol, start, end, currency):
+            assert end == date(2026, 11, 7)
+            return {}
+
+    monkeypatch.setenv("TIMEZONE", "Pacific/Auckland")
+    monkeypatch.setattr(config, "datetime", Clock)
+    monkeypatch.setattr(cli, "make_engine", lambda: engine)
+    monkeypatch.setattr(cli, "make_client", lambda: nullcontext(None))
+    monkeypatch.setattr(cli, "YahooSource", lambda fetcher: Source())
+    try:
+        assert args.func(args) == 0
+    finally:
+        engine.dispose()
+        config.get_settings.cache_clear()

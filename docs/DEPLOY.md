@@ -87,19 +87,24 @@ For rows fetched before this convention was introduced, run
 ### Shared price and report schedule
 
 The `scheduler` container reads `schedules.toml`. This is the one place to change times,
-report periods and recipients. Prices run at 10:30 and 18:30 Auckland time. Weekly reports
+report periods and recipients. Prices run at 11:15 and 18:30 Auckland time. Weekly reports
 run Sunday at 20:00 for the preceding seven completed calendar days. Monthly reports run
 on the 1st at 19:00 for the previous calendar month. Year-end summaries run on 1 April
 at 19:00 for the NZ tax year just ended, one email per NZD portfolio. Weekly and monthly
 reports exclude today's unfinished markets.
-All schedules use `Pacific/Auckland`, including daylight saving. The US FX close can fall
-after the morning fetch during NZ summer, so the evening fetch supplies that day's rate.
+All schedules use `Pacific/Auckland`, including daylight saving. The 11:15 morning fetch
+follows both the US price close and the 17:00 New York FX close in every daylight-saving
+combination. The evening fetch refreshes NZX and ASX prices.
 Monthly and year-end delivery at 19:00 follows that 18:30 fetch. The startup timing
 warning checks schedule order only, not whether the fetch succeeds or finishes.
 
-Existing servers preserve their private `schedules.toml` during deployment. Edit both
-the monthly and year-end entries there to `at = "19:00"`, then restart the scheduler
-with `docker compose restart scheduler`.
+Existing servers preserve their private `schedules.toml` during deployment. Edit the
+`prices-morning` entry there from `at = "10:30"` to `at = "11:15"`. Keep the monthly
+and year-end entries at `at = "19:00"`, then restart the scheduler with
+`docker compose restart scheduler`. The `at` time is part of the schedule identity,
+so restarting after this change can trigger an extra price fetch on the same day.
+Price fetches are safe to repeat: existing price and FX rows are updated by their
+unique day keys, without duplicates; carried-forward values cannot replace fresh data.
 
 If you previously installed the price systemd timer or PR #29's year-end timer, disable
 them before starting the container, so each job has just one scheduler:

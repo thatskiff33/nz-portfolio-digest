@@ -27,6 +27,25 @@ from portfolio_digest.web.viewmodel import Dashboard, period_dates
 ROOT = Path(__file__).parent
 
 
+def group_holdings(holdings, sort, direction):
+    """Validate the requested order, sort holdings and group them by exchange."""
+    if sort not in {"code", "name", "quantity", "price", "value"} or direction not in {
+        "asc",
+        "desc",
+    }:
+        raise HTTPException(400, "Choose a valid sort order.")
+
+    def key(row):
+        value = getattr(row.instrument, sort) if sort in {"code", "name"} else getattr(row, sort)
+        return value is None, value if value is not None else 0
+
+    rows = sorted(holdings, key=key, reverse=direction == "desc")
+    markets = {}
+    for row in rows:
+        markets.setdefault(row.instrument.exchange, []).append(row)
+    return dict(sorted(markets.items()))
+
+
 def create_app(
     engine=None,
     password: str | None = None,
@@ -169,24 +188,7 @@ def create_app(
                     400, "Choose a valid period and dates ending no later than today."
                 ) from None
             values = Dashboard(session, p, begin, finish, as_of=as_of)
-            if sort not in {"code", "name", "quantity", "price", "value"} or direction not in {
-                "asc",
-                "desc",
-            }:
-                raise HTTPException(400, "Choose a valid sort order.")
-
-            def key(row):
-                value = (
-                    getattr(row.instrument, sort)
-                    if sort in {"code", "name"}
-                    else getattr(row, sort)
-                )
-                return value is None, value if value is not None else 0
-
-            rows = sorted(values.holdings, key=key, reverse=direction == "desc")
-            markets = {}
-            for row in rows:
-                markets.setdefault(row.instrument.exchange, []).append(row)
+            markets = group_holdings(values.holdings, sort, direction)
             subtotals = {r.label: r for r in values.report.markets} if values.report else {}
             return render(
                 request,
@@ -198,7 +200,7 @@ def create_app(
                 end=finish,
                 dashboard=values,
                 report=values.report,
-                markets=dict(sorted(markets.items())),
+                markets=markets,
                 subtotals=subtotals,
                 series=values.series(begin, finish),
                 sort=sort,

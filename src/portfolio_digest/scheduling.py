@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from portfolio_digest.alert_config import AlertConfig
-from portfolio_digest.config import ConfigError, get_report_settings
+from portfolio_digest.config import ConfigError, get_report_settings, runtime_settings
 from portfolio_digest.mailers import address
 
 logger = logging.getLogger(__name__)
@@ -277,6 +277,10 @@ class Scheduler:
     def run(self, execute, *, now=None, sleep=clock.sleep, notify=None) -> int:
         from portfolio_digest.operations import THROTTLE, failure_text, recovery_text
 
+        if self.config.timezone != runtime_settings().timezone:
+            raise ConfigError(
+                "TIMEZONE and schedules.toml timezone must agree before starting the scheduler."
+            )
         for warning in self.config.report_timing_warnings():
             logger.warning("%s", warning)
         now = now or (lambda: datetime.now(UTC))

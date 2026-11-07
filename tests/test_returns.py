@@ -1,9 +1,10 @@
 """All figures and securities are invented; expected answers are hand-worked."""
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal as D
 from decimal import getcontext, localcontext
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -485,6 +486,19 @@ def test_holdings_sold_before_the_period_are_left_out():
     assert report.total.amounts.dividends == 1
 
 
+def test_opening_sale_cannot_exceed_historical_holdings():
+    h = holding(trades=[trade(quantity="10"), trade(START, "sell", "11")])
+    with pytest.raises(ReturnError, match="sale exceeds held quantity"):
+        calculate_returns((h,), START, END, {})
+
+
+@pytest.mark.parametrize("kind", ["buy", "sell"])
+def test_base_currency_transaction_fx_must_be_one(kind):
+    h = holding(trades=[trade(), trade(MID, kind, "1", fx="1.1")])
+    with pytest.raises(ReturnError, match="Base-currency FX must be one"):
+        calculate_returns((h,), START, END, {})
+
+
 def test_large_transfer_in_counts_towards_portfolio_denominator():
     # Invented QS-023 scenario: NZ$1,000 portfolio, NZ$100,000 transferred in, +NZ$10,000.
     existing = replace(holding(trades=[trade(quantity="100")], p0="10", p1="10"), code="EXISTING")
@@ -578,14 +592,14 @@ def test_lookup_matches_linear_selection_with_logarithmic_work(monkeypatch):
     from bisect import bisect_left, bisect_right
     from datetime import timedelta
 
-    from portfolio_digest import returns
+    from portfolio_digest import parcels
     from portfolio_digest.prices.calendars import for_exchange
 
     first = date(2000, 1, 1)
     observations = [Observation(first + timedelta(days=n), D(n)) for n in range(10_000)]
     # Stable ordering must keep the original first observation on a duplicate date.
     observations.insert(4001, Observation(observations[4000].day, D(99999)))
-    points = returns.ObservationSeries(reversed(observations))
+    points = parcels.ObservationSeries(reversed(observations))
     reads = 0
 
     def counted(bisect):
@@ -599,18 +613,18 @@ def test_lookup_matches_linear_selection_with_logarithmic_work(monkeypatch):
 
         return search
 
-    monkeypatch.setattr(returns, "bisect_left", counted(bisect_left))
-    monkeypatch.setattr(returns, "bisect_right", counted(bisect_right))
+    monkeypatch.setattr(parcels, "bisect_left", counted(bisect_left))
+    monkeypatch.setattr(parcels, "bisect_right", counted(bisect_right))
     for n in range(180):
         day = first + timedelta(days=9999 * n // 179)
         flags = set()
         expected = max((p for p in points if p.day <= day), key=lambda p: p.day)
-        assert returns._lookup(points, day, "price", flags, for_exchange("NZX")) == expected.value
+        assert parcels.lookup(points, day, "price", flags, for_exchange("NZX")) == expected.value
         assert flags == set()
     # A linear scan would inspect 1.8 million observations for these samples.
     assert 0 < reads < 30 * 180
     with pytest.raises(ReturnError, match="Missing price"):
-        returns._lookup(points, first - timedelta(days=1), "price", set(), for_exchange("NZX"))
+        parcels.lookup(points, first - timedelta(days=1), "price", set(), for_exchange("NZX"))
 
 
 def test_sampled_valuations_do_not_scan_price_history():
@@ -682,3 +696,33 @@ def test_us_venues_do_not_flag_thanksgiving_as_missing(exchange):
     wednesday, thanksgiving = date(2026, 11, 25), date(2026, 11, 26)
     h = replace(holding(), exchange=exchange, prices=(Observation(wednesday, D(50)),))
     assert not holding_return(h, wednesday, thanksgiving, {}).flags
+
+
+@pytest.mark.parametrize(
+    "day,exchange,currency,close_hour,close_minute",
+    [
+        (date(2026, 11, 3), "NZX", "NZD", 17, 0),
+        (date(2026, 11, 3), "ASX", "AUD", 18, 15),
+        (date(2026, 7, 14), "NZX", "NZD", 17, 0),
+        (date(2026, 7, 14), "ASX", "AUD", 18, 15),
+        # NZ daylight saving starts before Sydney's, putting its close an hour later.
+        (date(2026, 9, 29), "ASX", "AUD", 19, 15),
+    ],
+)
+def test_live_nzx_and_asx_prices_become_due_at_local_close(
+    day, exchange, currency, close_hour, close_minute
+):
+    monday = day - timedelta(days=1)
+    h = replace(holding(currency), exchange=exchange, prices=(Observation(monday, D(50)),))
+    rates = {"AUD": (Observation(monday, D("1.1")),)} if currency == "AUD" else {}
+    close = datetime(
+        day.year, day.month, day.day, close_hour, close_minute, tzinfo=ZoneInfo("Pacific/Auckland")
+    )
+    before = holding_return(h, monday, day, rates, as_of=close - timedelta(seconds=1))
+    assert before.flags == ()
+    for instant in (close, close + timedelta(minutes=1)):
+        overdue = holding_return(h, monday, day, rates, as_of=instant)
+        assert len(overdue.flags) == 1
+        assert "price" in overdue.flags[0]
+        refreshed = replace(h, prices=(*h.prices, Observation(day, D(51))))
+        assert holding_return(refreshed, monday, day, rates, as_of=instant).flags == ()

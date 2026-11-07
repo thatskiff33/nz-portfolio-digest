@@ -77,3 +77,9 @@ def no_settings_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 def isolated_scheduler_state(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep operations notice state out of the checkout when a command records an outcome."""
     monkeypatch.setenv("SCHEDULER_STATE", str(tmp_path / "state" / "scheduler.json"))
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if "database_url" in item.fixturenames:
+            item.add_marker(pytest.mark.database)

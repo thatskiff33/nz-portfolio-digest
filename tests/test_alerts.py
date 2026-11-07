@@ -995,6 +995,27 @@ def test_cli_partial_fetch_advances_but_total_failure_remains_pending(
     assert (state["prices:retry"]["retry_at"] is None) is partial
 
 
+@pytest.mark.parametrize(
+    ("closing", "percent", "values"),
+    [("9.1875", "-8.13%", "100.00 to 91.88 NZD"), ("9.9875", "-0.13%", "100.00 to 99.88 NZD")],
+)
+def test_alert_percentages_round_half_up_like_other_channels(sample, closing, percent, values):
+    session, portfolio, instrument = sample
+    price = session.scalar(
+        select(Price).where(
+            Price.instrument_id == instrument.id, Price.price_date == date(2026, 10, 16)
+        )
+    )
+    price.close = D(closing)
+    session.commit()
+    states = alerts.evaluate(
+        session, portfolio, config(daily_percent=D("0.1"), portfolio_drop_percent=D("0.1")), NOW
+    )
+    assert f"moved {percent} " in states["daily:NZX:MADEUP"].text
+    assert f"changed {percent} " in states["portfolio"].text
+    assert values in states["portfolio"].text
+
+
 def test_postmark_partial_failure_keeps_progress_after_alert_rollback(sample, monkeypatch):
     import json
 

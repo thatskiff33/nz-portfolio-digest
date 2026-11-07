@@ -8,6 +8,7 @@ from decimal import Decimal, localcontext
 from functools import wraps
 from typing import ParamSpec, TypeVar
 
+from portfolio_digest.models import FINANCIAL_PRECISION
 from portfolio_digest.prices.calendars import FX, TradingCalendar
 
 ZERO = Decimal(0)
@@ -21,7 +22,7 @@ def financial_math(function: Callable[P, T]) -> Callable[P, T]:
     @wraps(function)
     def exact(*args: P.args, **kwargs: P.kwargs) -> T:
         with localcontext() as context:
-            context.prec = max(context.prec, 80)
+            context.prec = max(context.prec, FINANCIAL_PRECISION)
             return function(*args, **kwargs)
 
     return exact

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from portfolio_digest.config import Settings, get_settings
 from portfolio_digest.db import make_engine
-from portfolio_digest.formatting import display_quantity
+from portfolio_digest.formatting import display_number, display_quantity
 from portfolio_digest.importers.base import FileProblem, RowProblem
 from portfolio_digest.importing import ImportFailure, undo_import
 from portfolio_digest.manual import add_trade, prepare_trade
@@ -27,6 +27,9 @@ from portfolio_digest.web.security import ANONYMOUS_LIFETIME, LIFETIME, Security
 from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
 ROOT = Path(__file__).parent
+# Dashboard forms are small; refuse anything larger before parsing it.
+FORM_MAX_BYTES = 64 * 1024
+FORM_MAX_FIELDS = 30
 
 
 def safe_next(value: str) -> str:
@@ -86,7 +89,7 @@ def create_app(
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.security = security
     templates = Jinja2Templates(directory=ROOT / "templates")
-    templates.env.filters["money"] = lambda n: "Unavailable" if n is None else f"{n:,.2f}"
+    templates.env.filters["money"] = lambda n: "Unavailable" if n is None else display_number(n)
     templates.env.filters["quantity"] = display_quantity
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
@@ -169,12 +172,12 @@ def create_app(
         parts = []
         async for chunk in request.stream():
             size += len(chunk)
-            if size > 65536:
+            if size > FORM_MAX_BYTES:
                 raise HTTPException(413, "Form too large.")
             parts.append(chunk)
         request._body = b"".join(parts)
 
-        data = await request.form(max_fields=30, max_files=0)
+        data = await request.form(max_fields=FORM_MAX_FIELDS, max_files=0)
         security.csrf(request, str(data.get("csrf", "")))
         return data
 

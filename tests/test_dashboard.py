@@ -25,8 +25,11 @@ from portfolio_digest.models import (
     Split,
     Trade,
 )
+from portfolio_digest.reports import build_report
+from portfolio_digest.reports import render as render_email
 from portfolio_digest.returns import ReturnError, instrument_position
 from portfolio_digest.returns_loader import load_returns
+from portfolio_digest.returns_table import render_table
 from portfolio_digest.web.app import create_app
 from portfolio_digest.web.binding import private_host
 from portfolio_digest.web.security import COOKIE
@@ -981,6 +984,59 @@ def test_holding_future_activity_does_not_invert_report_dates(engine_web):
     assert response.context["returns_error"] is None
     # Future ledger rows remain visible, but are excluded from valuation inputs.
     assert len(response.context["trades"]) == 1
+
+
+def test_dashboard_cli_and_email_round_the_same_value_half_up():
+    """A closing value of 8.125 and a gain of 0.125 read 8.13 and 0.13 in every channel."""
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    metadata = MetaData()
+    for table in Base.metadata.sorted_tables:
+        copy = table.to_metadata(metadata)
+        for constraint in list(copy.constraints):
+            if isinstance(constraint, CheckConstraint):
+                copy.constraints.remove(constraint)
+    metadata.create_all(engine)
+    start = DAY - timedelta(days=10)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                Portfolio(name="Tōtara Fund", base_currency="NZD"),
+                Instrument(exchange="NZX", code="TOT", name="Tōtara Mills", currency="NZD"),
+            ]
+        )
+        session.flush()
+        session.add_all(
+            [
+                Trade(
+                    portfolio_id=1,
+                    instrument_id=1,
+                    trade_date=start,
+                    trade_type="buy",
+                    quantity=Decimal("1"),
+                    price=Decimal("8"),
+                    currency="NZD",
+                    fees=Decimal("0"),
+                    source="test",
+                    external_ref="fake-half",
+                ),
+                Price(instrument_id=1, price_date=start, close=Decimal("8"), source="test"),
+                Price(instrument_id=1, price_date=DAY, close=Decimal("8.125"), source="test"),
+            ]
+        )
+        session.commit()
+        cli = render_table(load_returns(session, "Tōtara Fund", "all", DAY))
+        email_html, email_text = render_email(build_report(session, start, DAY))
+    with TestClient(create_app(engine, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
+        dashboard = client.get(f"/p/1?period=custom&start={start}&end={DAY}").text
+    engine.dispose()
+    for channel in (dashboard, cli, email_html, email_text):
+        # Whole two-place numbers only, so full-precision chart data does not match.
+        shown = set(re.findall(r"(?<![\d.])\d+\.\d\d(?![\d.])", channel))
+        assert {"8.13", "0.13"} <= shown
+        assert not {"8.12", "0.12"} & shown
 
 
 @pytest.mark.parametrize("day,stale", [(21, False), (22, True)])

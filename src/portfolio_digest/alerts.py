@@ -16,14 +16,21 @@ from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError, runtime_settings
 from portfolio_digest.delivery import portfolio_delivery
-from portfolio_digest.formatting import display_price
+from portfolio_digest.formatting import display_number, display_price, display_signed_number
 from portfolio_digest.mailers import MailError, mail_settings, message, send
-from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
+from portfolio_digest.models import (
+    FINANCIAL_PRECISION,
+    AlertState,
+    Instrument,
+    Portfolio,
+    Price,
+    Split,
+    Trade,
+)
 from portfolio_digest.pings import NoRedirect
 from portfolio_digest.prices.calendars import FX, for_exchange
 from portfolio_digest.returns import ReturnError, units_at
 from portfolio_digest.returns_loader import load_returns
-from portfolio_digest.returns_table import format_number as money
 from portfolio_digest.scheduling import SchedulerStateError
 from portfolio_digest.splits import rescale_price
 
@@ -187,7 +194,7 @@ def evaluate(session, portfolio, config, now, skipped: list[tuple[str, str]] | N
             states[key] = (
                 Trigger(
                     key,
-                    f"{label} moved {movement:+.2f}% ({start} to {end}); "
+                    f"{label} moved {display_signed_number(movement)}% ({start} to {end}); "
                     f"closing prices {display_price(opening)} to {display_price(prices[end])} "
                     f"{instrument.currency} "
                     "(split-adjusted).",
@@ -243,12 +250,13 @@ def evaluate(session, portfolio, config, now, skipped: list[tuple[str, str]] | N
             _skip(skipped, "portfolio", "opening value is not positive")
         else:
             change = total.change / total.opening * Decimal(100)
+            opening, closing = display_number(total.opening), display_number(total.closing)
             states["portfolio"] = (
                 Trigger(
                     "portfolio",
-                    f"Portfolio value changed {change:+.2f}% over {rules.period_days} days "
-                    f"({start} to {end}): "
-                    f"{money(total.opening)} to {money(total.closing)} {report.base_currency}.",
+                    f"Portfolio value changed {display_signed_number(change)}% "
+                    f"over {rules.period_days} days ({start} to {end}): "
+                    f"{opening} to {closing} {report.base_currency}.",
                 )
                 if change < -rules.portfolio_drop_percent
                 else None
@@ -269,7 +277,7 @@ def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
     failed = False
     portfolio_ids = session.scalars(select(Portfolio.id).order_by(Portfolio.id)).all()
     with localcontext() as context:
-        context.prec = max(context.prec, 80)
+        context.prec = max(context.prec, FINANCIAL_PRECISION)
         for portfolio_id in portfolio_ids:
             if not dry_run and checkpoint and portfolio_id in checkpoint.delivered:
                 continue

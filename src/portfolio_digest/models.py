@@ -59,10 +59,23 @@ class ExactNumeric(TypeDecorator[Decimal]):
         return value
 
 
+# Numeric(precision, scale) of each kind of column. Parsers and price sources check values
+# against these so nothing is rounded or refused by the database itself.
 # Quantities allow fractional shares (Sharesies sells fractions).
-Quantity = ExactNumeric(24, 8)
-Money = ExactNumeric(20, 6)
-Rate = ExactNumeric(20, 10)
+QUANTITY_PRECISION, QUANTITY_SCALE = 24, 8
+MONEY_PRECISION, MONEY_SCALE = 20, 6
+RATE_PRECISION, RATE_SCALE = 20, 10
+# Exclusive magnitude limits: the integer digits each column leaves room for.
+QUANTITY_LIMIT = Decimal(10) ** (QUANTITY_PRECISION - QUANTITY_SCALE)
+MONEY_LIMIT = Decimal(10) ** (MONEY_PRECISION - MONEY_SCALE)
+RATE_LIMIT = Decimal(10) ** (RATE_PRECISION - RATE_SCALE)
+# Decimal context precision for financial arithmetic: a product of a quantity, a price and
+# a rate needs 64 digits, and the rest is headroom for subtraction and aggregation.
+FINANCIAL_PRECISION = 80
+
+Quantity = ExactNumeric(QUANTITY_PRECISION, QUANTITY_SCALE)
+Money = ExactNumeric(MONEY_PRECISION, MONEY_SCALE)
+Rate = ExactNumeric(RATE_PRECISION, RATE_SCALE)
 
 PORTFOLIO_NAME_UNIQUE = "uq_portfolios_name_lower"
 

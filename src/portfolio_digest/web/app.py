@@ -1,8 +1,8 @@
 """Server-rendered private dashboard. No portfolio data leaves this server."""
 
-import os
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlencode
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from portfolio_digest.config import Settings, get_settings
 from portfolio_digest.db import make_engine
 from portfolio_digest.formatting import display_quantity
 from portfolio_digest.importers.base import FileProblem, RowProblem
@@ -21,10 +22,29 @@ from portfolio_digest.models import ImportRun, Income, Instrument, Portfolio, Tr
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
 from portfolio_digest.returns import ReturnError, holding_return
 from portfolio_digest.returns_loader import first_activity_date, load_portfolio_inputs
-from portfolio_digest.web.security import COOKIE, LIFETIME, Security
+from portfolio_digest.web.hosts import DashboardTrustedHostMiddleware
+from portfolio_digest.web.security import ANONYMOUS_LIFETIME, LIFETIME, Security
 from portfolio_digest.web.viewmodel import Dashboard, period_dates
 
 ROOT = Path(__file__).parent
+
+
+def safe_next(value: str) -> str:
+    """Accept only local paths, including after URL decoding by a browser."""
+    decoded = value
+    for _ in range(5):
+        if (
+            not decoded.startswith("/")
+            or decoded.startswith("//")
+            or chr(92) in decoded
+            or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
+        ):
+            return "/"
+        expanded = unquote(decoded)
+        if expanded == decoded:
+            return value
+        decoded = expanded
+    return "/"
 
 
 def create_app(
@@ -32,11 +52,17 @@ def create_app(
     password: str | None = None,
     *,
     timezone="Pacific/Auckland",
-    secure_cookie: bool = False,
+    secure_cookie: bool | None = None,
+    settings: Settings | None = None,
 ) -> FastAPI:
+    settings = settings or (
+        get_settings() if engine is None else Settings(database_url=str(engine.url))
+    )
     engine = engine if engine is not None else make_engine()
+    secure_cookie = settings.dashboard_secure_cookie if secure_cookie is None else secure_cookie
     security = Security(
-        password if password is not None else os.environ.get("DASHBOARD_PASSWORD", "")
+        password if password is not None else settings.dashboard_password.get_secret_value(),
+        secure_cookie=secure_cookie,
     )
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.security = security
@@ -53,12 +79,27 @@ def create_app(
     @app.middleware("http")
     async def headers(request: Request, call_next):
         try:
-            if request.url.path != "/healthz" and not request.url.path.startswith("/static/"):
-                request.state.session_id, request.state.browser = security.browser(request)
+            request.state.session_id, request.state.browser = security.browser(request)
+            public = (
+                request.url.path == "/login"
+                or (request.url.path == "/logout" and request.method == "POST")
+                or request.url.path == "/static"
+                or request.url.path.startswith("/static/")
+            )
+            if not public and not request.state.browser.authenticated:
+                if request.method in {"GET", "HEAD"}:
+                    target = request.url.path
+                    if request.url.query:
+                        target += "?" + request.url.query
+                    response = RedirectResponse(
+                        "/login?" + urlencode({"next": target}), status_code=303
+                    )
+                else:
+                    response = HTMLResponse("Sign in to view your portfolio.", status_code=401)
+            else:
+                response = await call_next(request)
         except HTTPException as exc:
             response = HTMLResponse(str(exc.detail), status_code=exc.status_code)
-        else:
-            response = await call_next(request)
         response.headers.update(
             {
                 "Content-Security-Policy": "default-src 'self'; script-src 'self'; "
@@ -74,9 +115,9 @@ def create_app(
         )
         if getattr(request.state, "session_id", ""):
             response.set_cookie(
-                COOKIE,
+                security.cookie,
                 request.state.session_id,
-                max_age=LIFETIME,
+                max_age=LIFETIME if request.state.browser.authenticated else ANONYMOUS_LIFETIME,
                 httponly=True,
                 samesite="strict",
                 secure=secure_cookie,
@@ -129,14 +170,17 @@ def create_app(
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):
         request.state.session_id, request.state.browser = security.browser(request, create=True)
-        with Session(engine) as session:
-            return render(request, session, "login.html")
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={"next_path": safe_next(request.query_params.get("next", "/"))},
+        )
 
     @app.post("/login")
     async def login(request: Request):
         data = await form(request, login=False)
         security.login(request, str(data.get("password", "")))
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse(safe_next(str(data.get("next", "/"))), status_code=303)
 
     @app.post("/logout")
     async def logout(request: Request):
@@ -144,7 +188,9 @@ def create_app(
         security.sessions.pop(request.state.session_id, None)
         request.state.session_id, request.state.browser = security.browser(request)
         response = RedirectResponse("/", status_code=303)
-        response.delete_cookie(COOKIE, httponly=True, samesite="strict", secure=secure_cookie)
+        response.delete_cookie(
+            security.cookie, httponly=True, samesite="strict", secure=secure_cookie
+        )
         return response
 
     @app.get("/p/{pid}", response_class=HTMLResponse)
@@ -344,6 +390,12 @@ def create_app(
                 ) from None
             return render(request, session, "reconcile.html", portfolio=p, differences=differences)
 
+    app.add_middleware(
+        DashboardTrustedHostMiddleware,
+        allowed_hosts=[settings.dashboard_bind, "127.0.0.1", "localhost"]
+        + [host.strip() for host in settings.dashboard_hostnames.split(",") if host.strip()],
+        www_redirect=False,
+    )
     return app
 
 
@@ -351,14 +403,11 @@ def main():
     """Compose entry point, with one worker for shared sessions and throttling."""
     import uvicorn
 
-    from portfolio_digest.config import get_settings
     from portfolio_digest.web.binding import private_host
 
-    private_host(os.environ.get("DASHBOARD_BIND", "127.0.0.1"))
-    app = create_app(
-        timezone=get_settings().timezone,
-        secure_cookie=os.environ.get("DASHBOARD_SECURE_COOKIE", "false").lower() == "true",
-    )
+    settings = get_settings()
+    private_host(settings.dashboard_bind)
+    app = create_app(timezone=settings.timezone, settings=settings)
     uvicorn.run(app, host="0.0.0.0", port=8000, proxy_headers=False, access_log=False)  # noqa: S104
 
 

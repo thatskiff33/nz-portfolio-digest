@@ -107,7 +107,8 @@ while you are logged out.
 The Compose command reads credentials from the project's `.env`. Build the image and run
 migrations after deploying changes. Use your scheduler's non-zero exit alerts for drift.
 Optionally create a Push monitor in Uptime Kuma with a heartbeat interval longer than a day
-(e.g. 26 hours) and set `UPTIME_KUMA_PUSH_URL` to its full push URL in `.env`. A successful
+(e.g. 26 hours) and set `UPTIME_KUMA_PUSH_URL` to its full push URL in `.env`. It must use
+HTTPS unless it points at `localhost` or a Tailscale address; redirects count as a failure. A successful
 committed match sends `status=up`. Drift and fetch failures send no success ping; a missed
 heartbeat alerts. A failed push exits non-zero while retaining the committed snapshot.
 429 responses retry up to five attempts with exponential backoff and bounded Retry-After;

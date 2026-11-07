@@ -246,6 +246,62 @@ def test_dashboard_equals_returns_engine(engine_web, period):
         assert "Returns engine has not landed" not in response.text
 
 
+def test_dashboard_counts_transfer_in_towards_denominator(engine_web):
+    """Invented QS-023 scenario: NZ$1,000 portfolio receives a NZ$100,000 transfer in."""
+    with Session(engine_web) as session:
+        portfolio = Portfolio(name="Transfer Fund")
+        keep = Instrument(exchange="NZX", code="KEEP", name="Keep", currency="NZD")
+        moved = Instrument(exchange="NZX", code="MOVED", name="Moved", currency="NZD")
+        session.add_all([portfolio, keep, moved])
+        session.flush()
+        for instrument, day, kind, quantity in (
+            (keep, date(2026, 10, 1), "buy", 100),
+            (moved, date(2026, 10, 15), "adjustment", 10000),
+        ):
+            session.add(
+                Trade(
+                    portfolio_id=portfolio.id,
+                    instrument_id=instrument.id,
+                    trade_date=day,
+                    trade_type=kind,
+                    quantity=Decimal(quantity),
+                    price=Decimal(10),
+                    currency="NZD",
+                    fees=Decimal(0),
+                    source="test",
+                    external_ref=f"transfer-{instrument.code}",
+                )
+            )
+        for instrument, day, close in (
+            (keep, date(2026, 10, 12), 10),
+            (keep, date(2026, 10, 19), 10),
+            (moved, date(2026, 10, 12), 10),
+            (moved, date(2026, 10, 19), 11),
+        ):
+            session.add(
+                Price(
+                    instrument_id=instrument.id,
+                    price_date=day,
+                    close=Decimal(close),
+                    source="test",
+                )
+            )
+        session.commit()
+        pid = portfolio.id
+        expected = load_returns(session, "Transfer Fund", "2026-10-12:2026-10-19", DAY)
+    rows = {r.label: r for r in expected.holdings}
+    assert rows["NZX:MOVED"].percentages.total == Decimal(10)
+    assert expected.markets[0].denominator == expected.total.denominator == Decimal(101000)
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        response = client.get(f"/p/{pid}?period=custom&start=2026-10-12&end=2026-10-19")
+    assert response.status_code == 200
+    assert response.context["report"] == expected
+    assert "10.00%" in response.text
+    assert "9.90%" in response.text
+    for result in (*expected.holdings, *expected.markets, expected.total):
+        assert f"{result.percentages.total:,.2f}%" in response.text
+
+
 def test_holding_detail_income_matches_engine(engine_web):
     with Session(engine_web) as session:
         expected = load_returns(
@@ -705,11 +761,11 @@ def test_overview_series_values_match_linear_lookup(engine_web, monkeypatch):
         dashboard = Dashboard(session, session.get(Portfolio, 1), DAY - timedelta(days=10), DAY)
         actual = dashboard.series(DAY - timedelta(days=10), DAY)
 
-        def linear_lookup(points, day, label, flags, calendar):
+        def linear_lookup(points, day, label, flags, calendar, *, as_of=None):
             point = max((p for p in points if p.day <= day), key=lambda p: p.day, default=None)
             if point is None:
                 raise ReturnError(f"Missing {label} on or before {day}.")
-            if point.stale or returns._skips_trading_day(calendar, point.day, day):
+            if point.stale or returns._skips_trading_day(calendar, point.day, day, as_of=as_of):
                 flags.add(f"Carried forward {label} for {day} (source {point.day})")
             return point.value
 
@@ -773,3 +829,39 @@ def test_holding_future_activity_does_not_invert_report_dates(engine_web):
     assert response.context["returns_error"] is None
     # Future ledger rows remain visible, but are excluded from valuation inputs.
     assert len(response.context["trades"]) == 1
+
+
+@pytest.mark.parametrize("day,stale", [(21, False), (22, True)])
+def test_live_routes_and_dashboard_reuse_frozen_instant(engine_web, monkeypatch, day, stale):
+    from portfolio_digest.web import app as web_app
+    from portfolio_digest.web import viewmodel
+
+    instant = datetime(2026, 10, day, 9, tzinfo=ZoneInfo("Pacific/Auckland"))
+    clocks = []
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            clocks.append(tz)
+            return instant.astimezone(tz)
+
+    monkeypatch.setattr(web_app, "datetime", FrozenDatetime)
+    seen = []
+    calculate = viewmodel.calculate_returns
+
+    def capture(*args, **kwargs):
+        seen.append(kwargs.get("as_of"))
+        return calculate(*args, **kwargs)
+
+    monkeypatch.setattr(viewmodel, "calculate_returns", capture)
+    with TestClient(create_app(engine_web, PASSWORD)) as client:
+        page = client.get("/p/1?period=all")
+        detail = client.get("/p/1/holding/2")
+    assert page.status_code == detail.status_code == 200
+    row = next(r for r in page.context["report"].holdings if r.label == "NYSE:FERN")
+    assert bool(row.flags) == stale
+    assert detail.context["result"].flags == row.flags
+    assert page.context["end"] == instant.date()
+    assert len(clocks) == 2
+    assert len(seen) > 2  # Includes sampled series calculations.
+    assert all(value == instant for value in seen)

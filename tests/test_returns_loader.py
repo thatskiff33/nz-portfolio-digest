@@ -1,6 +1,6 @@
 """Exercise the real SQL loader and CLI using entirely invented database rows."""
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal as D
 
 import pytest
@@ -309,7 +309,9 @@ def test_loader_applies_splits_and_non_cash_adjustments_and_drops_old_sales(retu
     assert (r.total.opening, r.total.closing, r.total.adjustments) == (D(96), D(119), D(6))
     # Split units: 16 x (7 - 6) = 16. DRP unit: 7 - 6 = 1.
     assert r.total.amounts.capital == 17 and r.total.flags == ()
-    assert r.total.percentages.total.quantize(D(".01")) == D("17.71")
+    # The DRP's 6 of value moved in joins the denominator: 17 / (96 + 6).
+    assert r.total.denominator == D(102)
+    assert r.total.percentages.total.quantize(D(".01")) == D("16.67")
 
 
 @pytest.mark.parametrize(
@@ -706,19 +708,88 @@ def test_email_keeps_nzd_trades_and_income_native_in_foreign_portfolio(returns_e
         assert native.holdings == (row,)
 
 
-def test_named_and_portfolio_loaders_share_complete_inputs(returns_engine):
+@pytest.mark.parametrize("as_of", [None, datetime(2026, 10, 19, 0, tzinfo=UTC)])
+def test_named_and_portfolio_loaders_share_complete_inputs(returns_engine, as_of):
     from portfolio_digest.returns_loader import PortfolioInputs, load_inputs, load_portfolio_inputs
 
     with Session(returns_engine) as session:
         portfolio = session.scalar(select(Portfolio).where(Portfolio.name == "Invented"))
         start, end = date(2026, 10, 12), date(2026, 10, 19)
-        named = load_inputs(session, "invented", f"{start}:{end}")
-        direct = load_portfolio_inputs(session, portfolio, start, end)
+        named = load_inputs(session, "invented", f"{start}:{end}", today=end, as_of=as_of)
+        direct = load_portfolio_inputs(session, portfolio, start, end, as_of=as_of)
         assert isinstance(named, PortfolioInputs)
         assert named == direct
+        assert named.as_of == as_of
         assert named.start == start and named.end == end
         assert named.income and named.instruments and named.holdings and named.rates
         assert named.holdings[0].income[0].amount == D(4)
+
+
+def test_transfer_in_denominator_agrees_across_loader_email_and_cli(monkeypatch, capsys):
+    """Invented QS-023 scenario: NZ$1,000 portfolio receives a NZ$100,000 transfer in."""
+    from portfolio_digest.reports import build_report, render
+    from portfolio_digest.returns_table import render_table
+
+    engine = _sqlite_engine(monkeypatch)
+    with Session(engine) as session:
+        portfolio = Portfolio(name="Transfer example", base_currency="NZD")
+        existing = Instrument(exchange="NZX", code="KEEP", name="Keep", currency="NZD")
+        moved = Instrument(exchange="NZX", code="MOVED", name="Moved", currency="NZD")
+        session.add_all([portfolio, existing, moved])
+        session.flush()
+
+        def row(instrument, day, kind, quantity, ref):
+            return Trade(
+                portfolio_id=portfolio.id,
+                instrument_id=instrument.id,
+                trade_date=day,
+                trade_type=kind,
+                quantity=D(quantity),
+                price=D(10),
+                currency="NZD",
+                fees=D(0),
+                source="made_up",
+                external_ref=ref,
+            )
+
+        session.add_all(
+            [
+                row(existing, date(2026, 10, 1), "buy", 100, "keep"),
+                row(moved, date(2026, 10, 15), "adjustment", 10000, "transfer-in"),
+                *(
+                    Price(instrument_id=i.id, price_date=day, close=D(close), source="made_up")
+                    for i, day, close in (
+                        (existing, date(2026, 10, 12), 10),
+                        (existing, date(2026, 10, 19), 10),
+                        (moved, date(2026, 10, 12), 10),
+                        (moved, date(2026, 10, 19), 11),
+                    )
+                ),
+            ]
+        )
+        session.commit()
+        shared = load_returns(session, "Transfer example", "2026-10-12:2026-10-19")
+        email = build_report(session, date(2026, 10, 13), date(2026, 10, 19))
+    rows = {r.label: r for r in shared.holdings}
+    assert rows["NZX:MOVED"].denominator == D(100000)
+    assert rows["NZX:MOVED"].percentages.total == D(10)
+    assert shared.total.denominator == D(101000)
+    assert shared.total.amounts.total == D(10000)
+    assert email.returns.holdings == shared.holdings
+    assert email.returns.total == shared.total
+    assert email.returns.total.denominator == D(101000)
+    assert email.total_return == D(10000)
+    html, text = render(email)
+    assert "10,000.00" in html and "10,000.00" in text
+    monkeypatch.setattr("portfolio_digest.cli.make_engine", lambda: engine)
+    period = ["--period", "2026-10-12:2026-10-19"]
+    assert main(["returns", "--portfolio", "Transfer example", *period]) == 0
+    out = capsys.readouterr().out
+    assert out == render_table(email.returns) + "\n"
+    assert "10,000.00 (10.00%)" in out and "10,000.00 (9.90%)" in out
+    assert "n/a" not in out
+    engine.dispose()
+    get_settings.cache_clear()
 
 
 @pytest.mark.parametrize("foreign_base", [False, True])
@@ -763,6 +834,88 @@ def test_email_loads_history_once_and_renders_identically(returns_engine, foreig
     assert actual == expected
     assert render(actual) == render(expected)
     assert len(reads) == 4  # One price and FX read per portfolio, regardless of samples.
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_loader_live_date_and_freshness_share_one_instant(returns_engine, monkeypatch, live):
+    from portfolio_digest import returns_loader
+
+    instant = datetime(2026, 10, 12, 22, tzinfo=UTC)
+    calls = []
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            calls.append(tz)
+            return instant.astimezone(tz)
+
+    monkeypatch.setenv("TIMEZONE", "Pacific/Auckland")
+    get_settings.cache_clear()
+    monkeypatch.setattr(returns_loader, "datetime", FrozenDatetime)
+    with Session(returns_engine) as session:
+        data = returns_loader.load_inputs(
+            session, "Invented", "month", **({} if live else {"as_of": instant})
+        )
+        report = load_returns(
+            session, "Invented", "2026-10-12:2026-10-13", **({} if live else {"as_of": instant})
+        )
+    assert data.as_of == instant
+    assert data.end == date(2026, 10, 13)
+    assert report.total.closing == D(150)
+    assert not report.total.flags
+    assert len(calls) == (2 if live else 0)
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_recorded_fx_conversion_uses_live_close_boundary(returns_engine, live):
+    from portfolio_digest.returns_loader import load_inputs
+
+    monday, tuesday = date(2026, 10, 12), date(2026, 10, 13)
+    with Session(returns_engine) as session:
+        portfolio = session.scalar(select(Portfolio).where(Portfolio.name == "Invented"))
+        instrument = session.scalar(select(Instrument))
+        session.add_all(
+            [
+                FxRate(
+                    rate_date=monday,
+                    currency="NZD",
+                    base_currency="AUD",
+                    rate=D("0.9"),
+                    source="test",
+                ),
+                FxRate(
+                    rate_date=monday,
+                    currency="USD",
+                    base_currency="AUD",
+                    rate=D("1.35"),
+                    source="test",
+                ),
+                Income(
+                    portfolio_id=portfolio.id,
+                    instrument_id=instrument.id,
+                    paid_date=tuesday,
+                    kind="dividend",
+                    currency="USD",
+                    gross_amount=D(2),
+                    net_amount=D(2),
+                    fx_rate=D("1.5"),
+                    source="test",
+                    external_ref="live-fx",
+                ),
+            ]
+        )
+        session.flush()
+        data = load_inputs(
+            session,
+            "Invented",
+            f"{monday}:{tuesday}",
+            tuesday,
+            base_currency="AUD",
+            as_of=datetime(2026, 10, 12, 22, tzinfo=UTC) if live else None,
+        )
+    assert bool(data.conversion_flags) == (not live)
+    assert data.holdings[0].income[0].fx == D("1.35")
 
 
 def test_drp_unit_price_uses_financial_precision(monkeypatch):

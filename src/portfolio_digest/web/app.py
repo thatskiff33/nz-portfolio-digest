@@ -159,7 +159,8 @@ def create_app(
     ):
         with Session(engine) as session:
             p = portfolio(session, pid)
-            today = datetime.now(ZoneInfo(timezone)).date()
+            as_of = datetime.now(ZoneInfo(timezone))
+            today = as_of.date()
             first = first_activity_date(session, pid, today) or today
             try:
                 begin, finish = period_dates(period, today, first, start, end)
@@ -167,7 +168,7 @@ def create_app(
                 raise HTTPException(
                     400, "Choose a valid period and dates ending no later than today."
                 ) from None
-            values = Dashboard(session, p, begin, finish)
+            values = Dashboard(session, p, begin, finish, as_of=as_of)
             if sort not in {"code", "name", "quantity", "price", "value"} or direction not in {
                 "asc",
                 "desc",
@@ -225,7 +226,8 @@ def create_app(
             if not trades and not income:
                 raise HTTPException(404, "Holding not found in this portfolio.")
             instrument = session.get(Instrument, iid)
-            today = datetime.now(ZoneInfo(timezone)).date()
+            as_of = datetime.now(ZoneInfo(timezone))
+            today = as_of.date()
             activity = [t.trade_date for t in trades if t.trade_date <= today] + [
                 i.paid_date
                 for i in income
@@ -235,11 +237,13 @@ def create_app(
             result, error = None, None
             prices = ()
             try:
-                data = load_portfolio_inputs(session, p, begin, finish, instrument_id=iid)
+                data = load_portfolio_inputs(
+                    session, p, begin, finish, instrument_id=iid, as_of=as_of
+                )
                 prices = data.holdings[0].prices if data.holdings else ()
                 if data.holdings:
                     result = holding_return(
-                        data.holdings[0], begin, finish, data.rates, data.base_currency
+                        data.holdings[0], begin, finish, data.rates, data.base_currency, as_of=as_of
                     )
             except ReturnError as exc:
                 error = str(exc)

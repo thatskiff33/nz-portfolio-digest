@@ -22,7 +22,8 @@ printf 'git %s\n' "$*" >> "$LOG"
 case "$*" in
   'branch --show-current') echo main ;;
   'rev-parse HEAD') echo invented-release ;;
-  'restore schedules.toml') echo public > schedules.toml ;;
+  'restore schedules.toml') rm schedules.toml; echo public > schedules.toml ;;
+  'pull --ff-only origin main') if [ "$FAIL" = git-pull ]; then exit 1; fi ;;
 esac
 """,
         "docker": """
@@ -53,7 +54,7 @@ def deploy(deployment, password=None, container="", fail=""):
     body = SCRIPT.read_text().split("<<'REMOTE'\n", 1)[1].rsplit("\nREMOTE", 1)[0]
     result = subprocess.run(  # noqa: S603
         [SH, "-s", "--", str(root)],
-        input=body,
+        input="umask 077\n" + body,
         text=True,
         capture_output=True,
         cwd=root,
@@ -69,6 +70,7 @@ def deploy(deployment, password=None, container="", fail=""):
     )
     assert "invented-secret" not in result.stdout + result.stderr
     assert (root / "schedules.toml").read_text() == "private schedule"
+    assert (root / "schedules.toml").stat().st_mode & 0o777 == 0o644
     return result, (root / "log").read_text().splitlines()
 
 
@@ -120,6 +122,7 @@ def test_password_detection_is_private_and_does_not_execute_env(deployment, pass
 @pytest.mark.parametrize(
     "failure",
     [
+        "git-pull",
         "backup --once",
         "compose build",
         "compose run --rm migrate",

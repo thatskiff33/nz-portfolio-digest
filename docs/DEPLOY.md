@@ -320,8 +320,10 @@ previous_revision=$(docker compose exec -T db psql -U portfolio -d portfolio -At
 docker compose run --rm backup --once            # stop unless it prints "backup: wrote"
 # Write private metadata beside the new dump, including its filename from that output.
 # Substitute the actual dump filename and BACKUP_DIR if configured differently.
-umask 077
-printf '%s\n%s\n' "$previous_release" "$previous_revision" > backups/portfolio-YYYYMMDDTHHMMSSZ.release.txt
+(
+  umask 077
+  printf '%s\n%s\n' "$previous_release" "$previous_revision" > backups/portfolio-YYYYMMDDTHHMMSSZ.release.txt
+)
 ```
 
 Detect dashboard use before stopping anything. An existing container, even when stopped,
@@ -364,6 +366,8 @@ Keep this copy outside git with owner-only access.
 git restore schedules.toml
 git pull --ff-only origin main
 # Restore the private schedules.toml now.
+# The scheduler runs as uid 10001 and must be able to read this file.
+chmod 0644 schedules.toml
 set -- migrate scheduler
 if [ "$web_enabled" = true ]; then set -- "$@" web; fi
 docker compose build "$@"
@@ -385,7 +389,18 @@ Akahu timer during maintenance if installed; restart it only after health passes
 A code checkout alone cannot roll back a database schema. Keep scheduler, web, backup
 and any Akahu timer stopped. Use the recorded previous commit and the pre-update dump.
 Do not use `git pull` during rollback or recovery: it selects newer code that may not
-match the saved schema. Preserve the private schedule around each checkout.
+match the saved schema. Preserve the private schedule around each checkout and restore
+its mode to `0644` so the scheduler can read it.
+
+If `migrate` itself failed, its database transaction rolled back: check out and rebuild
+the previous release, skip the schema reset and dump restore below, then run health
+before restarting services. A restore is needed when migration committed successfully
+but health or a later check failed and you must return to the pre-update schema.
+
+For a restore, reset `public` first. Newer migrations can add foreign keys from tables
+absent in the dump, which prevents `pg_restore --clean --if-exists` from dropping the
+older tables. The reset removes all current objects in `public`, then restores ownership
+and grants for `portfolio`. Only do this with a verified pre-update dump available.
 
 ```sh
 docker compose stop scheduler web backup
@@ -393,7 +408,13 @@ git checkout "$previous_release"
 set -- migrate scheduler
 if [ "$web_enabled" = true ]; then set -- "$@" web; fi
 docker compose build "$@"
-docker compose exec -T db pg_restore -U portfolio --clean --if-exists --single-transaction \
+docker compose exec -T db psql -U portfolio -d portfolio -v ON_ERROR_STOP=1 --single-transaction <<'SQL'
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public AUTHORIZATION portfolio;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+GRANT ALL ON SCHEMA public TO portfolio;
+SQL
+docker compose exec -T db pg_restore -U portfolio --single-transaction \
   -d portfolio < backups/portfolio-YYYYMMDDTHHMMSSZ.dump
 docker compose run --rm migrate health
 # Only after restore and health succeed, without running migrate:
@@ -402,9 +423,10 @@ if [ "$web_enabled" = true ]; then set -- "$@" web; fi
 docker compose up -d --no-deps "$@"
 ```
 
-Use the metadata file to recover `previous_release` in a new shell. A failed transaction
-leaves the database as it was before that restore attempt; leave writers stopped and
-investigate rather than restarting them against an uncertain schema.
+Use the metadata file to recover `previous_release` in a new shell. The schema reset
+and restore are separate transactions. If restore fails after the reset, `public` stays
+empty; leave writers stopped, investigate and repeat the restore. Do not restart services
+against an empty or uncertain schema.
 
 ## Backups
 
@@ -489,7 +511,11 @@ and rebuild the release matching the dump's Alembic revision, preserving the pri
 schedule. Do not use `git pull`. For dumps without release metadata, first use
 [Test a restore](#test-a-restore) to identify a matching release.
 
-`--single-transaction` means a restore that fails part-way changes nothing. Restore as
+Reset `public` before restoring, using the same ownership and grants as first install.
+This removes newer objects and foreign keys that are absent from the dump. Have a verified
+dump available before running this destructive reset. The reset commits separately:
+`--single-transaction` rolls back a failed restore, but leaves the schema empty after
+the reset. Leave writers stopped if either step fails. Restore as
 `portfolio`, which owns the dump's objects, so the dump cannot run with superuser rights.
 Run each command only after the preceding one succeeds. `--no-deps` prevents Compose
 from starting the one-off migration service again after health has passed:
@@ -501,7 +527,13 @@ set -- migrate scheduler
 if [ "$web_enabled" = true ]; then set -- "$@" web; fi
 docker compose build "$@"
 docker compose up -d --wait db
-docker compose exec -T db pg_restore -U portfolio --clean --if-exists --single-transaction \
+docker compose exec -T db psql -U portfolio -d portfolio -v ON_ERROR_STOP=1 --single-transaction <<'SQL'
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public AUTHORIZATION portfolio;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+GRANT ALL ON SCHEMA public TO portfolio;
+SQL
+docker compose exec -T db pg_restore -U portfolio --single-transaction \
   -d portfolio < backups/portfolio-YYYYMMDDTHHMMSSZ.dump
 docker compose run --rm migrate health
 # Only after health succeeds; do not migrate the restored schema forward:

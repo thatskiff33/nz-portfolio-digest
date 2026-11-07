@@ -33,7 +33,6 @@ previous_revision=$(docker compose exec -T db psql -U portfolio -d portfolio -At
 backup_result=$(docker compose run --rm backup --once)
 printf '%s\n' "$backup_result"
 # Record recovery metadata before changing the release. Keep this beside the dump.
-umask 077
 # BACKUP_DIR is normally configured in .env; use Compose's mounted backup directory
 # for metadata too, without sourcing .env or printing its values.
 # Expand the metadata filename inside the backup container.
@@ -47,14 +46,15 @@ $previous_revision
 $backup_result
 EOF
 # The private server schedule is backed up and restored around the fast-forward update.
-umask 077
 mkdir -p /tmp/scratch
 schedule_backup=$(mktemp /tmp/scratch/portfolio-schedule.XXXXXX)
 cp schedules.toml "$schedule_backup"
-trap 'cp "$schedule_backup" schedules.toml; rm -f "$schedule_backup"' EXIT HUP INT TERM
+trap 'cp "$schedule_backup" schedules.toml; chmod 0644 schedules.toml; rm -f "$schedule_backup"' EXIT HUP INT TERM
 git restore schedules.toml
 git pull --ff-only origin main
 cp "$schedule_backup" schedules.toml
+# The scheduler runs as uid 10001 and must be able to read the bind-mounted file.
+chmod 0644 schedules.toml
 rm -f "$schedule_backup"
 trap - EXIT HUP INT TERM
 # Compose includes stopped containers with --all. Never execute the private .env.

@@ -12,6 +12,7 @@ from sqlalchemy import CheckConstraint, MetaData, create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from portfolio_digest.config import Settings
 from portfolio_digest.formatting import display_quantity
 from portfolio_digest.models import (
     Base,
@@ -150,7 +151,7 @@ def engine_web(request):
 
 @pytest.fixture
 def client(engine_web):
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
         yield client
 
 
@@ -165,7 +166,7 @@ def sign_in(client):
     return token(response)
 
 
-def test_healthz_returns_ok_without_a_session():
+def test_anonymous_healthz_redirects_without_session_or_database():
     engine = create_engine("sqlite://")
 
     def refuse_connection(*_args, **_kwargs):
@@ -173,11 +174,11 @@ def test_healthz_returns_ok_without_a_session():
 
     engine.connect = refuse_connection
     app = create_app(engine, PASSWORD)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         client.cookies.set(COOKIE, "not-a-session")
-        response = client.get("/healthz")
-    assert response.status_code == 200
-    assert response.text == "ok"
+        response = client.get("/healthz", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?next=%2Fhealthz"
     assert COOKIE not in response.cookies
     assert app.state.security.sessions == {}
 
@@ -197,6 +198,7 @@ def test_healthz_returns_ok_without_a_session():
     ],
 )
 def test_read_pages(client, path, text):
+    sign_in(client)
     response = client.get(path)
     assert response.status_code == 200
     assert text in response.text
@@ -206,8 +208,6 @@ def test_read_pages(client, path, text):
     if path == "/login":
         assert "HttpOnly" in response.headers["set-cookie"]
         assert "SameSite=strict" in response.headers["set-cookie"]
-    else:
-        assert "set-cookie" not in response.headers
     assert response.headers["cache-control"] == "no-store"
 
 
@@ -231,7 +231,8 @@ def test_dashboard_equals_returns_engine(engine_web, period):
                 assert value is None
             else:
                 assert value == point.total.closing
-        with TestClient(create_app(engine_web, PASSWORD)) as client:
+        with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+            sign_in(client)
             response = client.get(f"/p/1?period=custom&start={expected.start}&end={expected.end}")
         assert response.status_code == 200
         context = response.context
@@ -293,7 +294,8 @@ def test_dashboard_counts_transfer_in_towards_denominator(engine_web):
     rows = {r.label: r for r in expected.holdings}
     assert rows["NZX:MOVED"].percentages.total == Decimal(10)
     assert expected.markets[0].denominator == expected.total.denominator == Decimal(101000)
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
         response = client.get(f"/p/{pid}?period=custom&start=2026-10-12&end=2026-10-19")
     assert response.status_code == 200
     assert response.context["report"] == expected
@@ -309,7 +311,8 @@ def test_holding_detail_income_matches_engine(engine_web):
             session, "Kōwhai Fund", "all", datetime.now(ZoneInfo("Pacific/Auckland")).date()
         )
         result = next(row for row in expected.holdings if row.label == "NZX:KOW")
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
         response = client.get("/p/1/holding/1")
     assert response.status_code == 200
     assert response.context["result"] == result
@@ -348,7 +351,8 @@ def test_all_time_dashboard_includes_income_without_trades(engine_web):
         expected = load_returns(
             session, "Harbour Fund", "all", datetime.now(ZoneInfo("Pacific/Auckland")).date()
         )
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
         overview = client.get("/p/2?period=all")
         detail = client.get("/p/2/holding/1")
     assert overview.context["report"] == expected
@@ -386,7 +390,8 @@ def test_dashboard_quantity_replays_splits(engine_web, after, recorded_adjustmen
         session.commit()
         expected = load_returns(session, "Kōwhai Fund", "all", DAY)
         units = instrument_position(session, 1, 1, DAY).units
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
         response = client.get(f"/p/1?period=custom&start={expected.start}&end={DAY}")
     assert response.status_code == 200
     assert response.context["report"] == expected
@@ -409,7 +414,8 @@ def test_dashboard_quantity_display_stops_at_eight_places(engine_web):
         )
         session.commit()
         expected = load_returns(session, "Kōwhai Fund", "all", DAY)
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
         response = client.get(f"/p/1?period=custom&start={expected.start}&end={DAY}")
     assert response.status_code == 200
     row = next(item for item in response.context["dashboard"].holdings if item.instrument.id == 1)
@@ -426,7 +432,8 @@ def test_missing_inputs_are_explained(engine_web):
         session.delete(session.get(FxRate, (DAY, "USD", "NZD")))
         session.delete(session.get(FxRate, (DAY - timedelta(days=5), "USD", "NZD")))
         session.commit()
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
         response = client.get(f"/p/1?period=custom&start={DAY}&end={DAY}")
     assert response.status_code == 200
     assert response.context["report"] is None
@@ -438,7 +445,8 @@ def test_loader_error_does_not_fabricate_zero_chart(engine_web):
     with Session(engine_web) as session:
         session.get(Trade, 2).currency = "NZD"
         session.commit()
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
         response = client.get(f"/p/1?period=custom&start={DAY}&end={DAY}")
     assert response.status_code == 200
     assert "Trade currency differs" in response.text
@@ -516,7 +524,7 @@ def test_trade_reconciliation_undo_and_logout(client, engine_web):
         assert session.get(Trade, 1) is None
         assert session.get(ImportRun, 1).status == "undone"
     assert client.post("/logout", data={"csrf": csrf}).status_code == 200
-    assert client.get("/p/1/trade").status_code == 401
+    assert client.get("/p/1/trade", follow_redirects=False).status_code == 303
 
 
 def test_password_never_echoed_and_throttled(client, caplog):
@@ -541,7 +549,7 @@ def test_rotated_session_csrf_and_expiry(client):
     assert client.post("/logout", data={"csrf": old_csrf}).status_code == 403
     security = client.app.state.security
     security.sessions[client.cookies.get("portfolio_session")].expires = 0
-    assert client.get("/p/1/trade").status_code == 401
+    assert client.get("/p/1/trade", follow_redirects=False).status_code == 303
 
 
 @pytest.mark.parametrize(
@@ -556,6 +564,7 @@ def test_rotated_session_csrf_and_expiry(client):
     ],
 )
 def test_invalid_queries(client, path, status):
+    sign_in(client)
     assert client.get(path).status_code == status
 
 
@@ -612,9 +621,14 @@ def test_login_csrf_and_form_size(client):
 
 def test_secure_cookie_option(engine_web):
     with TestClient(
-        create_app(engine_web, PASSWORD, secure_cookie=True), base_url="https://testserver"
+        create_app(engine_web, PASSWORD, secure_cookie=True), base_url="https://localhost"
     ) as secure_client:
-        assert "Secure" in secure_client.get("/login").headers["set-cookie"]
+        response = secure_client.get("/login")
+        assert "Secure" in response.headers["set-cookie"]
+        assert "__Host-portfolio_session" in secure_client.cookies
+        sign_in(secure_client)
+        assert secure_client.get("/healthz").text == "ok"
+        assert "portfolio_session" not in secure_client.cookies
 
 
 def test_empty_portfolio_list(engine_web):
@@ -631,7 +645,8 @@ def test_empty_portfolio_list(engine_web):
             copy.constraints.remove(constraint)
     metadata.create_all(empty)
     try:
-        with TestClient(create_app(empty, PASSWORD)) as empty_client:
+        with TestClient(create_app(empty, PASSWORD), base_url="http://localhost") as empty_client:
+            sign_in(empty_client)
             response = empty_client.get("/")
             assert response.status_code == 200
             assert "No portfolios yet" in response.text
@@ -643,54 +658,186 @@ def test_stored_text_is_escaped(client, engine_web):
     with Session(engine_web) as session:
         session.get(Instrument, 1).name = '<script>alert("private")</script>'
         session.commit()
+    sign_in(client)
     response = client.get("/p/1")
     assert '<script>alert("private")</script>' not in response.text
     assert "&lt;script&gt;" in response.text
 
 
-def test_session_capacity_returns_service_unavailable(client):
-    from portfolio_digest.web.security import BrowserSession
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/",
+        "/p/1",
+        "/p/1/holding/1",
+        "/p/1/imports",
+        "/p/1/reconcile",
+        "/p/1/trade",
+        "/healthz",
+        "/missing",
+        "/logout",
+    ],
+)
+def test_every_page_requires_sign_in(client, path):
+    response = client.get(path, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/login?next=")
+    assert not client.app.state.security.sessions
+    assert "set-cookie" not in response.headers
 
+
+def test_anonymous_capacity_preserves_authenticated_sessions(client):
+    sign_in(client)
+    authenticated_id = client.cookies.get(COOKIE)
+    for _ in range(1100):
+        client.cookies.clear()
+        assert client.get("/login").status_code == 200
     security = client.app.state.security
-    security.sessions = {str(n): BrowserSession("fake", 10**12) for n in range(1024)}
-    response = client.get("/login")
-    assert response.status_code == 503
-    assert response.headers["x-frame-options"] == "DENY"
+    assert authenticated_id in security.sessions
+    assert sum(not v.authenticated for v in security.sessions.values()) == 1024
+    sign_in(client)
+
+
+def test_anonymous_session_expires_after_ten_minutes(client, monkeypatch):
+    from portfolio_digest.web import security as security_module
+
+    now = 10000
+    monkeypatch.setattr(security_module.time, "monotonic", lambda: now)
+    client.get("/login")
+    original = client.cookies.get(COOKIE)
+    now += 599
+    client.get("/login")
+    assert client.cookies.get(COOKIE) == original
+    now += 1
+    client.get("/login")
+    assert client.cookies.get(COOKIE) != original
+    assert original not in client.app.state.security.sessions
+
+
+def test_idle_and_absolute_expiry(client, monkeypatch):
+    from portfolio_digest.web import security as security_module
+
+    now = 10000
+    monkeypatch.setattr(security_module.time, "monotonic", lambda: now)
+    sign_in(client)
+    for _ in range(28):
+        now += 1000
+        assert client.get("/healthz").status_code == 200
+    now = 38800
+    assert client.get("/healthz", follow_redirects=False).status_code == 303
+    sign_in(client)
+    now += 1799
+    assert client.get("/healthz").status_code == 200
+    now += 1800
+    assert client.get("/healthz", follow_redirects=False).status_code == 303
 
 
 @pytest.mark.parametrize(
-    "path,status",
-    [("/", 200), ("/p/1/imports", 200), ("/p/1/reconcile", 200), ("/missing", 404)],
+    "target",
+    [
+        "/p/1?sort=value&direction=desc",
+        "https://evil.example/",
+        "//evil.example",
+        "/\\evil.example",
+        "/%2fevil.example",
+        "/%252fevil.example",
+        "/%0aevil",
+    ],
 )
-def test_anonymous_requests_do_not_allocate_sessions(client, path, status):
-    # A stream of clients without cookies must leave room for a new sign-in form.
-    for _ in range(10):
-        client.cookies.clear()
-        response = client.get(path)
-        assert response.status_code == status
-        assert "set-cookie" not in response.headers
+def test_login_return_path_is_local(client, target):
+    response = client.get("/login", params={"next": target})
+    assert "Kōwhai Fund" not in response.text
+    csrf = token(response)
+    safe = target if target.startswith("/p/1?") else "/"
+    assert response.context["next_path"] == safe
+    response = client.post(
+        "/login", data={"csrf": csrf, "password": PASSWORD, "next": target}, follow_redirects=False
+    )
+    assert response.headers["location"] == safe
+
+
+def test_login_returns_to_requested_page(client):
+    response = client.get("/p/1/imports?sort=date")
+    assert response.context["next_path"] == "/p/1/imports?sort=date"
+    response = client.post(
+        "/login",
+        data={"csrf": token(response), "password": PASSWORD, "next": response.context["next_path"]},
+        follow_redirects=False,
+    )
+    assert response.headers["location"] == "/p/1/imports?sort=date"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/",
+        "/login",
+        "/logout",
+        "/static/dashboard.css",
+        "/healthz",
+        "/p/1",
+        "/p/1/holding/1",
+        "/p/1/imports",
+        "/p/1/reconcile",
+        "/p/1/trade",
+        "/missing",
+    ],
+)
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_untrusted_host_is_rejected(client, path, method):
+    response = getattr(client, method)(
+        path, headers={"host": "evil.example"}, follow_redirects=False
+    )
+    assert response.status_code == 400
     assert not client.app.state.security.sessions
-    response = client.get("/login")
-    assert token(response)
-    assert len(client.app.state.security.sessions) == 1
-    assert client.get("/login").status_code == 200
-    assert len(client.app.state.security.sessions) == 1
 
 
-def test_full_session_store_still_allows_anonymous_reads(client):
-    from portfolio_digest.web.security import BrowserSession
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost",
+        "localhost:8000",
+        "127.0.0.1",
+        "127.0.0.1:8000",
+        "100.100.20.30",
+        "100.100.20.30:8000",
+        "portfolio.tail.ts.net",
+        "portfolio.tail.ts.net:443",
+    ],
+)
+def test_allowed_hosts(engine_web, host):
+    settings = Settings(
+        database_url="sqlite://",
+        dashboard_bind="100.100.20.30",
+        dashboard_hostnames=" portfolio.tail.ts.net, other.tail.ts.net ",
+    )
+    with TestClient(
+        create_app(engine_web, PASSWORD, settings=settings), base_url="http://localhost"
+    ) as browser:
+        assert browser.get("/login", headers={"host": host}).status_code == 200
 
-    security = client.app.state.security
-    security.sessions = {str(n): BrowserSession("fake", 10**12) for n in range(1024)}
-    assert client.get("/p/1").status_code == 200
-    assert client.post("/login", data={"csrf": "", "password": PASSWORD}).status_code == 403
-    assert len(security.sessions) == 1024
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1", True),
+        ("yes", True),
+        ("true", True),
+        ("TRUE", True),
+        ("0", False),
+        ("no", False),
+        ("false", False),
+    ],
+)
+def test_dashboard_settings_bool(monkeypatch, value, expected):
+    monkeypatch.setenv("DASHBOARD_SECURE_COOKIE", value)
+    assert Settings(database_url="sqlite://").dashboard_secure_cookie is expected
 
 
 def test_logout_does_not_allocate_replacement_session(client):
     csrf = sign_in(client)
-    response = client.post("/logout", data={"csrf": csrf})
-    assert response.status_code == 200
+    response = client.post("/logout", data={"csrf": csrf}, follow_redirects=False)
+    assert response.status_code == 303
     assert not client.app.state.security.sessions
     assert not client.cookies.get("portfolio_session")
 
@@ -709,7 +856,9 @@ def test_login_throttle_is_per_address_not_cookie_or_forwarded_header(client, en
         ).status_code
         == 429
     )
-    with TestClient(client.app, client=("100.100.20.30", 12345)) as other:
+    with TestClient(
+        client.app, base_url="http://localhost", client=("100.100.20.30", 12345)
+    ) as other:
         sign_in(other)
 
 
@@ -720,7 +869,9 @@ def test_login_global_ceiling_and_window_expiry(client, monkeypatch):
     monkeypatch.setattr(security_module.time, "monotonic", lambda: now)
     # Oversized passwords still count, without paying the scrypt cost for this test.
     for address in range(10):
-        with TestClient(client.app, client=(f"100.100.20.{address}", 12345)) as other:
+        with TestClient(
+            client.app, base_url="http://localhost", client=(f"100.100.20.{address}", 12345)
+        ) as other:
             csrf = token(other.get("/login"))
             for _ in range(5):
                 assert (
@@ -789,7 +940,7 @@ def test_holding_bounds_chart_and_table_and_ignores_unrelated_bad_inputs(engine_
             for n in range(480)
         )
         session.commit()
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
         sign_in(client)
         response = client.get("/p/1/holding/1")
     assert response.status_code == 200
@@ -806,7 +957,7 @@ def test_holding_input_error_is_explained(engine_web):
     with Session(engine_web) as session:
         session.scalar(select(Trade).where(Trade.instrument_id == 1)).currency = "AUD"
         session.commit()
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
         sign_in(client)
         response = client.get("/p/1/holding/1")
     assert response.status_code == 200
@@ -821,7 +972,7 @@ def test_holding_future_activity_does_not_invert_report_dates(engine_web):
             today + timedelta(days=30)
         )
         session.commit()
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
         sign_in(client)
         response = client.get("/p/1/holding/2")
     assert response.status_code == 200
@@ -855,7 +1006,10 @@ def test_live_routes_and_dashboard_reuse_frozen_instant(engine_web, monkeypatch,
         return calculate(*args, **kwargs)
 
     monkeypatch.setattr(viewmodel, "calculate_returns", capture)
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
+        clocks.clear()
+        seen.clear()
         page = client.get("/p/1?period=all")
         detail = client.get("/p/1/holding/2")
     assert page.status_code == detail.status_code == 200
@@ -866,6 +1020,60 @@ def test_live_routes_and_dashboard_reuse_frozen_instant(engine_web, monkeypatch,
     assert len(clocks) == 2
     assert len(seen) > 2  # Includes sampled series calculations.
     assert all(value == instant for value in seen)
+
+
+@pytest.mark.parametrize(
+    "bind", ["fd7a:115c:a1e0::1234", "fd7a:115c:a1e0:0:0:0:0:1234", "FD7A:115C:A1E0::1234"]
+)
+@pytest.mark.parametrize(
+    "host",
+    [
+        "[fd7a:115c:a1e0::1234]",
+        "[fd7a:115c:a1e0::1234]:8000",
+        "[fd7a:115c:a1e0:0:0:0:0:1234]:8000",
+    ],
+)
+def test_allowed_ipv6_host(engine_web, host, bind):
+    settings = Settings(database_url="sqlite://", dashboard_bind=bind)
+    with TestClient(
+        create_app(engine_web, PASSWORD, settings=settings), base_url="http://localhost"
+    ) as browser:
+        assert browser.get("/login", headers={"host": host}).status_code == 200
+        assert (
+            browser.get("/login", headers={"host": "[fd7a:115c:a1e0::9999]:8000"}).status_code
+            == 400
+        )
+
+
+def test_authenticated_session_capacity_does_not_block_login_form(client, monkeypatch):
+    from portfolio_digest.web import security as security_module
+    from portfolio_digest.web.security import BrowserSession
+
+    now = 10000
+    monkeypatch.setattr(security_module.time, "monotonic", lambda: now)
+    security = client.app.state.security
+    security.sessions = {
+        str(n): BrowserSession("fake", now + 28800, True, now) for n in range(1024)
+    }
+    response = client.get("/login")
+    assert response.status_code == 200
+    response = client.post("/login", data={"csrf": token(response), "password": PASSWORD})
+    assert response.status_code == 503
+    assert sum(v.authenticated for v in security.sessions.values()) == 1024
+
+
+def test_dashboard_reads_settings_from_environment(engine_web, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    monkeypatch.setenv("DASHBOARD_BIND", "100.100.20.30")
+    monkeypatch.setenv("DASHBOARD_HOSTNAMES", "portfolio.tail.ts.net")
+    monkeypatch.setenv("DASHBOARD_SECURE_COOKIE", "yes")
+    with TestClient(create_app(engine_web), base_url="https://portfolio.tail.ts.net") as browser:
+        response = browser.get("/login")
+        assert response.status_code == 200
+        assert "__Host-portfolio_session" in browser.cookies
+        sign_in(browser)
+        assert browser.get("/healthz").text == "ok"
+        assert browser.get("/login", headers={"host": "100.100.20.30:8000"}).status_code == 200
 
 
 def test_default_morning_fetch_leaves_no_fx_flag_on_summer_tuesday(engine_web, monkeypatch):
@@ -917,7 +1125,8 @@ def test_default_morning_fetch_leaves_no_fx_flag_on_summer_tuesday(engine_web, m
             return instant.astimezone(tz)
 
     monkeypatch.setattr(web_app, "datetime", FrozenDatetime)
-    with TestClient(create_app(engine_web, PASSWORD)) as client:
+    with TestClient(create_app(engine_web, PASSWORD), base_url="http://localhost") as client:
+        sign_in(client)
         page = client.get("/p/1?period=all")
     assert page.status_code == 200
     report = page.context["report"]

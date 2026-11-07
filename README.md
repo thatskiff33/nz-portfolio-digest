@@ -36,10 +36,11 @@ NZX and ASX codes map automatically to Yahoo's `.NZ` and `.AX` symbols. NASDAQ a
 codes are used as-is. Set an exception for a right, renamed or delisted security with
 `portfolio-digest prices symbol NZX:AIRRG AIRRG.NZ`. See the deployment guide for the
 [shared price and report schedule](docs/DEPLOY.md#shared-price-and-report-schedule)
-and recovery commands. Stored closes are raw, unadjusted prices in
-major currency units. Registry-recorded splits and consolidations adjust units without
-changing total cost or parcel FX. Holdings round to 8 decimal places, half-even, at
-the action; record any cash in lieu separately as a sale. Matching registry actions
+(11:15 and 18:30 Pacific/Auckland) and recovery commands. The morning fetch follows
+the US price and FX closes in every daylight-saving combination. Stored closes are raw,
+unadjusted prices in major currency units. Registry-recorded splits and consolidations
+adjust units without changing total cost or parcel FX. Holdings round to 8 decimal places,
+half-even, at the action; record any cash in lieu separately as a sale. Matching registry actions
 and ADJUSTMENT entries within inclusive ±10 calendar days are refused in either order.
 For downloaded Split metadata, an ADJUSTMENT trade records the quantity change; the
 returns engine preserves parcel cost when it matches that ratio exactly. Missing

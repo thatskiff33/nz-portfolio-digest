@@ -9,13 +9,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from secrets import token_bytes
 from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from portfolio_digest.alert_config import AlertConfig
-from portfolio_digest.config import ConfigError, get_report_settings
+from portfolio_digest.config import ConfigError, get_report_settings, runtime_settings
+from portfolio_digest.delivery import RecipientProgress, keyed_checkpoint, track_recipients
 from portfolio_digest.mailers import address
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,8 @@ class ScheduleConfig(BaseModel):
     timezone: str = "Pacific/Auckland"
     recipients: list[str] = Field(default_factory=list)
     kuma_push_url: SecretStr | None = None
+    # Pinged only after a price fetch in which every instrument and rate succeeded.
+    prices_kuma_push_url: SecretStr | None = None
     schedules: list[Schedule]
     alerts: AlertConfig = Field(default_factory=AlertConfig)
 
@@ -112,6 +116,45 @@ class ScheduleConfig(BaseModel):
                 return schedule
         raise ConfigError("Unknown report schedule. Check the schedule configuration.")
 
+    def report_timing_warnings(self) -> list[str]:
+        """Reports that are not strictly after a same-day price fetch.
+
+        Equal times do not count: the fetch and the email would be due together,
+        and the email can run first. This checks the configured order only.
+        """
+        prices = [item for item in self.schedules if item.kind == "prices"]
+        warnings = []
+        for report in self.schedules:
+            if report.kind != "report":
+                continue
+            earlier = [price for price in prices if price.at < report.at]
+            weekly_days = {price.weekday for price in earlier if price.frequency == "weekly"}
+            if weekly_days == set(WEEKDAYS) or any(
+                _price_runs_on_every_report_day(price, report) for price in earlier
+            ):
+                continue
+            warnings.append(
+                f"Report {report.name} at {report.at.strftime('%H:%M')} has no earlier "
+                "price fetch on the same day. Move it to after a prices schedule that "
+                "runs that day, so the report includes that day's closes."
+            )
+        return warnings
+
+
+def _price_runs_on_every_report_day(price: Schedule, report: Schedule) -> bool:
+    """True when `price` is due on every local day `report` is due.
+
+    A fetch on a different cadence does not count. The report would sometimes
+    be built on a day that fetch does not run.
+    """
+    if price.frequency == "daily":
+        return True
+    if price.frequency == "weekly":
+        return report.frequency == "weekly" and price.weekday == report.weekday
+    if price.frequency == "monthly":
+        return report.frequency in {"monthly", "yearly"} and price.day == report.day
+    return report.frequency == "yearly" and price.month == report.month and price.day == report.day
+
 
 def _write_heartbeat(path: Path) -> None:
     try:
@@ -126,11 +169,18 @@ def read_config(path: Path) -> ScheduleConfig:
         data = tomllib.loads(path.read_text())
         if "kuma_push_url" in data:
             logger.warning("Move the monitoring setting from TOML to REPORT_KUMA_PUSH_URL in .env.")
+        if "prices_kuma_push_url" in data:
+            logger.warning(
+                "Move the price monitor setting from TOML to REPORT_PRICES_KUMA_PUSH_URL in .env."
+            )
         overrides = get_report_settings()
         if overrides.recipients.strip():
             data["recipients"] = [value.strip() for value in overrides.recipients.split(",")]
         if overrides.kuma_push_url and overrides.kuma_push_url.get_secret_value().strip():
             data["kuma_push_url"] = overrides.kuma_push_url
+        prices_url = overrides.prices_kuma_push_url
+        if prices_url and prices_url.get_secret_value().strip():
+            data["prices_kuma_push_url"] = prices_url
         return ScheduleConfig.model_validate(data)
     except (OSError, ValueError, KeyError, ValidationError):
         raise ConfigError(
@@ -189,6 +239,7 @@ class Pending:
     failures: int = 0
     retry_at: datetime | None = None
     delivered: set[int] = field(default_factory=set)
+    recipients: set[str] = field(default_factory=set)
 
     @classmethod
     def load(cls, due, retry):
@@ -197,12 +248,23 @@ class Pending:
         failures = retry.get("failures", 0)
         delivered = retry.get("delivered", [])
         retry_at = retry.get("retry_at")
+        recipients = retry.get("recipients", [])
+        keyed = retry.get("recipients_keyed", False)
         if (
-            type(failures) is not int
+            type(keyed) is not bool
+            or type(failures) is not int
             or failures < 0
             or not isinstance(delivered, list)
             or any(type(value) is not int or value <= 0 for value in delivered)
             or len(set(delivered)) != len(delivered)
+            or not isinstance(recipients, list)
+            or any(
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(c not in "0123456789abcdef" for c in value)
+                for value in recipients
+            )
+            or len(set(recipients)) != len(recipients)
             or bool(failures) != (retry_at is not None)
         ):
             raise ValueError
@@ -211,6 +273,7 @@ class Pending:
             failures,
             _timestamp(retry_at) if retry_at is not None else None,
             set(delivered),
+            set(recipients),
         )
 
     def retry_state(self):
@@ -218,7 +281,33 @@ class Pending:
             "failures": self.failures,
             "retry_at": self.retry_at.isoformat() if self.retry_at else None,
             "delivered": sorted(self.delivered),
+            "recipients": sorted(self.recipients),
+            "recipients_keyed": True,
         }
+
+
+def _recipient_secret(path: Path, *, required: bool) -> bytes:
+    """Keep the HMAC key outside JSON state and backups of that file alone."""
+    try:
+        stream = path.open("rb")
+    except FileNotFoundError:
+        if required:
+            raise ValueError("Missing recipient checkpoint key") from None
+        secret = token_bytes(32)
+        with open(path, "xb", opener=lambda p, flags: os.open(p, flags, 0o600)) as stream:
+            if hasattr(os, "fchmod"):
+                os.fchmod(stream.fileno(), 0o600)
+            stream.write(secret)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return secret
+    with stream:
+        if hasattr(os, "fchmod"):
+            os.fchmod(stream.fileno(), 0o600)
+        secret = stream.read(33)
+    if len(secret) != 32:
+        raise ValueError("Invalid recipient checkpoint key")
+    return secret
 
 
 @dataclass
@@ -226,7 +315,15 @@ class Scheduler:
     config: ScheduleConfig
     state_path: Path
 
-    def run(self, execute, *, now=None, sleep=clock.sleep) -> int:
+    def run(self, execute, *, now=None, sleep=clock.sleep, notify=None) -> int:
+        from portfolio_digest.operations import THROTTLE, failure_text, recovery_text
+
+        if self.config.timezone != runtime_settings().timezone:
+            raise ConfigError(
+                "TIMEZONE and schedules.toml timezone must agree before starting the scheduler."
+            )
+        for warning in self.config.report_timing_warnings():
+            logger.warning("%s", warning)
         now = now or (lambda: datetime.now(UTC))
         heartbeat = Path(os.environ.get("SCHEDULER_HEARTBEAT", str(HEARTBEAT_PATH)))
         identities = {
@@ -240,9 +337,10 @@ class Scheduler:
             for key in state:
                 if ":" in key:
                     name, suffix = key.split(":", 1)
-                    if name not in state or suffix not in {"config", "retry"}:
+                    if name not in state or suffix not in {"config", "retry", "notice"}:
                         raise ValueError
             pending = {}
+            notices = {}
             for name in state:
                 if ":" in name:
                     continue
@@ -250,6 +348,8 @@ class Scheduler:
                 identity = _stored_identity(state[name + ":config"])
                 if name in identities and identity == identities[name]:
                     pending[name] = saved
+                    if name + ":notice" in state:
+                        notices[name] = _timestamp(state[name + ":notice"])
                 else:
                     logger.warning(
                         "Discarded pending scheduler occurrence after configuration change."
@@ -258,19 +358,41 @@ class Scheduler:
                 if schedule.name not in pending:
                     pending[schedule.name] = Pending(schedule.next_run(now(), self.config.timezone))
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            secret = _recipient_secret(
+                self.state_path.with_name(self.state_path.name + ".key"),
+                required=any(
+                    isinstance(value, dict) and value.get("recipients_keyed") is True
+                    for name, value in state.items()
+                    if name.endswith(":retry")
+                ),
+            )
+            for name, item in pending.items():
+                if not state.get(name + ":retry", {}).get("recipients_keyed", False):
+                    item.recipients = {keyed_checkpoint(secret, value) for value in item.recipients}
         except (OSError, ValueError, TypeError, KeyError, OverflowError):
             raise SchedulerStateError(
-                "Cannot read scheduler state. Check the state volume."
+                "Cannot read scheduler state or checkpoint key. Check the state volume."
             ) from None
 
         def save():
             try:
                 temporary = self.state_path.with_suffix(".new")
-                with temporary.open("w", encoding="utf-8") as stream:
+                with open(
+                    temporary,
+                    "w",
+                    encoding="utf-8",
+                    opener=lambda p, flags: os.open(p, flags, 0o600),
+                ) as stream:
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(stream.fileno(), 0o600)
                     json.dump(
                         {
                             **{name: item.due.isoformat() for name, item in pending.items()},
                             **{name + ":config": identity for name, identity in identities.items()},
+                            **{
+                                name + ":notice": stamp.isoformat()
+                                for name, stamp in notices.items()
+                            },
                             **{
                                 name + ":retry": item.retry_state()
                                 for name, item in pending.items()
@@ -286,6 +408,33 @@ class Scheduler:
                     "Cannot write scheduler state. Check the state volume."
                 ) from None
 
+        def emit(text: str, *, recovered: bool) -> None:
+            try:
+                if notify is not None:
+                    notify(text)
+                else:
+                    from portfolio_digest.operations import deliver_operations_notice
+
+                    deliver_operations_notice(self.config, text, recovered=recovered)
+            except Exception:
+                logger.warning("Operations notice could not be delivered.")
+
+        def remember_failure(name: str, instant: datetime, labels: tuple[str, ...]) -> None:
+            last = notices.get(name)
+            if last is not None and instant < last + THROTTLE:
+                return
+            emit(
+                failure_text(name, instant, self.config.timezone, labels),
+                recovered=False,
+            )
+            notices[name] = instant
+
+        def remember_recovery(name: str, instant: datetime) -> None:
+            if name not in notices:
+                return
+            emit(recovery_text(name, instant, self.config.timezone), recovered=True)
+            del notices[name]
+
         save()
         while True:
             _write_heartbeat(heartbeat)
@@ -296,13 +445,23 @@ class Scheduler:
                     continue
                 checkpoint = DeliveryCheckpoint(item.delivered, save)
                 try:
-                    failed = execute(schedule, item.due, checkpoint) != 0
+                    with track_recipients(RecipientProgress(item.recipients, save, secret=secret)):
+                        outcome = execute(schedule, item.due, checkpoint)
+                    code, labels = outcome if isinstance(outcome, tuple) else (outcome, ())
+                    if isinstance(labels, str):
+                        labels = (labels,)
+                    failed = code != 0
                 except ConfigError:
                     raise
                 except Exception:
                     # Job exceptions may contain portfolio figures or provider secrets.
                     failed = True
+                    labels = ()
                 finished = now()
+                if failed or labels:
+                    remember_failure(schedule.name, finished, tuple(labels))
+                else:
+                    remember_recovery(schedule.name, finished)
                 if failed:
                     item.failures += 1
                     delay = min(30 * 2 ** min(item.failures - 1, 4), 360)

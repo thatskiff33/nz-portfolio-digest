@@ -8,6 +8,9 @@
 #
 # Dumps older than BACKUP_KEEP_DAYS are pruned, but only straight after a dump succeeds, so
 # if backups start failing the last good ones are kept. Restore: see docs/DEPLOY.md.
+#
+# If BACKUP_PUSH_URL is set (an Uptime Kuma push URL, treated as a secret), it is pinged
+# after a successful dump only. The URL is never printed.
 set -eu
 
 DUMP_DIR=${DUMP_DIR:-/backups}
@@ -29,6 +32,19 @@ fi
 
 umask 077
 
+# BusyBox wget, as shipped in postgres:18-alpine. -T is the network timeout.
+# Stdout and stderr are discarded so a failure cannot echo the secret URL.
+monitor_ping() {
+  if [ -z "${BACKUP_PUSH_URL:-}" ]; then
+    return 0
+  fi
+  if wget -q -T 10 -O /dev/null "$BACKUP_PUSH_URL" >/dev/null 2>&1; then
+    echo "backup: monitoring ping sent"
+  else
+    echo "backup: monitoring ping failed" >&2
+  fi
+}
+
 dump_once() {
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   target="$DUMP_DIR/portfolio-$stamp.dump"
@@ -44,6 +60,7 @@ dump_once() {
     -mmin "+$((BACKUP_KEEP_DAYS * 1440))" -print -delete | sed 's/^/backup: pruned /'
   # Left behind if a dump was killed part-way through.
   find "$DUMP_DIR" -maxdepth 1 -name 'portfolio-*.dump.partial' -mmin +1440 -delete
+  monitor_ping
 }
 
 if [ "${1:-}" = "--once" ]; then

@@ -307,8 +307,15 @@ def test_cli_exit_and_kuma_only_on_match(local_engine, monkeypatch, capsys, rows
     monkeypatch.setattr(cli, "AkahuClient", lambda *args: sync_client(rows))
     push = Mock()
     monkeypatch.setattr(cli, "push_success", push)
+    notes = []
+    monkeypatch.setattr(
+        cli,
+        "note_outcome",
+        lambda config, job, *, failed, labels=(), now=None: notes.append((job, failed, labels)),
+    )
     assert cli.main(["akahu", "sync", "--portfolio", "Fictional"]) == exit_code
     assert push.call_count == (1 if exit_code == 0 else 0)
+    assert notes == [("akahu", exit_code != 0, ())]
     output = str(capsys.readouterr())
     assert APP not in output and USER not in output
 
@@ -316,7 +323,7 @@ def test_cli_exit_and_kuma_only_on_match(local_engine, monkeypatch, capsys, rows
 def test_kuma_failure_does_not_leak_url(monkeypatch):
     opener = Mock()
     opener.open.side_effect = URLError("https://kuma.invalid/" + USER)
-    monkeypatch.setattr("portfolio_digest.akahu.build_opener", lambda *args: opener)
+    monkeypatch.setattr("portfolio_digest.pings._opener", opener)
     with pytest.raises(AkahuError) as exc:
         push_success(SecretStr("https://kuma.invalid/" + USER))
     assert USER not in str(exc.value)
@@ -358,7 +365,7 @@ def test_malformed_kuma_url_never_exposes_secret(suffix, monkeypatch):
 
     opener = Mock()
     opener.open.side_effect = InvalidURL(USER)
-    monkeypatch.setattr("portfolio_digest.akahu.build_opener", lambda *args: opener)
+    monkeypatch.setattr("portfolio_digest.pings._opener", opener)
     with pytest.raises(AkahuError) as exc:
         push_success(SecretStr("http://localhost/" + USER + suffix))
     assert USER not in str(exc.value)
@@ -432,7 +439,7 @@ def test_bad_account_ids_do_not_break_another_command(local_engine, monkeypatch)
 
 
 def test_redirects_are_not_followed():
-    from portfolio_digest.akahu import NoRedirect
+    from portfolio_digest.pings import NoRedirect
 
     assert NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid") is None
 
@@ -448,11 +455,14 @@ def test_inactive_investment_account_fails(local_engine):
 @pytest.mark.parametrize("status_query", ["", "&status=up", "&status=down&status=down"])
 def test_kuma_success_push_is_read_only_and_preserves_query(monkeypatch, status_query):
     opener = Mock()
-    opener.open.return_value = BytesIO(b'{"ok":true}')
-    monkeypatch.setattr("portfolio_digest.akahu.build_opener", lambda *args: opener)
+    opener.open.return_value.__enter__ = Mock(
+        return_value=Mock(status=200, read=lambda: b'{"ok":true}')
+    )
+    opener.open.return_value.__exit__ = Mock(return_value=False)
+    monkeypatch.setattr("portfolio_digest.pings._opener", opener)
     push_success(SecretStr("https://kuma.invalid/push/fake?msg=OK&ping=" + status_query))
     opener.open.assert_called_once_with(
-        "https://kuma.invalid/push/fake?msg=OK&ping=&status=up", timeout=15
+        "https://kuma.invalid/push/fake?msg=OK&ping=&status=up", timeout=10
     )
 
 
@@ -495,6 +505,19 @@ def test_name_only_holding_can_be_mapped_manually(local_engine):
 def test_unusable_holdings_fail_safely(local_engine, row):
     with pytest.raises(AkahuError):
         sync(local_engine, "Fictional", sync_client([row]), [])
+
+
+def test_akahu_fetch_error_records_a_failure_notice(monkeypatch, capsys):
+    def fail():
+        raise AkahuError("Akahu fetch failed.")
+
+    monkeypatch.setattr(cli, "get_settings", fail)
+    monkeypatch.setattr(cli, "load_notice_config", lambda: "config")
+    notice = Mock()
+    monkeypatch.setattr(cli, "note_outcome", notice)
+    assert cli.main(["akahu", "sync", "--portfolio", "Fictional"]) == 1
+    notice.assert_called_once_with("config", "akahu", failed=True)
+    assert "Akahu fetch failed." in capsys.readouterr().err
 
 
 def test_sync_reconciles_rounded_registry_consolidation_and_keeps_raw_units(local_engine):

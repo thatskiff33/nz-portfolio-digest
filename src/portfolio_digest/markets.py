@@ -43,10 +43,6 @@ def exchange_code(value: str) -> str:
     return key
 
 
-def exchange_currency(exchange: str) -> str:
-    return EXCHANGE_CURRENCY[exchange_code(exchange)]
-
-
 def instrument_code(value: str) -> str:
     """A listing code as the exchange writes it: upper case, no spaces."""
     if contains_control_characters(value):

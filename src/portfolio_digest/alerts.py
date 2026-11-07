@@ -6,22 +6,31 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from html import escape
+from typing import Literal
 from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
-from zoneinfo import ZoneInfo
+from urllib.request import Request, build_opener
 
 from pydantic import SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import func, select
 
-from portfolio_digest.config import ConfigError
-from portfolio_digest.formatting import display_price
+from portfolio_digest.config import ConfigError, runtime_settings
+from portfolio_digest.delivery import message_delivery, portfolio_delivery
+from portfolio_digest.formatting import display_number, display_price, display_signed_number
 from portfolio_digest.mailers import MailError, mail_settings, message, send
-from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
+from portfolio_digest.models import (
+    FINANCIAL_PRECISION,
+    AlertState,
+    Instrument,
+    Portfolio,
+    Price,
+    Split,
+    Trade,
+)
+from portfolio_digest.pings import NoRedirect
 from portfolio_digest.prices.calendars import FX, for_exchange
 from portfolio_digest.returns import ReturnError, units_at
 from portfolio_digest.returns_loader import load_returns
-from portfolio_digest.returns_table import format_number as money
 from portfolio_digest.scheduling import SchedulerStateError
 from portfolio_digest.splits import rescale_price
 
@@ -34,24 +43,41 @@ class PushSettings(BaseSettings):
     alert_ntfy_token: SecretStr | None = None
     alert_pushover_token: SecretStr | None = None
     alert_pushover_user: SecretStr | None = None
+    # "minimal" pushes only a count; "full" pushes the email text with its figures.
+    alert_push_detail: Literal["minimal", "full"] = "minimal"
 
 
-class _NoPushRedirects(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # A redirected POST could leak the bearer token or portfolio figures.
-        return None
+# A redirected POST could leak the bearer token or portfolio figures.
+_push_opener = build_opener(NoRedirect())
 
 
-_push_opener = build_opener(_NoPushRedirects())
+def minimal_push_text(count: int) -> str:
+    plural = "" if count == 1 else "s"
+    return f"{count} new portfolio alert{plural}. Open your email or the dashboard for details."
 
 
-def push(text: str) -> None:
-    """Optional HTTPS notifications. Never log URLs, payloads or provider exceptions."""
+def push(text: str, count: int | None = None, *, recovered: bool = False) -> None:
+    """Optional HTTPS notifications. Never log URLs, payloads or provider exceptions.
+
+    `text` is the full alert email text and `count` the number of alerts in it. Unless
+    ALERT_PUSH_DETAIL is "full", only the count leaves for the push provider.
+    Operations notices pass no count and use a fixed failure or recovery notice in minimal mode.
+    """
     try:
         settings = PushSettings()
     except ValidationError:
         logger.warning("Invalid alert push settings.")
         return
+    if settings.alert_push_detail != "full":
+        text = (
+            minimal_push_text(count)
+            if count is not None
+            else (
+                "A portfolio job recovered. Check your email for details."
+                if recovered
+                else "A portfolio job failed. Check your email for details."
+            )
+        )
     try:
         if settings.alert_ntfy_url:
             url = settings.alert_ntfy_url.get_secret_value()
@@ -80,7 +106,7 @@ def push(text: str) -> None:
             if response.status != 200:
                 raise ValueError
     except Exception:
-        logger.warning("Alert email sent, but the optional push failed.")
+        logger.warning("Optional push notification failed.")
 
 
 # Close dates appended to a daily-move key: daily:{exchange}:{code}:{previous}:{latest}.
@@ -95,11 +121,17 @@ class Trigger:
     close_dates: tuple[date, date] | None = None
 
 
-def evaluate(session, portfolio, config, now):
+def _skip(skipped: list[tuple[str, str]] | None, key: str, reason: str) -> None:
+    logger.warning("Alert rule skipped (%s): %s.", key, reason)
+    if skipped is not None:
+        skipped.append((key, reason))
+
+
+def evaluate(session, portfolio, config, now, skipped: list[tuple[str, str]] | None = None):
     """Return known rule states. Missing valuation data leaves that rule unchanged."""
     rules = config.alerts
     states: dict[str, Trigger | None] = {}
-    today = now.astimezone(ZoneInfo(config.timezone)).date()
+    today = runtime_settings().today(now)
     instruments = session.scalars(
         select(Instrument).join(Trade).where(Trade.portfolio_id == portfolio.id).distinct()
     ).all()
@@ -134,6 +166,8 @@ def evaluate(session, portfolio, config, now):
         try:
             units = units_at(trades, splits, today)
         except ReturnError:
+            for key in (f"daily:{label}", f"stale:{label}"):
+                _skip(skipped, key, "holding units could not be calculated")
             continue
         if units <= 0:
             states[f"daily:{label}"] = states[f"stale:{label}"] = None
@@ -160,7 +194,7 @@ def evaluate(session, portfolio, config, now):
             states[key] = (
                 Trigger(
                     key,
-                    f"{label} moved {movement:+.2f}% ({start} to {end}); "
+                    f"{label} moved {display_signed_number(movement)}% ({start} to {end}); "
                     f"closing prices {display_price(opening)} to {display_price(prices[end])} "
                     f"{instrument.currency} "
                     "(split-adjusted).",
@@ -168,6 +202,12 @@ def evaluate(session, portfolio, config, now):
                 )
                 if abs(movement) > limits.daily_percent
                 else None
+            )
+        else:
+            _skip(
+                skipped,
+                f"daily:{label}",
+                "adjacent closing prices are missing, stale or not positive",
             )
         fresh = session.scalar(
             select(func.max(Price.price_date)).where(
@@ -204,20 +244,25 @@ def evaluate(session, portfolio, config, now):
     try:
         report = load_returns(session, portfolio.name, f"{start}:{end}", today=today)
         total = report.total
-        if not total.flags and total.opening > 0:
+        if total.flags:
+            _skip(skipped, "portfolio", "valuation is incomplete or stale")
+        elif total.opening <= 0:
+            _skip(skipped, "portfolio", "opening value is not positive")
+        else:
             change = total.change / total.opening * Decimal(100)
+            opening, closing = display_number(total.opening), display_number(total.closing)
             states["portfolio"] = (
                 Trigger(
                     "portfolio",
-                    f"Portfolio value changed {change:+.2f}% over {rules.period_days} days "
-                    f"({start} to {end}): "
-                    f"{money(total.opening)} to {money(total.closing)} {report.base_currency}.",
+                    f"Portfolio value changed {display_signed_number(change)}% "
+                    f"over {rules.period_days} days ({start} to {end}): "
+                    f"{opening} to {closing} {report.base_currency}.",
                 )
                 if change < -rules.portfolio_drop_percent
                 else None
             )
     except ReturnError:
-        pass
+        _skip(skipped, "portfolio", "valuation could not be calculated")
     return states
 
 
@@ -232,7 +277,7 @@ def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
     failed = False
     portfolio_ids = session.scalars(select(Portfolio.id).order_by(Portfolio.id)).all()
     with localcontext() as context:
-        context.prec = max(context.prec, 80)
+        context.prec = max(context.prec, FINANCIAL_PRECISION)
         for portfolio_id in portfolio_ids:
             if not dry_run and checkpoint and portfolio_id in checkpoint.delivered:
                 continue
@@ -243,7 +288,8 @@ def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
                 portfolio = session.scalar(query)
                 if portfolio is None:
                     continue
-                text = _run_portfolio(session, portfolio, config, now, dry_run)
+                with portfolio_delivery(portfolio_id):
+                    result = _run_portfolio(session, portfolio, config, now, dry_run)
                 if not dry_run:
                     # Includes cleared rules and evaluations with no email due.
                     session.commit()
@@ -257,10 +303,10 @@ def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
             if not dry_run:
                 if checkpoint:
                     checkpoint.complete(portfolio_id)
-                if text:
-                    push(text)
-            if text:
-                output.append(text)
+                if result:
+                    push(*result)
+            if result:
+                output.append(result[0])
     if failed:
         raise MailError("Some portfolio alerts failed. Check alert data and delivery settings.")
     return output
@@ -326,12 +372,19 @@ def _record_delivery(session, portfolio, saved, trigger, now) -> None:
         previous.sent_at = now
 
 
-def _run_portfolio(session, portfolio, config, now, dry_run):
+def _run_portfolio(session, portfolio, config, now, dry_run) -> tuple[str, int] | None:
+    """Email any due alerts. Returns the alert text and how many alerts it holds."""
     states = {
         s.rule_key: s
         for s in session.scalars(select(AlertState).where(AlertState.portfolio_id == portfolio.id))
     }
-    evaluated = evaluate(session, portfolio, config, now)
+    skipped: list[tuple[str, str]] = []
+    evaluated = evaluate(session, portfolio, config, now, skipped)
+    suppressed = ""
+    if dry_run and skipped:
+        lines = [f"Suppressed rules | {portfolio.name}"]
+        lines.extend(f"{key}: {reason}" for key, reason in skipped)
+        suppressed = "\n".join(lines)
     due = []
     for key, trigger in evaluated.items():
         if trigger is None:
@@ -342,11 +395,11 @@ def _run_portfolio(session, portfolio, config, now, dry_run):
         if _is_due(states, trigger, config.alerts.cooldown_hours, now):
             due.append(trigger)
     if not due:
-        return None
+        return (suppressed, 0) if suppressed else None
     text = f"Portfolio alerts | {portfolio.name}\n\n" + "\n".join(t.text for t in due)
     text += "\n\nOpen your dashboard over Tailscale for details."
     if dry_run:
-        return text
+        return "\n\n".join(part for part in (suppressed, text) if part), len(due)
     settings = mail_settings()
     recipients = config.recipients or ([settings.mail_owner] if settings.mail_owner else [])
     html = (
@@ -354,11 +407,15 @@ def _run_portfolio(session, portfolio, config, now, dry_run):
         + "".join(f"<p>{escape(line)}</p>" for line in text.splitlines() if line)
         + "</body></html>"
     )
-    send(
-        settings,
-        message(settings.mail_from, recipients, "Portfolio alerts", html, text),
-        recipients,
-    )
+    # Delivery keys include daily close-date pairs. Sorting makes retries independent
+    # of evaluation order, while a changed set of due alerts sends to everyone.
+    message_id = "\0".join(sorted(_delivery_key(trigger) for trigger in due))
+    with message_delivery(message_id):
+        send(
+            settings,
+            message(settings.mail_from, recipients, "Portfolio alerts", html, text),
+            recipients,
+        )
     for trigger in due:
         _record_delivery(session, portfolio, states, trigger, now)
-    return text
+    return text, len(due)

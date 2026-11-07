@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from portfolio_digest import cli, report_service
+from portfolio_digest import cli, pings, report_service
 from portfolio_digest.mailers import MailError, MailSettings
 from portfolio_digest.reports import Report, ValuePoint, render
 from portfolio_digest.returns import Components, Result, subtotal
@@ -207,7 +207,7 @@ def test_failed_monitoring_is_nonfatal_and_never_logs_secret_url(monkeypatch, ca
     def fail(*a, **kw):
         raise OSError("https://example.invalid/private-token")
 
-    monkeypatch.setattr(report_service, "urlopen", fail)
+    monkeypatch.setattr(pings._opener, "open", fail)
     report_service.ping_kuma(config)
     assert "monitoring push failed" in caplog.text
     assert "private-token" not in caplog.text
@@ -234,6 +234,7 @@ def test_shared_change_retains_decimal_precision():
         assert row.change == D(".01")
 
 
+@pytest.mark.posix
 @pytest.mark.parametrize("overwrite", [False, True])
 def test_preview_files_are_private_even_with_permissive_umask(tmp_path, overwrite):
     import os
@@ -270,6 +271,7 @@ def test_preview_files_are_private_even_with_permissive_umask(tmp_path, overwrit
         assert path.read_text() == content
 
 
+@pytest.mark.posix
 def test_year_end_preview_uses_private_shared_delivery(tmp_path, monkeypatch):
     import os
     import stat
@@ -378,3 +380,56 @@ def test_report_accessible_table_markup():
     assert "<td style=" in html and "<strong>1,421.00</strong></td>" in html
     assert "font-size:9px" not in html and "font-size:10px" not in html
     assert "Demo &amp; Co" in html
+
+
+def test_report_checkpoints_distinguish_periods_and_subjects(monkeypatch):
+    import json
+
+    import httpx
+
+    from portfolio_digest import mailers
+    from portfolio_digest.delivery import RecipientProgress, track_recipients
+
+    settings = MailSettings(
+        _env_file=None,
+        mailer="postmark",
+        mail_from="sender@example.invalid",
+        postmark_server_token="test-only-token",  # noqa: S106 - fictitious sentinel
+    )
+    recipients = ["first@example.invalid", "second@example.invalid"]
+    config = report_config()
+    config.recipients = recipients
+    attempted = []
+    rejecting = True
+
+    def handle(request):
+        recipient = json.loads(request.content)["To"]
+        attempted.append(recipient)
+        code = 406 if rejecting and recipient == recipients[1] else 0
+        return httpx.Response(200, json={"ErrorCode": code})
+
+    factory = httpx.Client
+    monkeypatch.setattr(
+        mailers.httpx, "Client", lambda **kw: factory(transport=httpx.MockTransport(handle))
+    )
+    with track_recipients(RecipientProgress(set(), lambda: None)):
+        with pytest.raises(MailError):
+            report_service.deliver_report(
+                config, "Report", "Original", "Original", settings=settings, message_id="week-1"
+            )
+        rejecting = False
+        # Refreshed figures in the same reporting period do not resend to the first recipient.
+        report_service.deliver_report(
+            config, "Report", "Refreshed", "Refreshed", settings=settings, message_id="week-1"
+        )
+        assert attempted == recipients + [recipients[1]]
+        attempted.clear()
+        report_service.deliver_report(
+            config, "Report", "Next", "Next", settings=settings, message_id="week-2"
+        )
+        assert attempted == recipients
+        attempted.clear()
+        report_service.deliver_report(
+            config, "Different report", "Next", "Next", settings=settings, message_id="week-2"
+        )
+        assert attempted == recipients

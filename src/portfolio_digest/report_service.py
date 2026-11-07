@@ -2,37 +2,36 @@
 
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit
-from urllib.request import urlopen
-from zoneinfo import ZoneInfo
 
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from portfolio_digest.config import ConfigError
+from portfolio_digest.config import ConfigError, runtime_settings
+from portfolio_digest.delivery import message_delivery, portfolio_delivery
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
 from portfolio_digest.models import Portfolio
+from portfolio_digest.pings import PingError, ping
 from portfolio_digest.reports import ReportError, build_report, render
 from portfolio_digest.scheduling import DeliveryCheckpoint, ScheduleConfig, SchedulerStateError
 
 logger = logging.getLogger(__name__)
 
 
-def ping_kuma(config: ScheduleConfig) -> None:
-    if not config.kuma_push_url:
+def ping_monitor(url: SecretStr | None) -> None:
+    """Ping an Uptime Kuma push URL. The URL is never logged."""
+    if url is None or not url.get_secret_value():
         return
     try:
-        url = config.kuma_push_url.get_secret_value()
-        if urlsplit(url).scheme not in {"https", "http"}:
-            raise ValueError
-        # urllib does not emit HTTP request URLs (the push URL contains a secret).
-        with urlopen(url, timeout=10) as response:  # noqa: S310
-            if response.status != 200:
-                raise ValueError
-    except Exception:
-        logger.warning("Report sent, but the monitoring push failed.")
+        ping(url.get_secret_value())
+    except PingError:
+        logger.warning("The monitoring push failed.")
+
+
+def ping_kuma(config: ScheduleConfig) -> None:
+    ping_monitor(config.kuma_push_url)
 
 
 def _validate_preview(dry_run: bool, out: Path | None) -> None:
@@ -55,7 +54,7 @@ def run_report(
 ) -> None:
     _validate_preview(dry_run, out)
     schedule = config.named_report(schedule_name)
-    today = (now or datetime.now(UTC)).astimezone(ZoneInfo(config.timezone)).date()
+    today = runtime_settings().today(now)
     if schedule.period == "tax_year":
         from portfolio_digest.year_end_service import latest_ended_year, run_year_end
 
@@ -73,15 +72,16 @@ def run_report(
                 out.with_name(f"{out.stem}-portfolio-{portfolio_id}{out.suffix}") if out else None
             )
             try:
-                run_year_end(
-                    session,
-                    config,
-                    name,
-                    year,
-                    dry_run=dry_run,
-                    out=preview,
-                    settings=settings,
-                )
+                with portfolio_delivery(portfolio_id):
+                    run_year_end(
+                        session,
+                        config,
+                        name,
+                        year,
+                        dry_run=dry_run,
+                        out=preview,
+                        settings=settings,
+                    )
             except SchedulerStateError:
                 raise
             except Exception:
@@ -109,6 +109,7 @@ def run_report(
         dry_run=dry_run,
         out=out,
         settings=settings,
+        message_id=f"{start.isoformat()}\0{end.isoformat()}",
     )
     if not dry_run:
         ping_kuma(config)
@@ -140,6 +141,7 @@ def deliver_report(
     settings: MailSettings | None = None,
     csv: str | None = None,
     csv_name: str = "report.csv",
+    message_id: str = "",
 ) -> None:
     """Shared preview and mailer boundary for every report."""
     _validate_preview(dry_run, out)
@@ -160,5 +162,6 @@ def deliver_report(
     msg = message(settings.mail_from, recipients, subject, html, text)
     if csv is not None:
         msg.add_attachment(csv.encode("utf-8"), maintype="text", subtype="csv", filename=csv_name)
-    send(settings, msg, recipients)
+    with message_delivery(f"{subject}\0{message_id}"):
+        send(settings, msg, recipients)
     logger.info("Portfolio report sent successfully.")

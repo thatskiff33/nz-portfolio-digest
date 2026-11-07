@@ -3,6 +3,7 @@
 import base64
 import smtplib
 import ssl
+from dataclasses import replace
 from email.message import EmailMessage
 from typing import Literal
 
@@ -11,10 +12,19 @@ from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from portfolio_digest.config import ConfigError
+from portfolio_digest.delivery import recipient_progress
 
 
 class MailError(Exception):
     """Safe delivery failure; provider messages can contain passwords or message bodies."""
+
+
+class RecipientDeliveryError(MailError):
+    """A sanitised summary of recipient failures, safe for callers and logs."""
+
+    def __init__(self, failed_count: int):
+        self.failed_count = failed_count
+        super().__init__(f"Mail delivery failed: {failed_count} recipient(s) failed.")
 
 
 class MailSettings(BaseSettings):
@@ -138,8 +148,6 @@ class PostmarkMailer:
         token = _secret(self.settings.postmark_server_token, "POSTMARK_SERVER_TOKEN")
         payload = {
             "From": str(msg["From"]),
-            "To": recipients[0],
-            "Bcc": ",".join(recipients[1:]),
             "Subject": str(msg["Subject"]),
             "HtmlBody": msg.get_body(preferencelist=("html",)).get_content(),
             "TextBody": msg.get_body(preferencelist=("plain",)).get_content(),
@@ -154,15 +162,37 @@ class PostmarkMailer:
         ]
         if attachments:
             payload["Attachments"] = attachments
+        # One message per recipient, so no recipient sees another's address (Postmark has
+        # no undisclosed-recipients form: its first address is always visible in To).
+        progress = recipient_progress()
+        if progress is not None and not progress.message_id:
+            # Report subjects include their period; callers can supply a fuller identity.
+            progress = replace(progress, message_id=str(msg["Subject"]))
+        failures = 0
         with httpx.Client(timeout=30) as client:
-            response = client.post(
-                "https://api.postmarkapp.com/email",
-                headers={"X-Postmark-Server-Token": token},
-                json=payload,
-            )
-            response.raise_for_status()
-            if response.json().get("ErrorCode") != 0:
-                raise MailError("Mail delivery failed: Postmark rejected the message.")
+            for recipient in dict.fromkeys(recipients):
+                if progress is not None and progress.key(recipient) in progress.delivered:
+                    continue
+                try:
+                    response = client.post(
+                        "https://api.postmarkapp.com/email",
+                        headers={"X-Postmark-Server-Token": token},
+                        json={**payload, "To": recipient},
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+                    code = result.get("ErrorCode") if isinstance(result, dict) else None
+                    accepted = type(code) is int and code == 0
+                except (httpx.HTTPError, ValueError):
+                    accepted = False
+                if not accepted:
+                    failures += 1
+                    continue
+                if progress is not None:
+                    # Persist outside the alert transaction, before attempting another recipient.
+                    progress.complete(recipient)
+        if failures:
+            raise RecipientDeliveryError(failures)
 
 
 class SesMailer:
@@ -203,7 +233,7 @@ def send(settings: MailSettings, msg: EmailMessage, recipients: list[str]) -> No
         mailer = SmtpMailer(settings)
     try:
         mailer.send(msg, recipients)
-    except ConfigError:
+    except (ConfigError, RecipientDeliveryError):
         raise
     except Exception:
         # Never include provider exception text, response bodies, SMTP credentials or URLs.

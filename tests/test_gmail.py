@@ -12,6 +12,15 @@ from portfolio_digest.gmail import SCOPE, AsbGmailImporter, GmailClient, GmailEr
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def test_compose_passes_optional_gmail_settings_to_the_import_container():
+    compose = (Path(__file__).resolve().parents[1] / "compose.yaml").read_text()
+    app_environment = compose.split("environment: &app_environment\n", 1)[1].split(
+        "    depends_on:", 1
+    )[0]
+    for name in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_LABEL"):
+        assert f"{name}: ${{{name}:-}}" in app_environment
+
+
 class FakeGoogle:
     def __init__(self):
         self.calls = []
@@ -88,6 +97,7 @@ def test_gmail_feed_can_return_duplicate_contract_notes_for_storage_to_deduplica
     ]
 
 
+@pytest.mark.posix
 def test_save_refresh_token_refuses_existing_file_and_force_replaces_privately(tmp_path):
     from portfolio_digest.gmail import save_refresh_token
 
@@ -104,6 +114,7 @@ def test_save_refresh_token_refuses_existing_file_and_force_replaces_privately(t
 
 @pytest.mark.parametrize("force", [False, True])
 @pytest.mark.parametrize("dangling", [False, True])
+@pytest.mark.posix
 def test_save_refresh_token_refuses_symlinks(tmp_path, force, dangling):
     from portfolio_digest.gmail import save_refresh_token
 
@@ -121,6 +132,7 @@ def test_save_refresh_token_refuses_symlinks(tmp_path, force, dangling):
     assert not target.exists() if dangling else target.read_text() == "preserve-me"
 
 
+@pytest.mark.posix
 def test_save_refresh_token_creates_private_file(tmp_path):
     from portfolio_digest.gmail import save_refresh_token
 
@@ -131,6 +143,7 @@ def test_save_refresh_token_creates_private_file(tmp_path):
         assert path.stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.posix
 def test_authorise_cli_passes_force_and_names_env_variable_without_exposing_token(
     tmp_path, monkeypatch, capsys
 ):

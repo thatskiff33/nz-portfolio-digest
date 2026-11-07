@@ -2,13 +2,14 @@
 {% block title %}Sign in · Portfolio digest{% endblock %}
 {% block content %}
     <p class="eyebrow">Private workspace</p>
-    <h1>Sign in to make changes</h1>
-    <p class="muted">Reading is open on this private address. Your password unlocks trades, corrections and import undo for eight hours.</p>
+    <h1>Sign in to your portfolio</h1>
+    <p class="muted">Sign in to view your portfolio and make changes. Your session ends after 30 minutes without activity or eight hours after sign-in.</p>
     <form class="panel entry-form"
           action="/login"
           method="post"
           hx-boost="false">
         <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
+        <input type="hidden" name="next" value="{{ next_path }}">
         <label>
             App password<input type="password"
        name="password"

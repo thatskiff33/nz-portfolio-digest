@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -73,6 +74,7 @@ def test_checked_in_config_shares_prices_and_reports():
         'timezone="private-token"\nschedules=[]',
         'recipients=["bad\\nprivate-token"]\nschedules=[]',
         'kuma_push_url="private-token"\nschedules="wrong"',
+        'prices_kuma_push_url="private-token"\nschedules="wrong"',
         '[[schedules]]\nname="x"\nkind="report"\nfrequency="daily"\nat="09:00:12"',
     ],
 )
@@ -178,17 +180,17 @@ def test_changing_config_replaces_pending_time_on_restart(tmp_path):
     )
 
 
-def test_annual_year_end_runs_once_at_nine_auckland_across_dst_and_leap_year():
+def test_annual_year_end_runs_once_at_nineteen_auckland_across_dst_and_leap_year():
     from pathlib import Path
 
     schedule = read_config(Path("schedules.toml")).named_report("year-end")
     assert schedule.period == "tax_year"
     # 1 April is still NZDT in 2026 and 2027, but NZST in 2029.
-    first = datetime(2026, 3, 31, 20, tzinfo=UTC)
+    first = datetime(2026, 4, 1, 6, tzinfo=UTC)
     assert schedule.next_run(datetime(2026, 1, 1, tzinfo=UTC)) == first
-    assert schedule.next_run(first) == datetime(2027, 3, 31, 20, tzinfo=UTC)
-    assert schedule.next_run(datetime(2028, 3, 31, 20, tzinfo=UTC)) == datetime(
-        2029, 3, 31, 21, tzinfo=UTC
+    assert schedule.next_run(first) == datetime(2027, 4, 1, 6, tzinfo=UTC)
+    assert schedule.next_run(datetime(2028, 4, 1, 6, tzinfo=UTC)) == datetime(
+        2029, 4, 1, 7, tzinfo=UTC
     )
 
 
@@ -284,6 +286,11 @@ def test_changed_or_removed_schedule_logs_discard(tmp_path, caplog, removed):
         {"delivered": [0]},
         {"delivered": [1, 1]},
         {"delivered": {}},
+        {"recipients_keyed": "true"},
+        {"recipients": ["invented-private-token"]},
+        {"recipients": {}},
+        {"recipients": [True]},
+        {"recipients": ["a" * 64, "a" * 64]},
     ],
 )
 def test_invalid_retry_state_is_fatal_and_sanitised(tmp_path, retry):
@@ -362,14 +369,14 @@ def test_checkpoint_write_error_is_fatal_and_preserves_previous_file(tmp_path, m
         elif stage == "replace":
             monkeypatch.setattr(Path, "replace", fail)
         else:
-            original_open = Path.open
+            original_open = scheduling.os.open
 
             def open_file(path, *args, **kwargs):
-                if path.suffix == ".new":
+                if str(path).endswith(".new"):
                     fail()
                 return original_open(path, *args, **kwargs)
 
-            monkeypatch.setattr(Path, "open", open_file)
+            monkeypatch.setattr(scheduling.os, "open", open_file)
         checkpoint.complete(1)
 
     with pytest.raises(SchedulerStateError, match="Cannot write scheduler state"):
@@ -447,6 +454,24 @@ def test_report_environment_precedence_and_private_legacy_warning(
     assert "invented-token" not in caplog.text
 
 
+@pytest.mark.parametrize("override", [False, True])
+def test_price_monitor_environment_precedence_and_private_legacy_warning(
+    no_settings_file, tmp_path, monkeypatch, caplog, override
+):
+    path = tmp_path / "schedules.toml"
+    legacy_url = "https://monitor.example.invalid/invented-prices-token"
+    path.write_text(f'prices_kuma_push_url="{legacy_url}"\nschedules=[]')
+    monkeypatch.setenv(
+        "REPORT_PRICES_KUMA_PUSH_URL", "https://new.example.invalid/prices" if override else "  "
+    )
+    config = read_config(path)
+    assert config.prices_kuma_push_url.get_secret_value() == (
+        "https://new.example.invalid/prices" if override else legacy_url
+    )
+    assert "REPORT_PRICES_KUMA_PUSH_URL" in caplog.text
+    assert "invented-prices-token" not in caplog.text
+
+
 @pytest.mark.parametrize("value", ["", "  "])
 def test_empty_report_environment_keeps_owner_fallback(
     no_settings_file, monkeypatch, tmp_path, value
@@ -454,13 +479,14 @@ def test_empty_report_environment_keeps_owner_fallback(
     from portfolio_digest.mailers import MailSettings
     from portfolio_digest.report_service import deliver_report
 
-    for setting in ("REPORT_RECIPIENTS", "REPORT_KUMA_PUSH_URL"):
+    for setting in ("REPORT_RECIPIENTS", "REPORT_KUMA_PUSH_URL", "REPORT_PRICES_KUMA_PUSH_URL"):
         monkeypatch.setenv(setting, value)
     path = tmp_path / "schedule.toml"
     path.write_text("schedules=[]")
     config = read_config(path)
     assert config.recipients == []
     assert config.kuma_push_url is None
+    assert config.prices_kuma_push_url is None
     delivered = []
     monkeypatch.setattr("portfolio_digest.report_service.send", lambda s, m, r: delivered.extend(r))
     deliver_report(
@@ -508,3 +534,484 @@ def test_scheduler_writes_its_heartbeat_each_cycle(tmp_path, monkeypatch):
         )
     assert cycles == 2
     assert heartbeat.stat().st_mtime > datetime.now().timestamp() - 30
+
+
+def seeded_weekly(tmp_path):
+    schedule = weekly()
+    config = ScheduleConfig(schedules=[schedule])
+    path = tmp_path / "state.json"
+    due = datetime(2026, 11, 6, 6, tzinfo=UTC)
+    path.write_text(
+        json.dumps(
+            {
+                "weekly": due.isoformat(),
+                "weekly:config": schedule.model_dump_json() + config.timezone,
+            }
+        )
+    )
+    return config, path
+
+
+def digits_outside_dates(text: str) -> str:
+    return re.sub(r"\d{4}-\d{2}-\d{2}", "", text)
+
+
+def test_failing_job_notifies_once_a_day_and_once_when_it_recovers(tmp_path):
+    config, path = seeded_weekly(tmp_path)
+    sent = []
+    start = datetime(2026, 11, 6, 7, tzinfo=UTC)
+
+    def fail_at(when):
+        with pytest.raises(StopLoop):
+            Scheduler(config, path).run(
+                lambda *a: (1, ("NZX:MADEUP", "https://monitor.example/secret-token")),
+                now=lambda: when,
+                sleep=stop,
+                notify=sent.append,
+            )
+
+    fail_at(start)
+    fail_at(start + timedelta(hours=1))
+    fail_at(start + timedelta(hours=22))
+    assert len(sent) == 1
+    assert "NZX:MADEUP" in sent[0]
+    assert "secret-token" not in sent[0]
+    assert "https://" not in sent[0]
+    stored = json.loads(path.read_text())
+    assert stored["weekly"] == datetime(2026, 11, 6, 6, tzinfo=UTC).isoformat()
+    assert "weekly:notice" in stored
+
+    fail_at(start + timedelta(hours=24))
+    assert len(sent) == 2
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: 0,
+            now=lambda: start + timedelta(hours=30),
+            sleep=lambda _: (_ for _ in ()).throw(StopLoop()),
+            notify=sent.append,
+        )
+    assert len(sent) == 3
+    assert "recovered" in sent[-1]
+    assert "NZX:MADEUP" not in sent[-1]
+    assert "weekly:notice" not in json.loads(path.read_text())
+    for note in sent:
+        assert not re.search(r"\d", digits_outside_dates(note))
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: 0,
+            now=lambda: start + timedelta(hours=31),
+            sleep=lambda _: (_ for _ in ()).throw(StopLoop()),
+            notify=sent.append,
+        )
+    assert len(sent) == 3
+
+
+def test_job_exception_notifies_without_the_error_text(tmp_path):
+    config, path = seeded_weekly(tmp_path)
+    sent = []
+
+    def explode(*_args):
+        raise RuntimeError("provider said 42")
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            explode,
+            now=lambda: datetime(2026, 11, 6, 7, tzinfo=UTC),
+            notify=sent.append,
+            sleep=stop,
+        )
+    assert sent == [
+        "The weekly job failed on 2026-11-06.\n\nIt will be retried.",
+    ]
+    assert not re.search(r"\d", digits_outside_dates(sent[0]))
+
+
+def test_notice_delivery_failure_does_not_stop_the_scheduler(tmp_path, caplog):
+    config, path = seeded_weekly(tmp_path)
+    calls = []
+    start = datetime(2026, 11, 6, 7, tzinfo=UTC)
+
+    def notify(text):
+        calls.append(text)
+        raise RuntimeError("mailbox down")
+
+    with caplog.at_level("WARNING"), pytest.raises(StopLoop):
+        Scheduler(config, path).run(lambda *a: 1, now=lambda: start, notify=notify, sleep=stop)
+    assert len(calls) == 1
+    assert "could not be delivered" in caplog.text
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: 1, now=lambda: start + timedelta(hours=1), notify=notify, sleep=stop
+        )
+    assert len(calls) == 1
+
+
+def test_partial_price_fetch_advances_but_recovers_only_after_clean_fetch(tmp_path):
+    schedule = Schedule(name="prices", kind="prices", frequency="daily", at="20:00")
+    config = ScheduleConfig(schedules=[schedule])
+    path = tmp_path / "state.json"
+    due = datetime(2026, 11, 6, 7, tzinfo=UTC)
+    seed(path, config, due)
+    sent = []
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: (0, ("NZX:MADEUP",)), now=lambda: due, sleep=stop, notify=sent.append
+        )
+    state = json.loads(path.read_text())
+    assert state["prices:retry"]["failures"] == 0
+    assert datetime.fromisoformat(state["prices"]) > due
+    assert len(sent) == 1
+    assert "NZX:MADEUP" in sent[0]
+
+    # Restart before the next occurrence neither retries nor announces recovery.
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: pytest.fail("Partial fetch was retried"),
+            now=lambda: due + timedelta(hours=1),
+            sleep=stop,
+            notify=sent.append,
+        )
+    assert len(sent) == 1
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: (0, ()),
+            now=lambda: due + timedelta(days=1),
+            sleep=stop,
+            notify=sent.append,
+        )
+    assert len(sent) == 2
+    assert "recovered" in sent[-1]
+    assert "prices:notice" not in json.loads(path.read_text())
+
+
+@pytest.mark.parametrize(
+    "report_time,price_time,price_frequency,price_options,warns",
+    [
+        ("08:00", "10:30", "daily", {}, True),
+        ("10:30", "10:30", "daily", {}, True),
+        ("19:00", "10:30", "daily", {}, False),
+        ("19:00", "10:30", "weekly", {"weekday": "monday"}, True),
+        ("19:00", "10:30", "monthly", {"day": 2}, True),
+        ("19:00", "10:30", "monthly", {"day": 1}, False),
+        ("19:00", "10:30", "yearly", {"day": 1, "month": 4}, True),
+    ],
+)
+def test_report_timing_warning_at_startup(
+    tmp_path, caplog, report_time, price_time, price_frequency, price_options, warns
+):
+    config = ScheduleConfig(
+        schedules=[
+            Schedule(name="monthly", kind="report", frequency="monthly", at=report_time),
+            Schedule(
+                name="prices",
+                kind="prices",
+                frequency=price_frequency,
+                at=price_time,
+                **price_options,
+            ),
+        ]
+    )
+
+    class StopLoop(Exception):
+        pass
+
+    def stop(_):
+        raise StopLoop
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, tmp_path / "state.json").run(
+            lambda *args: 0, now=lambda: datetime(2026, 11, 1, tzinfo=UTC), sleep=stop
+        )
+    assert ("Report monthly at" in caplog.text) == warns
+    if warns:
+        assert caplog.text.count("Report monthly at") == 1
+        assert report_time in caplog.text
+
+
+def test_default_report_times_and_startup_have_no_timing_warnings(tmp_path, caplog):
+    from datetime import time
+    from pathlib import Path
+
+    config = read_config(Path("schedules.toml"))
+    assert config.named_report("monthly").at == time(19)
+    assert config.named_report("year-end").at == time(19)
+    assert config.report_timing_warnings() == []
+
+    class StopLoop(Exception):
+        pass
+
+    def stop(_):
+        raise StopLoop
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, tmp_path / "state.json").run(
+            lambda *args: 0, now=lambda: datetime(2026, 11, 1, tzinfo=UTC), sleep=stop
+        )
+    assert not caplog.records
+
+
+def test_collective_weekly_fetches_cover_daily_reports():
+    from portfolio_digest.scheduling import WEEKDAYS
+
+    config = ScheduleConfig(
+        schedules=[
+            Schedule(name="daily", kind="report", frequency="daily", at="19:00"),
+            *(
+                Schedule(name=day, kind="prices", frequency="weekly", weekday=day, at="10:30")
+                for day in WEEKDAYS
+            ),
+        ]
+    )
+    assert config.report_timing_warnings() == []
+    config.schedules.pop()
+    assert config.report_timing_warnings()
+
+
+@pytest.mark.parametrize("portfolio_ids", [[None], [1, 2]])
+def test_postmark_recipient_success_survives_restart_until_next_occurrence(
+    tmp_path, monkeypatch, portfolio_ids
+):
+    import httpx
+
+    from portfolio_digest import mailers
+    from portfolio_digest.delivery import portfolio_delivery, recipient_progress
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+    recipients = ["first@example.invalid", "second@example.invalid"]
+    attempted = []
+    rejecting = True
+
+    def handle(request):
+        recipient = json.loads(request.content)["To"]
+        attempted.append(recipient)
+        if rejecting and recipient == recipients[1]:
+            return httpx.Response(200, json={"ErrorCode": 406})
+        return httpx.Response(200, json={"ErrorCode": 0})
+
+    factory = httpx.Client
+    monkeypatch.setattr(
+        mailers.httpx, "Client", lambda **kw: factory(transport=httpx.MockTransport(handle))
+    )
+    settings = mailers.MailSettings(
+        _env_file=None,
+        mailer="postmark",
+        postmark_server_token="test-only-token",  # noqa: S106
+    )
+
+    def execute(schedule, at, checkpoint):
+        failed = False
+        for portfolio_id in portfolio_ids:
+            try:
+                msg = mailers.message("sender@example.invalid", recipients, "Report", "Hi", "Hi")
+                if portfolio_id is None:
+                    mailers.send(settings, msg, recipients)
+                else:
+                    with portfolio_delivery(portfolio_id):
+                        mailers.send(settings, msg, recipients)
+            except mailers.MailError:
+                failed = True
+        return int(failed)
+
+    for minutes in [0, 30]:
+        with pytest.raises(StopLoop):
+            Scheduler(config, path).run(
+                execute, now=lambda minutes=minutes: due + timedelta(minutes=minutes), sleep=stop
+            )
+        assert recipient_progress() is None
+    assert attempted == recipients * len(portfolio_ids) + [recipients[1]] * len(portfolio_ids)
+    state_text = path.read_text()
+    assert "@" not in state_text
+    assert len(json.loads(state_text)["weekly:retry"]["recipients"]) == len(portfolio_ids)
+    rejecting = False
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: due + timedelta(minutes=90), sleep=stop)
+    assert json.loads(path.read_text())["weekly:retry"]["recipients"] == []
+    attempted.clear()
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: due + timedelta(days=7), sleep=stop)
+    assert attempted == recipients * len(portfolio_ids)
+
+
+def test_postmark_recipient_checkpoint_write_failure_stops_delivery(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import httpx
+
+    from portfolio_digest import mailers
+    from portfolio_digest.scheduling import SchedulerStateError
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+    attempted = []
+    factory = httpx.Client
+
+    def handle(request):
+        attempted.append(json.loads(request.content)["To"])
+        return httpx.Response(200, json={"ErrorCode": 0})
+
+    monkeypatch.setattr(
+        mailers.httpx, "Client", lambda **kw: factory(transport=httpx.MockTransport(handle))
+    )
+
+    def execute(*args):
+        def fail(*args):
+            raise OSError("invented-private-token")
+
+        monkeypatch.setattr(Path, "replace", fail)
+        mailers.send(
+            mailers.MailSettings(
+                _env_file=None,
+                mailer="postmark",
+                postmark_server_token="test-only-token",  # noqa: S106 - fictitious sentinel
+            ),
+            mailers.message("sender@example.invalid", [], "Report", "Hi", "Hi"),
+            ["first@example.invalid", "second@example.invalid"],
+        )
+
+    with pytest.raises(SchedulerStateError, match="Cannot write scheduler state"):
+        Scheduler(config, path).run(execute, now=lambda: due, sleep=stop)
+    assert attempted == ["first@example.invalid"]
+    assert json.loads(path.read_text())["weekly:retry"]["recipients"] == []
+
+
+@pytest.mark.parametrize(
+    "day",
+    [
+        date(2027, 1, 12),  # NZ daylight saving, New York standard time.
+        date(2027, 3, 23),  # Both on daylight saving.
+        date(2027, 7, 13),  # NZ standard time, New York daylight saving.
+    ],
+)
+def test_default_morning_fetch_follows_us_price_and_fx_closes(day):
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+
+    from portfolio_digest.prices.calendars import FX, for_exchange
+
+    config = read_config(Path(__file__).parent.parent / "schedules.toml")
+    morning = next(s for s in config.schedules if s.name == "prices-morning")
+    midnight = datetime.combine(day, datetime.min.time(), ZoneInfo(config.timezone))
+    due = morning.next_run(midnight, config.timezone)
+    assert due.astimezone(ZoneInfo(config.timezone)).date() == day
+    for calendar in (for_exchange("NYSE"), FX):
+        assert calendar.latest_closed_day(due) == day - timedelta(days=1)
+
+
+@pytest.mark.posix
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_scheduler_state_and_key_are_private_before_writing(tmp_path, monkeypatch, preexisting):
+    from portfolio_digest import scheduling
+
+    path = tmp_path / "state.json"
+    key_path = tmp_path / "state.json.key"
+    temporary = path.with_suffix(".new")
+    if preexisting:
+        path.write_text("{}")
+        temporary.write_text("old temporary file")
+        key_path.write_bytes(b"k" * 32)
+        for file in (path, temporary, key_path):
+            file.chmod(0o666)
+    dump = scheduling.json.dump
+
+    def private_dump(*args, **kwargs):
+        assert temporary.stat().st_mode & 0o777 == 0o600
+        assert key_path.stat().st_mode & 0o777 == 0o600
+        return dump(*args, **kwargs)
+
+    monkeypatch.setattr(scheduling.json, "dump", private_dump)
+    previous_umask = os.umask(0)
+    try:
+        with pytest.raises(StopLoop):
+            Scheduler(ScheduleConfig(schedules=[weekly()]), path).run(
+                lambda *a: 0,
+                now=lambda: datetime(2026, 10, 25, 0, tzinfo=UTC),
+                sleep=stop,
+            )
+    finally:
+        os.umask(previous_umask)
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert len(key_path.read_bytes()) == 32
+
+
+@pytest.mark.parametrize("missing_fchmod", [False, True])
+def test_legacy_recipient_checkpoints_are_keyed_without_resending(
+    tmp_path, monkeypatch, missing_fchmod
+):
+    from hashlib import sha256
+
+    from portfolio_digest.delivery import message_delivery, portfolio_delivery, recipient_progress
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+    if missing_fchmod:
+        monkeypatch.delattr(os, "fchmod", raising=False)
+    recipient = "first@example.invalid"
+    legacy = sha256(f"portfolio:7\0report-identity\0{recipient}".encode()).hexdigest()
+    state = json.loads(path.read_text())
+    state["weekly:retry"] = {"recipients": [legacy]}
+    path.write_text(json.dumps(state))
+    seen = []
+
+    def execute(*args):
+        with portfolio_delivery(7), message_delivery("report-identity"):
+            progress = recipient_progress()
+            assert progress.key(recipient) in progress.delivered
+            seen.append(progress.key(recipient))
+        return 1
+
+    for minutes in (0, 30):
+        with pytest.raises(StopLoop):
+            Scheduler(config, path).run(
+                execute, now=lambda minutes=minutes: due + timedelta(minutes=minutes), sleep=stop
+            )
+        assert legacy not in path.read_text()
+        assert json.loads(path.read_text())["weekly:retry"]["recipients_keyed"] is True
+    assert seen[0] == seen[1]
+    # The same candidate and scope give a different checkpoint on another install.
+    other_path = tmp_path / "other.json"
+    seed(other_path, config, due)
+    other = []
+
+    def capture(*args):
+        with portfolio_delivery(7), message_delivery("report-identity"):
+            other.append(recipient_progress().key(recipient))
+        return 1
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, other_path).run(capture, now=lambda: due, sleep=stop)
+    assert other[0] != seen[0]
+
+
+@pytest.mark.parametrize("key_contents", [None, b"", b"short", b"k" * 33])
+def test_missing_or_invalid_key_stops_scheduler_without_resetting_progress(tmp_path, key_contents):
+    from portfolio_digest.delivery import recipient_progress
+
+    path = tmp_path / "state.json"
+    config = ScheduleConfig(schedules=[weekly()])
+    due = datetime(2026, 10, 25, 7, tzinfo=UTC)
+    seed(path, config, due)
+
+    def execute(*args):
+        recipient_progress().complete("first@example.invalid")
+        return 1
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(execute, now=lambda: due, sleep=stop)
+    previous = path.read_bytes()
+    key_path = tmp_path / "state.json.key"
+    if key_contents is None:
+        key_path.unlink()
+    else:
+        key_path.write_bytes(key_contents)
+    with pytest.raises(ConfigError, match="checkpoint key"):
+        Scheduler(config, path).run(lambda *a: pytest.fail("Sent without key"))
+    assert path.read_bytes() == previous

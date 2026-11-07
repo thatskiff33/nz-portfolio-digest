@@ -1,8 +1,8 @@
 """Server-rendered private dashboard. No portfolio data leaves this server."""
 
-import os
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlencode
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
@@ -13,8 +13,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from portfolio_digest.config import Settings, get_settings
 from portfolio_digest.db import make_engine
-from portfolio_digest.formatting import display_quantity
+from portfolio_digest.formatting import display_number, display_quantity
 from portfolio_digest.importers.base import FileProblem, RowProblem
 from portfolio_digest.importing import ImportFailure, undo_import
 from portfolio_digest.manual import TradeProblem, add_trade, prepare_trade
@@ -22,10 +23,51 @@ from portfolio_digest.models import ImportRun, Income, Instrument, Portfolio, Tr
 from portfolio_digest.reconcile import compare, parse_snapshot, stored_units
 from portfolio_digest.returns import ReturnError, holding_return
 from portfolio_digest.returns_loader import first_activity_date, load_portfolio_inputs
-from portfolio_digest.web.security import COOKIE, LIFETIME, Security
+from portfolio_digest.web.hosts import DashboardTrustedHostMiddleware
+from portfolio_digest.web.security import ANONYMOUS_LIFETIME, LIFETIME, Security
 from portfolio_digest.web.viewmodel import Dashboard, effective_period, period_dates
 
 ROOT = Path(__file__).parent
+# Dashboard forms are small; refuse anything larger before parsing it.
+FORM_MAX_BYTES = 64 * 1024
+FORM_MAX_FIELDS = 30
+
+
+def safe_next(value: str) -> str:
+    """Accept only local paths, including after URL decoding by a browser."""
+    decoded = value
+    for _ in range(5):
+        if (
+            not decoded.startswith("/")
+            or decoded.startswith("//")
+            or chr(92) in decoded
+            or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
+        ):
+            return "/"
+        expanded = unquote(decoded)
+        if expanded == decoded:
+            return value
+        decoded = expanded
+    return "/"
+
+
+def group_holdings(holdings, sort, direction):
+    """Validate the requested order, sort holdings and group them by exchange."""
+    if sort not in {"code", "name", "quantity", "price", "value"} or direction not in {
+        "asc",
+        "desc",
+    }:
+        raise HTTPException(400, "Choose a valid sort order.")
+
+    def key(row):
+        value = getattr(row.instrument, sort) if sort in {"code", "name"} else getattr(row, sort)
+        return value is None, value if value is not None else 0
+
+    rows = sorted(holdings, key=key, reverse=direction == "desc")
+    markets = {}
+    for row in rows:
+        markets.setdefault(row.instrument.exchange, []).append(row)
+    return dict(sorted(markets.items()))
 
 
 def create_app(
@@ -33,16 +75,22 @@ def create_app(
     password: str | None = None,
     *,
     timezone="Pacific/Auckland",
-    secure_cookie: bool = False,
+    secure_cookie: bool | None = None,
+    settings: Settings | None = None,
 ) -> FastAPI:
+    settings = settings or (
+        get_settings() if engine is None else Settings(database_url=str(engine.url))
+    )
     engine = engine if engine is not None else make_engine()
+    secure_cookie = settings.dashboard_secure_cookie if secure_cookie is None else secure_cookie
     security = Security(
-        password if password is not None else os.environ.get("DASHBOARD_PASSWORD", "")
+        password if password is not None else settings.dashboard_password.get_secret_value(),
+        secure_cookie=secure_cookie,
     )
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.security = security
     templates = Jinja2Templates(directory=ROOT / "templates")
-    templates.env.filters["money"] = lambda n: "Unavailable" if n is None else f"{n:,.2f}"
+    templates.env.filters["money"] = lambda n: "Unavailable" if n is None else display_number(n)
     templates.env.filters["quantity"] = display_quantity
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
@@ -54,12 +102,27 @@ def create_app(
     @app.middleware("http")
     async def headers(request: Request, call_next):
         try:
-            if request.url.path != "/healthz" and not request.url.path.startswith("/static/"):
-                request.state.session_id, request.state.browser = security.browser(request)
+            request.state.session_id, request.state.browser = security.browser(request)
+            public = (
+                request.url.path == "/login"
+                or (request.url.path == "/logout" and request.method == "POST")
+                or request.url.path == "/static"
+                or request.url.path.startswith("/static/")
+            )
+            if not public and not request.state.browser.authenticated:
+                if request.method in {"GET", "HEAD"}:
+                    target = request.url.path
+                    if request.url.query:
+                        target += "?" + request.url.query
+                    response = RedirectResponse(
+                        "/login?" + urlencode({"next": target}), status_code=303
+                    )
+                else:
+                    response = HTMLResponse("Sign in to view your portfolio.", status_code=401)
+            else:
+                response = await call_next(request)
         except HTTPException as exc:
             response = HTMLResponse(str(exc.detail), status_code=exc.status_code)
-        else:
-            response = await call_next(request)
         response.headers.update(
             {
                 "Content-Security-Policy": "default-src 'self'; script-src 'self'; "
@@ -75,9 +138,9 @@ def create_app(
         )
         if getattr(request.state, "session_id", ""):
             response.set_cookie(
-                COOKIE,
+                security.cookie,
                 request.state.session_id,
-                max_age=LIFETIME,
+                max_age=LIFETIME if request.state.browser.authenticated else ANONYMOUS_LIFETIME,
                 httponly=True,
                 samesite="strict",
                 secure=secure_cookie,
@@ -140,12 +203,12 @@ def create_app(
         parts = []
         async for chunk in request.stream():
             size += len(chunk)
-            if size > 65536:
+            if size > FORM_MAX_BYTES:
                 raise HTTPException(413, "Form too large.")
             parts.append(chunk)
         request._body = b"".join(parts)
 
-        data = await request.form(max_fields=30, max_files=0)
+        data = await request.form(max_fields=FORM_MAX_FIELDS, max_files=0)
         request.state.csrf_expired = False
         try:
             security.csrf(request, str(data.get("csrf", "")))
@@ -166,14 +229,17 @@ def create_app(
     @app.get("/login", response_class=HTMLResponse)
     def login_page(request: Request):
         request.state.session_id, request.state.browser = security.browser(request, create=True)
-        with Session(engine) as session:
-            return render(request, session, "login.html")
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={"next_path": safe_next(request.query_params.get("next", "/"))},
+        )
 
     @app.post("/login")
     async def login(request: Request):
         data = await form(request, login=False)
         security.login(request, str(data.get("password", "")))
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse(safe_next(str(data.get("next", "/"))), status_code=303)
 
     @app.post("/logout")
     async def logout(request: Request):
@@ -181,7 +247,9 @@ def create_app(
         security.sessions.pop(request.state.session_id, None)
         request.state.session_id, request.state.browser = security.browser(request)
         response = RedirectResponse("/", status_code=303)
-        response.delete_cookie(COOKIE, httponly=True, samesite="strict", secure=secure_cookie)
+        response.delete_cookie(
+            security.cookie, httponly=True, samesite="strict", secure=secure_cookie
+        )
         return response
 
     @app.get("/p/{pid}", response_class=HTMLResponse)
@@ -198,7 +266,8 @@ def create_app(
     ):
         with Session(engine) as session:
             p = portfolio(session, pid)
-            today = datetime.now(ZoneInfo(timezone)).date()
+            as_of = datetime.now(ZoneInfo(timezone))
+            today = as_of.date()
             first = first_activity_date(session, pid, today) or today
             try:
                 begin, finish = period_dates(
@@ -211,25 +280,8 @@ def create_app(
                 raise HTTPException(
                     400, "Choose a valid period and dates ending no later than today."
                 ) from None
-            values = Dashboard(session, p, begin, finish)
-            if sort not in {"code", "name", "quantity", "price", "value"} or direction not in {
-                "asc",
-                "desc",
-            }:
-                raise HTTPException(400, "Choose a valid sort order.")
-
-            def key(row):
-                value = (
-                    getattr(row.instrument, sort)
-                    if sort in {"code", "name"}
-                    else getattr(row, sort)
-                )
-                return value is None, value if value is not None else 0
-
-            rows = sorted(values.holdings, key=key, reverse=direction == "desc")
-            markets = {}
-            for row in rows:
-                markets.setdefault(row.instrument.exchange, []).append(row)
+            values = Dashboard(session, p, begin, finish, as_of=as_of)
+            markets = group_holdings(values.holdings, sort, direction)
             subtotals = {r.label: r for r in values.report.markets} if values.report else {}
             return render(
                 request,
@@ -241,7 +293,7 @@ def create_app(
                 end=finish,
                 dashboard=values,
                 report=values.report,
-                markets=dict(sorted(markets.items())),
+                markets=markets,
                 subtotals=subtotals,
                 series=values.series(begin, finish),
                 sort=sort,
@@ -269,7 +321,8 @@ def create_app(
             if not trades and not income:
                 raise HTTPException(404, "Holding not found in this portfolio.")
             instrument = session.get(Instrument, iid)
-            today = datetime.now(ZoneInfo(timezone)).date()
+            as_of = datetime.now(ZoneInfo(timezone))
+            today = as_of.date()
             activity = [t.trade_date for t in trades if t.trade_date <= today] + [
                 i.paid_date
                 for i in income
@@ -279,11 +332,13 @@ def create_app(
             result, error = None, None
             prices = ()
             try:
-                data = load_portfolio_inputs(session, p, begin, finish, instrument_id=iid)
+                data = load_portfolio_inputs(
+                    session, p, begin, finish, instrument_id=iid, as_of=as_of
+                )
                 prices = data.holdings[0].prices if data.holdings else ()
                 if data.holdings:
                     result = holding_return(
-                        data.holdings[0], begin, finish, data.rates, data.base_currency
+                        data.holdings[0], begin, finish, data.rates, data.base_currency, as_of=as_of
                     )
             except ReturnError as exc:
                 error = str(exc)
@@ -425,6 +480,12 @@ def create_app(
                 status_message=message,
             )
 
+    app.add_middleware(
+        DashboardTrustedHostMiddleware,
+        allowed_hosts=[settings.dashboard_bind, "127.0.0.1", "localhost"]
+        + [host.strip() for host in settings.dashboard_hostnames.split(",") if host.strip()],
+        www_redirect=False,
+    )
     return app
 
 
@@ -432,14 +493,11 @@ def main():
     """Compose entry point, with one worker for shared sessions and throttling."""
     import uvicorn
 
-    from portfolio_digest.config import get_settings
     from portfolio_digest.web.binding import private_host
 
-    private_host(os.environ.get("DASHBOARD_BIND", "127.0.0.1"))
-    app = create_app(
-        timezone=get_settings().timezone,
-        secure_cookie=os.environ.get("DASHBOARD_SECURE_COOKIE", "false").lower() == "true",
-    )
+    settings = get_settings()
+    private_host(settings.dashboard_bind)
+    app = create_app(timezone=settings.timezone, settings=settings)
     uvicorn.run(app, host="0.0.0.0", port=8000, proxy_headers=False, access_log=False)  # noqa: S104
 
 

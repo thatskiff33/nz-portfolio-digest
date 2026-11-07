@@ -4,11 +4,11 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import CheckConstraint, MetaData, create_engine, func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from portfolio_digest.db import session_scope
-from portfolio_digest.models import FxRate, Instrument, Portfolio, Price, Split, Trade
+from portfolio_digest.models import Base, FxRate, Instrument, Portfolio, Price, Split, Trade
 from portfolio_digest.prices.fetch import (
     Holding,
     Sources,
@@ -51,7 +51,9 @@ class FakePriceSource:
 
     def history(self, symbol, start, end, *, currency=None, split_start=None):
         self.calls.append((symbol, start, end))
-        return PriceHistory(dict(self.closes), dict(self.splits))
+        return PriceHistory(
+            {d: v for d, v in self.closes.items() if start <= d <= end}, dict(self.splits)
+        )
 
 
 class FakeFxSource:
@@ -65,7 +67,7 @@ class FakeFxSource:
         self.calls.append((currency, base, start, end))
         if self.error:
             raise SourceError(self.error)
-        return dict(self.result)
+        return {d: v for d, v in self.result.items() if start <= d <= end}
 
 
 def _seed_trade(engine, *, currency="USD", code="TEST"):
@@ -584,7 +586,7 @@ def test_backfill_uses_fallback_fx_carries_missing_days_and_is_idempotent(engine
 
     first = run_fetch(engine, sources, now=now, base_currency="NZD", backfill=True)
     assert first.ok
-    assert prices.calls[0][1:] == (date(2026, 10, 1), date(2026, 10, 2))
+    assert prices.calls[0][1:] == (date(2026, 9, 24), date(2026, 10, 2))
     fx_outcome = next(item for item in first.outcomes if item.label == "USD/NZD")
     assert fx_outcome.source == "frankfurter"
     assert fx_outcome.fallbacks and "yahoo failed" in fx_outcome.fallbacks[0]
@@ -661,7 +663,7 @@ def test_one_portfolios_short_position_does_not_cancel_anothers_holding(engine):
         base_currency="NZD",
         backfill=True,
     )
-    assert source.calls[0][1:] == (date(2026, 10, 1), date(2026, 10, 2))
+    assert source.calls[0][1:] == (date(2026, 9, 24), date(2026, 10, 2))
 
 
 def test_quality_checks_find_missing_zero_and_jump_but_exempt_a_split(engine):
@@ -763,39 +765,42 @@ def test_quality_compares_fresh_closes_across_gaps_unless_a_split_intervenes(gap
 
 
 def test_new_split_refreshes_full_stored_history_once(monkeypatch):
-    from unittest.mock import MagicMock
+    from sqlalchemy.orm import Session
+    from test_returns_loader import _sqlite_engine
 
-    from portfolio_digest.prices import fetch
-
+    engine = _sqlite_engine(monkeypatch)
+    instrument_id = _seed_trade(engine)
     first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
-    holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
-    session = MagicMock()
-    session.get.return_value = Instrument(split_scanned_at=None)
+    with Session(engine) as session, session.begin():
+        session.scalar(select(Trade)).trade_date = first
+        session.add(
+            Price(
+                instrument_id=instrument_id,
+                price_date=recent,
+                close=Decimal("40"),
+                source="fixture",
+            )
+        )
     source = FakePriceSource(
         {first: Decimal("40"), recent: Decimal("40"), split_day: Decimal("10")},
         {split_day: (Decimal("1"), Decimal("4"))},
     )
-    saved = []
-    monkeypatch.setattr(fetch, "_save_prices", lambda *args, **kwargs: saved.append((args, kwargs)))
-    monkeypatch.setattr(fetch, "_save_splits", lambda *args: None)
-
-    def run(recorded):
-        session.scalar.side_effect = [recent, first, None]
-        split_rows = MagicMock()
-        split_rows.__iter__.return_value = iter(recorded)
-        existing_rows = MagicMock()
-        existing_rows.all.return_value = list(source.closes.items())
-        session.execute.side_effect = [split_rows, existing_rows]
-        return fetch._update_instrument(
-            session, source, holding, datetime(2026, 10, 3, 12, tzinfo=UTC), False, None
+    for expected in ([date(2026, 9, 1), first], [date(2026, 9, 1)]):
+        source.calls.clear()
+        result = run_fetch(
+            engine,
+            Sources(source, []),
+            base_currency="USD",
+            now=datetime(2026, 10, 3, 12, tzinfo=UTC),
         )
-
-    assert run([]).error is None
-    assert [call[1] for call in source.calls] == [date(2026, 9, 1), first]
-    assert saved[0][0][2][first] == Decimal("40")
-    source.calls.clear()
-    assert run([(split_day, Decimal("1"), Decimal("4"))]).error is None
-    assert [call[1] for call in source.calls] == [date(2026, 9, 1)]
+        assert result.ok
+        assert [call[1] for call in source.calls] == expected
+        with Session(engine) as session:
+            assert session.get(Price, (instrument_id, first)).close == Decimal("40")
+            assert session.get(Price, (instrument_id, split_day)).close == Decimal("10")
+            split = session.scalars(select(Split)).one()
+            assert (split.split_date, split.shares_after) == (split_day, Decimal("4"))
+    engine.dispose()
 
 
 def test_raw_carry_forward_changes_units_on_split_date():
@@ -817,31 +822,41 @@ def test_raw_carry_forward_changes_units_on_split_date():
 
 
 def test_withdrawn_split_refreshes_history_and_does_not_scale_stale_prices(monkeypatch):
-    from unittest.mock import MagicMock
+    from sqlalchemy.orm import Session
+    from test_returns_loader import _sqlite_engine
 
-    from portfolio_digest.prices import fetch
-
+    engine = _sqlite_engine(monkeypatch)
+    instrument_id = _seed_trade(engine)
     first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
-    holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
+    with Session(engine) as session, session.begin():
+        session.scalar(select(Trade)).trade_date = first
+        session.add(
+            Price(
+                instrument_id=instrument_id,
+                price_date=recent,
+                close=Decimal("40"),
+                source="fixture",
+            )
+        )
+        session.add(
+            Split(
+                instrument_id=instrument_id,
+                split_date=split_day,
+                shares_before=Decimal(1),
+                shares_after=Decimal(4),
+                source="mock-price",
+            )
+        )
     source = FakePriceSource({recent: Decimal("40")})
-    session = MagicMock()
-    session.get.return_value = Instrument(split_scanned_at=None)
-    session.scalar.side_effect = [recent, first, None]
-    session.execute.side_effect = [
-        [(split_day, Decimal("1"), Decimal("4"))],
-        MagicMock(all=lambda: [(recent, Decimal("40"))]),
-    ]
-    saved, scans = [], []
-    monkeypatch.setattr(fetch, "_save_prices", lambda *args, **kwargs: saved.append((args, kwargs)))
-    monkeypatch.setattr(fetch, "_save_splits", lambda *args: scans.append(args))
-    result = fetch._update_instrument(
-        session, source, holding, datetime(2026, 10, 3, 12, tzinfo=UTC), False, None
+    result = run_fetch(
+        engine, Sources(source, []), base_currency="USD", now=datetime(2026, 10, 3, 12, tzinfo=UTC)
     )
-    assert result.error is None
+    assert result.ok
     assert [call[1] for call in source.calls] == [date(2026, 9, 1), first]
-    assert scans[0][2] == {}
-    assert scans[0][4] == first
-    assert saved[-1][0][2][split_day] == Decimal("40")
+    with Session(engine) as session:
+        assert session.scalars(select(Split)).all() == []
+        assert session.get(Price, (instrument_id, split_day)).close == Decimal("40")
+    engine.dispose()
 
 
 def test_split_scan_removes_withdrawn_or_moved_rows(engine):
@@ -860,31 +875,125 @@ def test_split_scan_removes_withdrawn_or_moved_rows(engine):
 
 
 def test_failed_split_refresh_preserves_recorded_events(monkeypatch):
-    from unittest.mock import MagicMock
+    from sqlalchemy.orm import Session
+    from test_returns_loader import _sqlite_engine
 
-    from portfolio_digest.prices import fetch
-
+    engine = _sqlite_engine(monkeypatch)
+    instrument_id = _seed_trade(engine)
     first, recent, split_day = date(2026, 8, 3), date(2026, 10, 1), date(2026, 10, 2)
-    holding = fetch.Holding(1, "NASDAQ", "TEST", "USD", None, first, first, True)
-    source = MagicMock(name="yahoo")
-    source.history.side_effect = [PriceHistory(), SourceError("refresh failed")]
-    session = MagicMock()
-    session.get.return_value = Instrument(split_scanned_at=None)
-    session.scalar.side_effect = [recent, first, None]
-    session.execute.side_effect = [
-        [(split_day, Decimal("1"), Decimal("4"))],
-        MagicMock(all=lambda: [(recent, Decimal("40"))]),
-    ]
-    save_splits = MagicMock()
-    saved = []
-    monkeypatch.setattr(fetch, "_save_splits", save_splits)
-    monkeypatch.setattr(fetch, "_save_prices", lambda *args, **kwargs: saved.append((args, kwargs)))
-    result = fetch._update_instrument(
-        session, source, holding, datetime(2026, 10, 3, 12, tzinfo=UTC), False, None
+    with Session(engine) as session, session.begin():
+        session.scalar(select(Trade)).trade_date = first
+        session.add(
+            Price(
+                instrument_id=instrument_id,
+                price_date=recent,
+                close=Decimal("40"),
+                source="fixture",
+            )
+        )
+        session.add(
+            Split(
+                instrument_id=instrument_id,
+                split_date=split_day,
+                shares_before=Decimal(1),
+                shares_after=Decimal(4),
+                source="mock-price",
+            )
+        )
+
+    class FailingRefresh(FakePriceSource):
+        def history(self, symbol, start, end, **kwargs):
+            if start == first:
+                raise SourceError("refresh failed")
+            return super().history(symbol, start, end, **kwargs)
+
+    result = run_fetch(
+        engine,
+        Sources(FailingRefresh(), []),
+        base_currency="USD",
+        now=datetime(2026, 10, 3, 12, tzinfo=UTC),
     )
-    assert result.error == "refresh failed"
-    save_splits.assert_not_called()
-    assert saved[-1][0][2][split_day] == Decimal("10")
+    assert result.outcomes[0].error == "refresh failed"
+    with Session(engine) as session:
+        assert session.scalars(select(Split)).one().shares_after == Decimal(4)
+        assert session.get(Price, (instrument_id, split_day)).close == Decimal("10")
+    engine.dispose()
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def opening_engine(request):
+    if request.param == "postgres":
+        yield request.getfixturevalue("engine")
+        return
+    engine = create_engine("sqlite://")
+    metadata = MetaData()
+    for table in Base.metadata.sorted_tables:
+        copy = table.to_metadata(metadata)
+        for constraint in list(copy.constraints):
+            if isinstance(constraint, CheckConstraint):
+                copy.constraints.remove(constraint)
+    metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.mark.parametrize("backfill", [False, True])
+def test_sunday_opening_fetches_prior_week_and_values_year_end(opening_engine, backfill):
+    from portfolio_digest.returns_loader import load_returns
+
+    sunday, prior, year_end = date(2024, 3, 31), date(2024, 3, 28), date(2025, 3, 31)
+    with session_scope(opening_engine) as session:
+        portfolio = Portfolio(name="Invented opening")
+        instrument = Instrument(exchange="NYSE", code="OPEN", currency="USD", name="Invented")
+        session.add_all([portfolio, instrument])
+        session.flush()
+        session.add(
+            Trade(
+                portfolio_id=portfolio.id,
+                instrument_id=instrument.id,
+                trade_date=sunday,
+                trade_type="opening_balance",
+                quantity=Decimal(100),
+                price=Decimal(49),
+                currency="USD",
+                fx_rate=Decimal("1.7"),
+                source="test",
+                external_ref="opening",
+            )
+        )
+    prices = FakePriceSource({prior: Decimal(49), year_end: Decimal(50)})
+    fx = FakeFxSource("fake", {prior: Decimal("1.7"), year_end: Decimal("1.7")})
+    report = run_fetch(
+        opening_engine,
+        Sources(prices, [fx]),
+        now=datetime(2025, 4, 1, 7, tzinfo=UTC),
+        base_currency="NZD",
+        backfill=backfill,
+    )
+    assert report.ok
+    assert prices.calls[0][1] == date(2024, 3, 24)
+    assert fx.calls[0][2] == date(2024, 3, 24)
+    with session_scope(opening_engine) as session:
+        result = load_returns(session, "Invented opening", f"{sunday}:{year_end}", year_end)
+    assert result.total.opening == Decimal(8330)
+    assert result.total.closing == Decimal(8500)
+    assert result.total.amounts.total == Decimal(170)
+
+
+def test_fetch_boundaries_preserve_explicit_start_and_incremental_refresh():
+    from portfolio_digest.prices.fetch import _range, currencies_needed
+
+    first = date(2024, 3, 31)
+    assert _range(first, date(2024, 4, 1), None, True, first) == first
+    assert _range(first, date(2025, 4, 1), date(2025, 3, 31), False, None) == date(2025, 3, 1)
+    holdings = [
+        Holding(1, "NYSE", "OPEN", "USD", None, first, first, True),
+        Holding(2, "NYSE", "LATER", "USD", None, date(2024, 4, 7), first, True),
+    ]
+    needs = currencies_needed(holdings, "NZD", datetime(2025, 4, 1, 7, tzinfo=UTC))
+    assert len(needs) == 1
+    assert needs[0].first_day == first
+    assert _range(needs[0].first_day, needs[0].last_day, None, True, None) == date(2024, 3, 24)
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,7 @@
 """Presentation metadata around the shared returns engine, with no valuation maths."""
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -32,13 +32,22 @@ class Holding:
 
 
 class Dashboard:
-    def __init__(self, session: Session, portfolio: Portfolio, start: date, end: date):
+    def __init__(
+        self,
+        session: Session,
+        portfolio: Portfolio,
+        start: date,
+        end: date,
+        *,
+        as_of: datetime | None = None,
+    ):
+        self.as_of = as_of
         self.inputs, self.rates = (), {}
         instruments = {}
         self.currency = portfolio.base_currency
         self.error = None
         try:
-            data = load_portfolio_inputs(session, portfolio, start, end)
+            data = load_portfolio_inputs(session, portfolio, start, end, as_of=as_of)
             self.inputs, self.rates = data.holdings, data.rates
             instruments = {(i.exchange, i.code): i for i in data.instruments}
             self.report = self.calculate(start, end)
@@ -65,7 +74,9 @@ class Dashboard:
     def calculate(self, start: date, end: date) -> Report:
         if self.error and not self.inputs:
             raise ReturnError(self.error)
-        return calculate_returns(self.inputs, start, end, self.rates, self.currency)
+        return calculate_returns(
+            self.inputs, start, end, self.rates, self.currency, as_of=self.as_of
+        )
 
     def series(self, start: date, end: date) -> list[tuple[date, Decimal | None]]:
         # At most 180 samples. Each point is the engine's closing value for that day.

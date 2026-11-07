@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import pytest
 from sqlalchemy import text
 
@@ -5,7 +8,7 @@ from portfolio_digest import __version__
 from portfolio_digest.cli import main
 from portfolio_digest.validation import PORTFOLIO_NAME_MAX
 
-UNREACHABLE = "postgresql+psycopg://user:s3cret-pass@127.0.0.1:1/nowhere"
+UNREACHABLE = "postgresql+psycopg://user:s3cret-pass@127.0.0.1:1/nowhere?connect_timeout=2"
 
 
 def test_version(capsys):
@@ -121,6 +124,79 @@ def test_portfolio_add_rejects_bad_input_without_touching_the_database(engine, c
     assert "No portfolios yet" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("command", "descriptions"),
+    [
+        (
+            ["trade", "add"],
+            [
+                "Portfolio name",
+                "Trade or action date",
+                "Trade type",
+                "Listing exchange",
+                "Instrument code",
+                "adjustments may be signed",
+                "Price per unit",
+                "ISO currency code",
+                "Brokerage and fees",
+                "Instrument name",
+                "Private notes",
+            ],
+        ),
+        (["scheduler"], ["Schedule configuration file path", "Scheduler state file path"]),
+        (["alerts", "check"], ["Schedule configuration file path", "Preview without sending"]),
+        (["alerts"], ["Check and send due alerts"]),
+        (["dividends"], ["Reject a pending dividend suggestion"]),
+        (["dividends", "reject"], ["Pending dividend suggestion ID"]),
+    ],
+)
+def test_help_describes_options_without_a_database(no_settings_file, capsys, command, descriptions):
+    with pytest.raises(SystemExit) as exc:
+        main([*command, "--help"])
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    for description in descriptions:
+        assert description in output
+
+
+@pytest.mark.parametrize("ok", [False, True])
+def test_manual_price_fetch_records_failure_and_recovery(monkeypatch, ok):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from portfolio_digest import cli
+
+    report = SimpleNamespace(
+        ok=ok,
+        outcomes=[
+            SimpleNamespace(
+                error=None if ok else "private provider error 123",
+                label="NZX:MADEUP",
+                describe=lambda: "fetch result",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: SimpleNamespace(price_source="fake", fx_source_names=[], base_currency="NZD"),
+    )
+    monkeypatch.setitem(cli.PRICE_SOURCES, "fake", lambda _: None)
+    monkeypatch.setattr(cli, "make_client", lambda: nullcontext(None))
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "run_fetch", lambda *a, **kw: report)
+    config = object()
+    monkeypatch.setattr(cli, "load_notice_config", lambda: config)
+    calls = []
+    monkeypatch.setattr(cli, "note_outcome", lambda *a, **kw: calls.append((a, kw)))
+    assert cli.cmd_prices_fetch(SimpleNamespace(backfill=False, start=None, instrument=None)) == (
+        0 if ok else 1
+    )
+    assert calls == [
+        ((config, "prices"), {"failed": not ok, "labels": () if ok else ("NZX:MADEUP",)})
+    ]
+
+
 def test_main_suppresses_http_request_details(monkeypatch, caplog):
     import logging
     from argparse import Namespace
@@ -158,3 +234,80 @@ def test_main_suppresses_http_request_details(monkeypatch, caplog):
     finally:
         for logger, level in zip(loggers, levels, strict=True):
             logger.setLevel(level)
+
+
+def test_cli_imports_without_fcntl():
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['fcntl'] = None; import portfolio_digest.cli",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_dividend_suggestion_default_date_is_resolved_when_command_runs(monkeypatch):
+    from contextlib import nullcontext
+    from datetime import UTC, date, datetime
+
+    from sqlalchemy.orm import Session
+    from test_returns_loader import _sqlite_engine
+
+    from portfolio_digest import cli, config
+    from portfolio_digest.models import Instrument, Portfolio
+
+    class ParserDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 11, 6)
+
+    # Build once, then cross Auckland midnight before running the command.
+    monkeypatch.setattr(cli, "date", ParserDate)
+    args = cli.build_parser().parse_args(
+        [
+            "dividends",
+            "suggest",
+            "--portfolio",
+            "Example",
+            "--instrument",
+            "NZX:FERN",
+            "--start",
+            "2026-01-01",
+        ]
+    )
+    engine = _sqlite_engine(monkeypatch)
+    with Session(engine) as session, session.begin():
+        session.add_all(
+            [
+                Portfolio(name="Example"),
+                Instrument(exchange="NZX", code="FERN", name="Fern", currency="NZD"),
+            ]
+        )
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 6, 12, tzinfo=UTC).astimezone(tz)
+
+    class Source:
+        def symbol(self, listing):
+            return listing.code
+
+        def dividends(self, symbol, start, end, currency):
+            assert end == date(2026, 11, 7)
+            return {}
+
+    monkeypatch.setenv("TIMEZONE", "Pacific/Auckland")
+    monkeypatch.setattr(config, "datetime", Clock)
+    monkeypatch.setattr(cli, "make_engine", lambda: engine)
+    monkeypatch.setattr(cli, "make_client", lambda: nullcontext(None))
+    monkeypatch.setattr(cli, "YahooSource", lambda fetcher: Source())
+    try:
+        assert args.func(args) == 0
+    finally:
+        engine.dispose()
+        config.get_settings.cache_clear()

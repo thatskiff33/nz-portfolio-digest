@@ -1,8 +1,9 @@
 """Fetch daily prices and exchange rates into the database.
 
-Every instrument that has trades gets prices from its first trade date until today, or
-until the day it was sold down to nothing. Every currency those instruments trade in gets
-a daily rate against the base currency (NZD) over the same period.
+Every instrument that has trades gets prices from seven calendar days before its first
+trade until today, or until the day it was sold down to nothing. Every currency those
+instruments trade in gets a daily rate against the base currency (NZD) over the same
+period. An explicit backfill start is used as given.
 
 A normal fetch picks up from the last good price and always re-reads the last month, so a
 price Yahoo corrects later, or a day that was carried forward while Yahoo was down, is
@@ -25,7 +26,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from portfolio_digest.db import session_scope
-from portfolio_digest.models import FxRate, Instrument, Price, Split, Trade
+from portfolio_digest.models import MONEY_SCALE, FxRate, Instrument, Price, Split, Trade
 from portfolio_digest.prices import calendars
 from portfolio_digest.prices.http import RateLimited, SourceError
 from portfolio_digest.prices.sources import FxSource, Listing, PriceSource, _fits_numeric
@@ -38,6 +39,11 @@ log = logging.getLogger(__name__)
 # Every fetch re-reads at least this many days, to pick up corrections and replace
 # carried-forward prices once the source has the real one.
 REFRESH_DAYS = 31
+
+# A Sunday or holiday opening still needs the previous session. Seven calendar days
+# reaches it, including a holiday Friday before a weekend balance. A longer closure
+# can still leave no observation; the report then stops with the usual missing-price error.
+FIRST_TRADE_LOOKBACK_DAYS = 7
 
 # Rows per INSERT, well inside Postgres's limit on statement parameters.
 _BATCH = 1000
@@ -231,7 +237,11 @@ def carry_forward(
 
 def fetch_start(first_needed: date, last_good: date | None, last_needed: date) -> date:
     """Where a normal (not backfill) fetch starts: just after the last good value, but
-    never later than a month back, and never before the value was first needed."""
+    never later than a month back, and never before `first_needed`.
+
+    `_range` passes a boundary seven calendar days before the first trade, so a
+    refresh still will not start before that prior week.
+    """
     if last_good is None:
         return first_needed
     return max(
@@ -286,9 +296,10 @@ def run_fetch(
 ) -> FetchReport:
     """Fetch prices for every held instrument, then the exchange rates to value them.
 
-    A backfill re-reads everything from `start`, or from each first trade date. Otherwise
-    each fetch carries on from the last good value. Each instrument and currency is saved
-    as it goes, so one failure never loses the rest.
+    A backfill re-reads everything from `start`, or from seven calendar days before each
+    first trade when `start` is omitted. Otherwise each fetch carries on from the last
+    good value, and still not earlier than that same prior week. Each instrument and
+    currency is saved as it goes, so one failure never loses the rest.
     """
     report = FetchReport()
     wrapped = {}
@@ -342,9 +353,11 @@ def _range(
     backfill: bool,
     start: date | None,
 ) -> date:
+    """First day to request. An explicit backfill `start` is left unchanged."""
+    earliest = first_needed - timedelta(days=FIRST_TRADE_LOOKBACK_DAYS)
     if backfill:
-        return start or first_needed
-    return fetch_start(first_needed, last_good, last_needed)
+        return earliest if start is None else start
+    return fetch_start(earliest, last_good, last_needed)
 
 
 def _update_instrument(
@@ -467,7 +480,7 @@ def _update_instrument(
     )
     valid_stale = {}
     for day, value in stale.items():
-        if _fits_numeric(value, 6):
+        if _fits_numeric(value, MONEY_SCALE):
             valid_stale[day] = value
         else:
             error = f"out-of-range carried price for {day}"

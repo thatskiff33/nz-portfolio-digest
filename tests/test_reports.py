@@ -234,6 +234,7 @@ def test_shared_change_retains_decimal_precision():
         assert row.change == D(".01")
 
 
+@pytest.mark.posix
 @pytest.mark.parametrize("overwrite", [False, True])
 def test_preview_files_are_private_even_with_permissive_umask(tmp_path, overwrite):
     import os
@@ -270,6 +271,7 @@ def test_preview_files_are_private_even_with_permissive_umask(tmp_path, overwrit
         assert path.read_text() == content
 
 
+@pytest.mark.posix
 def test_year_end_preview_uses_private_shared_delivery(tmp_path, monkeypatch):
     import os
     import stat

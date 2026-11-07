@@ -4,6 +4,7 @@ import csv
 import io
 from datetime import UTC, date, datetime
 from decimal import Decimal as D
+from decimal import InvalidOperation
 from pathlib import Path
 
 import pytest
@@ -12,12 +13,22 @@ from test_returns_loader import _sqlite_engine
 
 from portfolio_digest.cli import main
 from portfolio_digest.config import ConfigError
+from portfolio_digest.formatting import display_number
 from portfolio_digest.mailers import MailSettings
 from portfolio_digest.models import FxRate, Income, Instrument, Portfolio, Price, Split, Trade
-from portfolio_digest.returns import Holding, Observation, ReturnError, SplitEvent, Transaction
+from portfolio_digest.returns import (
+    Components,
+    Holding,
+    Observation,
+    Report,
+    Result,
+    ReturnError,
+    SplitEvent,
+    Transaction,
+)
 from portfolio_digest.scheduling import ScheduleConfig, read_config
-from portfolio_digest.year_end import Dividend, calculate_year_end
-from portfolio_digest.year_end_report import render_csv, render_html
+from portfolio_digest.year_end import NOTES, Dividend, TaxRow, YearEnd, calculate_year_end
+from portfolio_digest.year_end_report import COLUMNS, render_csv, render_html
 from portfolio_digest.year_end_service import (
     latest_ended_year,
     load_year_end,
@@ -146,6 +157,10 @@ def test_every_figure_by_hand(ledger):
         day("2025-11-01"),
         True,
     )
+    # These fixtures record only combined withholding, so the exchange fallback applies.
+    assert "Unclassified withholding for NZX:FERN used the exchange fallback." in report.flags
+    assert "Unclassified withholding for NASDAQ:CLOUD used the exchange fallback." in report.flags
+    assert all("ASX:GUM" not in flag for flag in report.flags)
 
 
 def test_fif_tracks_opening_cost_and_intrayear_peak_not_market_value():
@@ -238,6 +253,8 @@ def year_engine(monkeypatch, ledger):
                     gross_amount=p.gross,
                     imputation_credits=p.imputation,
                     withholding_tax=p.withholding,
+                    resident_withholding_tax=p.resident_withholding_tax,
+                    foreign_withholding_tax=p.foreign_withholding_tax,
                     net_amount=p.net,
                     fx_rate=p.fx,
                     source="invented",
@@ -621,6 +638,334 @@ def test_year_end_and_email_agree_on_net_dividend_total_return(year_engine):
     assert (
         annual.total.resident + annual.total.foreign == email.returns.total.withholding_tax == D(11)
     )
+
+
+def _listed(exchange, code, currency, fx=None):
+    return Holding(
+        exchange,
+        code,
+        currency,
+        (trade("2025-05-01", "buy", "1", "1", fx=fx),),
+        (Observation(day("2026-03-31"), D(1)),),
+    )
+
+
+def test_withholding_uses_stored_components_then_exchange_fallback():
+    fern = _listed("NZX", "FERN", "NZD")
+    exact = _listed("NZX", "EXACT", "NZD")
+    pines = _listed("NZX", "PINES", "NZD")
+    wattle = _listed("ASX", "WATTLE", "AUD", fx="1.2")
+    dividends = (
+        # NZX foreign component stays foreign. It does not use the exchange rule.
+        Dividend(
+            "NZX:FERN",
+            day("2025-06-15"),
+            "NZD",
+            D(10),
+            D(1),
+            D(4),
+            D(6),
+            resident_withholding_tax=D(0),
+            foreign_withholding_tax=D(4),
+        ),
+        # Zero withholding is not a fallback, even when both components are zero.
+        Dividend("NZX:FERN", day("2025-06-16"), "NZD", D(5), D(0), D(0), D(5)),
+        # Mixed components, with the NZX remainder added to resident withholding.
+        Dividend(
+            "NZX:FERN",
+            day("2025-06-17"),
+            "NZD",
+            D(20),
+            D(0),
+            D(10),
+            D(10),
+            resident_withholding_tax=D(3),
+            foreign_withholding_tax=D(4),
+        ),
+        # Outside the tax year: ignored, including its unclassified withholding.
+        Dividend("NZX:FERN", day("2026-04-01"), "NZD", D(99), D(0), D(99), D(0)),
+        # Both components account for the whole amount, so there is no fallback.
+        Dividend(
+            "NZX:EXACT",
+            day("2025-06-15"),
+            "NZD",
+            D(5),
+            D(0),
+            D(5),
+            D(0),
+            resident_withholding_tax=D(2),
+            foreign_withholding_tax=D(3),
+        ),
+        # Entirely unclassified NZX withholding uses the resident column and is flagged.
+        Dividend("NZX:PINES", day("2025-06-15"), "NZD", D(9), D(0), D(7), D(2)),
+        # ASX resident withholding stays resident. The rate comes from the FX table.
+        Dividend(
+            "ASX:WATTLE",
+            day("2025-07-01"),
+            "AUD",
+            D(8),
+            D(0),
+            D(5),
+            D(3),
+            resident_withholding_tax=D(5),
+        ),
+        # Two unclassified ASX payments share one flag. Explicit FX converts both.
+        Dividend("ASX:WATTLE", day("2025-08-01"), "AUD", D(4), D(0), D(1), D(3), D("1.25")),
+        Dividend(
+            "ASX:WATTLE",
+            day("2025-09-01"),
+            "AUD",
+            D(10),
+            D(0),
+            D(10),
+            D(0),
+            D(2),
+            resident_withholding_tax=D(2),
+            foreign_withholding_tax=D(3),
+        ),
+    )
+    rates = {
+        "AUD": (
+            Observation(day("2025-07-01"), D("1.25")),
+            Observation(day("2026-03-31"), D("1.25")),
+        )
+    }
+    report = calculate_year_end((fern, exact, pines, wattle), dividends, rates, 2026)
+    rows = {row.label: row for row in report.rows}
+    assert (
+        rows["NZX:FERN"].gross,
+        rows["NZX:FERN"].imputation,
+        rows["NZX:FERN"].resident,
+        rows["NZX:FERN"].foreign,
+        rows["NZX:FERN"].net,
+    ) == (D(35), D(1), D(6), D(8), D(21))
+    assert (
+        rows["NZX:EXACT"].resident,
+        rows["NZX:EXACT"].foreign,
+        rows["NZX:EXACT"].net,
+    ) == (D(2), D(3), D(0))
+    assert (rows["NZX:PINES"].resident, rows["NZX:PINES"].foreign, rows["NZX:PINES"].net) == (
+        D(7),
+        D(0),
+        D(2),
+    )
+    # 5 AUD at 1.25, plus 2 AUD at 2 in the resident column. Foreign is the rest.
+    assert (
+        rows["ASX:WATTLE"].gross,
+        rows["ASX:WATTLE"].resident,
+        rows["ASX:WATTLE"].foreign,
+        rows["ASX:WATTLE"].net,
+    ) == (D(35), D("10.25"), D("17.25"), D("7.5"))
+    assert (
+        report.total.gross,
+        report.total.imputation,
+        report.total.resident,
+        report.total.foreign,
+        report.total.net,
+    ) == (D(84), D(1), D("25.25"), D("28.25"), D("30.5"))
+    assert report.performance.total.amounts.dividends == report.total.net
+    assert report.flags == tuple(
+        f"Unclassified withholding for {holding} used the exchange fallback."
+        for holding in ("ASX:WATTLE", "NZX:FERN", "NZX:PINES")
+    )
+    html = render_html(report, "Invented")
+    csv_rows = list(csv.reader(io.StringIO(render_csv(report))))
+    header = next(
+        index for index, row in enumerate(csv_rows) if row[:2] == ["Holding", "Realised gains"]
+    )
+    body = []
+    for row in csv_rows[header + 1 :]:
+        if not row:
+            break
+        body.append(row)
+    assert [row[0] for row in body] == [row.label for row in (*report.rows, report.total)]
+    cursor = 0
+    for raw, tax in zip(body, (*report.rows, report.total), strict=True):
+        amounts = [getattr(tax, field) for field, _ in COLUMNS]
+        assert [D(cell) for cell in raw[1:]] == amounts
+        assert all("e" not in cell.lower() for cell in raw[1:])
+        for value in (tax.label, *(display_number(amount) for amount in amounts)):
+            found = html.find(value, cursor)
+            assert found != -1, value
+            cursor = found + len(value)
+    for flag in report.flags:
+        assert flag in html
+        assert ["Note", flag] in csv_rows
+
+
+def test_withholding_components_cannot_exceed_the_combined_amount():
+    holding = _listed("NZX", "FERN", "NZD")
+
+    def dividend(**components):
+        return Dividend(
+            "NZX:FERN",
+            day("2025-06-15"),
+            "NZD",
+            D(10),
+            D(0),
+            D(4),
+            D(6),
+            **components,
+        )
+
+    with pytest.raises(ReturnError, match="exceed combined withholding"):
+        calculate_year_end(
+            (holding,),
+            (dividend(resident_withholding_tax=D(3), foreign_withholding_tax=D(2)),),
+            {},
+            2026,
+        )
+    with pytest.raises(ReturnError, match="non-negative"):
+        calculate_year_end((holding,), (dividend(resident_withholding_tax=D("-0.01")),), {}, 2026)
+    with pytest.raises(ReturnError, match="finite"):
+        calculate_year_end((holding,), (dividend(foreign_withholding_tax=D("NaN")),), {}, 2026)
+
+
+def test_loader_passes_stored_withholding_components(year_engine):
+    from sqlalchemy import select
+
+    with Session(year_engine) as session:
+        portfolio = session.scalar(select(Portfolio).where(Portfolio.name == "Invented"))
+        fern = session.scalar(select(Instrument).where(Instrument.code == "FERN"))
+        gum = session.scalar(select(Instrument).where(Instrument.code == "GUM"))
+        session.add_all(
+            [
+                Income(
+                    portfolio_id=portfolio.id,
+                    instrument_id=fern.id,
+                    paid_date=day("2025-12-01"),
+                    currency="NZD",
+                    gross_amount=D(10),
+                    net_amount=D(6),
+                    withholding_tax=D(4),
+                    resident_withholding_tax=D(0),
+                    foreign_withholding_tax=D(4),
+                    source="invented",
+                    external_ref="fern-foreign-component",
+                ),
+                Income(
+                    portfolio_id=portfolio.id,
+                    instrument_id=gum.id,
+                    paid_date=day("2025-12-01"),
+                    currency="AUD",
+                    gross_amount=D(10),
+                    net_amount=D(6),
+                    withholding_tax=D(4),
+                    resident_withholding_tax=D(4),
+                    foreign_withholding_tax=D(0),
+                    fx_rate=D("1.25"),
+                    source="invented",
+                    external_ref="gum-resident-component",
+                ),
+            ]
+        )
+        session.commit()
+        loaded = load_year_end(session, "Invented", 2026)
+    rows = {row.label: row for row in loaded.rows}
+    # The original FERN dividend is unclassified resident withholding of 8.
+    assert (rows["NZX:FERN"].resident, rows["NZX:FERN"].foreign) == (D(8), D(4))
+    # 4 AUD of stored resident withholding at 1.25, not the ASX foreign column.
+    assert (rows["ASX:GUM"].resident, rows["ASX:GUM"].foreign) == (D(5), D(0))
+    assert "Unclassified withholding for NZX:FERN used the exchange fallback." in loaded.flags
+    assert all("ASX:GUM" not in flag for flag in loaded.flags)
+
+
+def test_notes_and_readme_state_withholding_drp_and_split_rules():
+    readme = " ".join(Path("README.md").read_text().split())
+    rules = (
+        "Resident and foreign withholding follow the components stored from broker or "
+        "registry evidence.",
+        "Any unclassified remainder is resident withholding for an NZX holding and "
+        "foreign withholding otherwise.",
+        "The report names each holding where that remainder was used.",
+        "Check this classification against your tax statements.",
+        "This is information, not tax advice.",
+        "Imported DRPs that include a DRP quantity create the linked buy.",
+        "Add a purchase manually only for residual cash or a partial reinvestment.",
+        "Registry-recorded splits and consolidations need no extra quantity adjustment.",
+        "A Yahoo-only split needs a matching quantity adjustment.",
+        "net cash dividends",
+        "information, not tax advice",
+        "Tax points are to confirm with a tax specialist.",
+    )
+    notes = " ".join(" ".join(NOTES).split())
+    for rule in rules:
+        assert rule in notes
+        readme_rule = (
+            "This summary is information, not tax advice."
+            if rule == "This is information, not tax advice."
+            else rule
+        )
+        assert readme_rule in readme
+    assert "This is information, not tax advice." in notes
+    assert "Splits require a matching quantity adjustment" not in notes
+    assert "recorded combined withholding field" not in notes
+    assert "reinvested units must also have a recorded buy" not in notes
+    assert "includes gross dividends" not in readme
+
+
+def test_csv_decimals_keep_full_fixed_point_precision():
+    tiny = D("2.50E-77")
+    scaled_zero = D("0E-86")
+    priced = Result(
+        "NZX:TINY",
+        tiny,
+        scaled_zero,
+        D(100),
+        D(0),
+        Components(capital=tiny, dividends=scaled_zero),
+        exchange="NZX",
+    )
+    empty = Result("NZX:NONE", D(0), D(0), D(0), D(0), Components(), exchange="NZX")
+    performance = Report(
+        day("2025-03-31"),
+        day("2026-03-31"),
+        "NZD",
+        (priced, empty),
+        (),
+        priced,
+    )
+    tax = TaxRow(
+        "NZX:TINY",
+        gains=tiny,
+        losses=scaled_zero,
+        gross=tiny,
+        imputation=scaled_zero,
+        resident=tiny,
+        foreign=scaled_zero,
+        net=tiny,
+    )
+    report = YearEnd(
+        2026,
+        performance,
+        (tax,),
+        tax,
+        scaled_zero,
+        day("2026-03-31"),
+        (),
+    )
+    rendered = render_csv(report)
+    assert format(tiny, "f") in rendered
+    assert format(scaled_zero, "f") in rendered
+    assert "e" not in format(tiny, "f").lower()
+    assert "e" not in format(scaled_zero, "f").lower()
+    rows = list(csv.reader(io.StringIO(rendered)))
+    peak = next(row for row in rows if row and row[0] == "Peak foreign historical cost")
+    assert D(peak[1]) == scaled_zero
+    percentages = [
+        row[4] for row in rows if row and row[0] in {"NZX:TINY", "NZX:NONE"} and len(row) == 5
+    ]
+    assert "N/A" in percentages
+    tiny_percentage = next(cell for cell in percentages if cell != "N/A")
+    assert D(tiny_percentage) == priced.percentages.total
+    for row in rows:
+        for cell in row:
+            try:
+                parsed = D(cell)
+            except InvalidOperation:
+                continue
+            assert "e" not in cell.lower()
+            assert D(format(parsed, "f")) == parsed
 
 
 def test_scheduled_delivery_checkpoints_survive_three_failed_restarts(

@@ -1,5 +1,6 @@
 """Made-up series exercise alert rules, delivery and durable suppression."""
 
+import re
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal as D
 from unittest.mock import Mock
@@ -114,6 +115,9 @@ def test_dry_run_sends_nothing_and_does_not_suppress_real_delivery(sample):
     session.commit()
     assert not alerts.run_alerts(session, config(), now=NOW)
     assert alerts.send.call_count == alerts.push.call_count == 1
+    text, count = alerts.push.call_args.args
+    # The default config fires the daily-move and portfolio-drop rules.
+    assert count == 2 and "-20.00%" in text
 
 
 def test_cooldown_repeats_only_when_elapsed(sample):
@@ -276,7 +280,7 @@ def test_push_failure_never_logs_secret(monkeypatch, caplog):
         raise OSError("invented-private-token invented-bearer-token")
 
     monkeypatch.setattr(alerts._push_opener, "open", fail)
-    alerts.push("Made-up figures")
+    alerts.push("Made-up figures", 1)
     assert len(calls) == 1
     assert calls[0].get_header("Authorization") == "Bearer invented-bearer-token"
     assert "invented-private-token" not in caplog.text
@@ -293,7 +297,7 @@ def test_push_off_by_default(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     request = Mock()
     monkeypatch.setattr(alerts._push_opener, "open", request)
-    alerts.push("Made up")
+    alerts.push("Made up", 1)
     request.assert_not_called()
 
 
@@ -340,6 +344,39 @@ def test_daily_movement_ignores_trading_costs_and_adjusts_splits(sample):
     assert "+60.00%" in alerts.evaluate(session, portfolio, config(), NOW)["daily:NZX:MADEUP"].text
 
 
+def test_split_adjusted_repeating_price_uses_shared_formatter(sample):
+    from decimal import localcontext
+
+    from portfolio_digest.formatting import display_price
+    from portfolio_digest.models import Split
+
+    session, portfolio, instrument = sample
+    session.add(
+        Split(
+            instrument_id=instrument.id,
+            split_date=date(2026, 10, 16),
+            shares_before=D(1),
+            shares_after=D(7),
+            source="registry",
+        )
+    )
+    with localcontext() as context:
+        context.prec = 80
+        opening = D(10) * D(1) / D(7)
+        closing = D(8)
+        movement = (closing / opening - 1) * D(100)
+        text = alerts.evaluate(session, portfolio, config(), NOW)["daily:NZX:MADEUP"].text
+    assert text == (
+        f"NZX:MADEUP moved {movement:+.2f}% (2026-10-15 to 2026-10-16); "
+        f"closing prices {display_price(opening)} to {display_price(closing)} NZD "
+        "(split-adjusted)."
+    )
+    assert f"{movement:+.2f}%" == "+460.00%"
+    assert display_price(opening) == "1.4286"
+    assert str(opening) not in text
+    assert len(str(opening)) >= 80
+
+
 def test_threshold_is_strict_and_missing_close_is_unknown(sample):
     session, portfolio, instrument = sample
     assert (
@@ -366,12 +403,13 @@ def test_pushover_request_contains_env_credentials_only_in_body(monkeypatch):
     monkeypatch.delenv("ALERT_NTFY_URL", raising=False)
     monkeypatch.setenv("ALERT_PUSHOVER_TOKEN", "invented-app-token")
     monkeypatch.setenv("ALERT_PUSHOVER_USER", "invented-user-key")
+    monkeypatch.setenv("ALERT_PUSH_DETAIL", "full")
     response = Mock()
     response.__enter__ = Mock(return_value=Mock(status=200))
     response.__exit__ = Mock(return_value=False)
     request = Mock(return_value=response)
     monkeypatch.setattr(alerts._push_opener, "open", request)
-    alerts.push("Made-up alert")
+    alerts.push("Made-up alert", 1)
     sent = request.call_args.args[0]
     assert sent.full_url == "https://api.pushover.net/1/messages.json"
     assert parse_qs(sent.data.decode()) == {
@@ -379,6 +417,77 @@ def test_pushover_request_contains_env_credentials_only_in_body(monkeypatch):
         "user": ["invented-user-key"],
         "message": ["Made-up alert"],
     }
+
+
+FULL_ALERT = (
+    "Portfolio alerts | Invented Portfolio\n\n"
+    "NZX:MADEUP moved -20.00% (100.00 to 80.00 NZD)\n"
+    "Portfolio fell 12.50% to 7,000.00 NZD"
+)
+
+
+def _captured_push(monkeypatch):
+    for name in ("ALERT_NTFY_URL", "ALERT_NTFY_TOKEN", "ALERT_PUSH_DETAIL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALERT_PUSHOVER_TOKEN", "invented-app-token")
+    monkeypatch.setenv("ALERT_PUSHOVER_USER", "invented-user-key")
+    response = Mock()
+    response.__enter__ = Mock(return_value=Mock(status=200))
+    response.__exit__ = Mock(return_value=False)
+    request = Mock(return_value=response)
+    monkeypatch.setattr(alerts._push_opener, "open", request)
+    return request
+
+
+def _pushed_message(request) -> str:
+    from urllib.parse import parse_qs
+
+    return parse_qs(request.call_args.args[0].data.decode())["message"][0]
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_push_is_minimal_by_default(monkeypatch, count):
+    request = _captured_push(monkeypatch)
+    alerts.push(FULL_ALERT, count)
+    sent = _pushed_message(request)
+    assert re.findall(r"\d+", sent) == [str(count)]
+    for private in ("Invented Portfolio", "NZX", "MADEUP", "NZD", "%"):
+        assert private not in sent
+    assert "Open your email or the dashboard for details." in sent
+
+
+def test_full_push_detail_sends_the_alert_text(monkeypatch):
+    request = _captured_push(monkeypatch)
+    monkeypatch.setenv("ALERT_PUSH_DETAIL", "full")
+    alerts.push(FULL_ALERT, 2)
+    assert _pushed_message(request) == FULL_ALERT
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+@pytest.mark.parametrize("detail", ["minimal", "full"])
+def test_operations_notice_push_keeps_failure_and_recovery_text(monkeypatch, recovered, detail):
+    from portfolio_digest import operations
+    from portfolio_digest.mailers import MailSettings
+
+    request = _captured_push(monkeypatch)
+    monkeypatch.setenv("ALERT_PUSH_DETAIL", detail)
+    monkeypatch.setattr(operations, "mail_settings", lambda: MailSettings(_env_file=None))
+    when = datetime(2026, 11, 6, 7, tzinfo=UTC)
+    text = (
+        operations.recovery_text("prices", when, "Pacific/Auckland")
+        if recovered
+        else operations.failure_text("prices", when, "Pacific/Auckland", ("NZX:MADEUP",))
+    )
+    operations.deliver_operations_notice(ScheduleConfig(schedules=[]), text, recovered=recovered)
+    assert _pushed_message(request) == text
+
+
+def test_unknown_push_detail_sends_nothing(monkeypatch, caplog):
+    request = _captured_push(monkeypatch)
+    monkeypatch.setenv("ALERT_PUSH_DETAIL", "everything")
+    alerts.push(FULL_ALERT, 2)
+    request.assert_not_called()
+    assert "Invalid alert push settings." in caplog.text
 
 
 def test_cli_dry_run_prints_without_delivering(sample, monkeypatch, capsys):

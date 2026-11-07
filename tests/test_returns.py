@@ -1,7 +1,7 @@
 """All figures and securities are invented; expected answers are hand-worked."""
 
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal as D
 from decimal import getcontext, localcontext
 
@@ -423,7 +423,9 @@ def test_non_split_adjustments_move_units_at_recorded_price_without_cash():
     assert r.adjustments == D(22) - D("57.5")
     assert r.closing == 96
     assert r.amounts.capital == D("31.5")
-    assert r.denominator == 100
+    # Gross inflows (DRP 22, gift 0) join the denominator; the transfer out does not reduce it.
+    assert r.adjustment_inflows == 22
+    assert r.denominator == 122
     assert r.amounts.total == r.closing - r.opening - r.adjustments
     with pytest.raises(ReturnError, match="exceeds"):
         holding_return(
@@ -481,6 +483,95 @@ def test_holdings_sold_before_the_period_are_left_out():
     paid_after_sale = replace(gone, income=(Payment(MID, D(1), "NZD"),))
     report = calculate_returns((paid_after_sale,), START, END, {})
     assert report.total.amounts.dividends == 1
+
+
+def test_large_transfer_in_counts_towards_portfolio_denominator():
+    # Invented QS-023 scenario: NZ$1,000 portfolio, NZ$100,000 transferred in, +NZ$10,000.
+    existing = replace(holding(trades=[trade(quantity="100")], p0="10", p1="10"), code="EXISTING")
+    moved = replace(
+        holding(trades=[trade(MID, "adjustment", "10000", "10")], p0="10", p1="11"),
+        code="MOVED",
+    )
+    report = calculate_returns((existing, moved), START, END, {})
+    rows = {r.label: r for r in report.holdings}
+    transferred = rows["NZX:MOVED"]
+    assert transferred.opening == 0 and transferred.purchases == 0
+    assert transferred.adjustment_inflows == 100000 and transferred.denominator == 100000
+    assert transferred.percentages.total == 10
+    total = report.total
+    assert total.closing == 111000 and total.amounts.total == 10000
+    assert total.denominator == 101000
+    assert total.amounts.total == total.closing - total.opening - total.adjustments
+    assert round(total.percentages.total, 2) == D("9.90")
+    assert report.markets[0].denominator == 101000
+
+
+def test_removals_never_reduce_denominator_even_across_holdings():
+    into = replace(
+        holding(trades=[trade(MID, "adjustment", "10", "10")], p0="10", p1="12"), code="IN"
+    )
+    out = replace(holding(trades=[trade(), trade(MID, "adjustment", "-10", "10")]), code="OUT")
+    report = calculate_returns((into, out), START, END, {})
+    assert report.total.adjustments == 0
+    assert report.total.adjustment_inflows == 100
+    assert report.total.denominator == 200
+    assert report.total.percentages.total == 10
+    # In then out again on one holding: gross inflow stays, removal adds nothing.
+    r = holding_return(
+        holding(
+            trades=[
+                trade(),
+                trade(MID, "adjustment", "5", "10"),
+                trade(date(2026, 10, 16), "adjustment", "-15", "11"),
+            ]
+        ),
+        START,
+        END,
+        {},
+    )
+    assert r.adjustments == 50 - 165 and r.adjustment_inflows == 50
+    assert r.denominator == 150 and r.closing == 0
+
+
+def test_foreign_transfer_in_uses_recorded_fx_and_fees_once():
+    r = holding_return(
+        holding("USD", trades=[trade(MID, "adjustment", "10", "10", fees="1", fx="2")]),
+        START,
+        END,
+        {"USD": (Observation(START, D("1.5")), Observation(END, D("2.5")))},
+    )
+    assert r.adjustment_inflows == 200 and r.purchases == 2
+    assert r.denominator == 202
+    # Capital (12 - 10) * 10 * 2 - fee 2 = 38; currency 10 * 12 * (2.5 - 2) = 60.
+    assert r.amounts == Components(D(38), D(0), D(60))
+    assert r.amounts.total == r.closing - r.opening - r.purchases - r.adjustments
+
+
+def test_zero_price_gift_and_opening_balance_and_boundaries():
+    gift = holding_return(holding(trades=[trade(MID, "adjustment", "5", "0")]), START, END, {})
+    assert gift.adjustment_inflows == 0 and gift.percentages is None
+    opening_balance = holding_return(
+        holding(trades=[trade(MID, "opening_balance", "10", "10")]), START, END, {}
+    )
+    assert opening_balance.purchases == 100 and opening_balance.adjustment_inflows == 0
+    assert opening_balance.denominator == 100
+    # A transfer on the opening date counts only through opening value.
+    on_start = holding_return(
+        holding(trades=[trade(START, "adjustment", "10", "10")]), START, END, {}
+    )
+    assert on_start.opening == 100 and on_start.adjustment_inflows == 0
+    assert on_start.denominator == 100
+
+
+def test_split_and_consolidation_add_no_inflow():
+    for change, ratio in (("10", (D(1), D(2))), ("-5", (D(2), D(1)))):
+        h = replace(
+            holding(trades=[trade(), trade(MID, "adjustment", change, "0")]),
+            splits=(SplitEvent(MID, *ratio),),
+        )
+        r = holding_return(h, START, END, {})
+        assert r.adjustment_inflows == 0 and r.adjustments == 0
+        assert r.denominator == 100
 
 
 def test_lookup_matches_linear_selection_with_logarithmic_work(monkeypatch):
@@ -544,3 +635,50 @@ def test_sampled_valuations_do_not_scan_price_history():
         assert result.opening == result.closing == D(10 * (offset + 1))
         assert result.amounts == Components()
         assert result.flags == ()
+
+
+@pytest.mark.parametrize(
+    "day,hour,price_flag,fx_flag",
+    [
+        (2, 20, False, False),  # Tuesday NZ morning, before Monday US closes.
+        (3, 0, False, False),  # Tuesday NZ afternoon, Monday US price and FX closed.
+        (4, 0, True, True),
+        (3, 20, False, False),  # Tuesday US closes are still ahead.
+        (3, 21, True, False),  # Price close is due, FX close is an hour later.
+        (3, 22, True, True),
+    ],
+)
+def test_live_freshness_uses_separate_price_and_fx_closes(day, hour, price_flag, fx_flag):
+    monday = date(2026, 11, 2)
+    h = replace(holding("USD"), exchange="NYSE", prices=(Observation(monday, D(50)),))
+    rates = {"USD": (Observation(monday, D("1.7")),)}
+    result = calculate_returns(
+        (h,),
+        monday,
+        date(2026, 11, max(day, 3)),
+        rates,
+        as_of=datetime(2026, 11, day, hour, tzinfo=UTC),
+    )
+    flags = result.total.flags
+    assert any("price" in flag for flag in flags) == price_flag
+    assert any("FX" in flag for flag in flags) == fx_flag
+    assert result.total.closing == D(850)
+
+
+def test_live_freshness_keeps_provider_stale_and_date_only_semantics():
+    monday, tuesday = date(2026, 11, 2), date(2026, 11, 3)
+    h = replace(holding(), exchange="NYSE", prices=(Observation(monday, D(50)),))
+    instant = datetime(2026, 11, 2, 20, tzinfo=UTC)
+    assert not holding_return(h, monday, tuesday, {}, as_of=instant).flags
+    assert holding_return(h, monday, tuesday, {}).flags
+    stale = replace(h, prices=(Observation(monday, D(50), True),))
+    assert holding_return(stale, monday, tuesday, {}, as_of=instant).flags
+    with pytest.raises(ReturnError, match="timezone"):
+        calculate_returns((), monday, tuesday, {}, as_of=datetime(2026, 11, 3))
+
+
+@pytest.mark.parametrize("exchange", ["NYSEARCA", "NYSEAMERICAN", "CBOE"])
+def test_us_venues_do_not_flag_thanksgiving_as_missing(exchange):
+    wednesday, thanksgiving = date(2026, 11, 25), date(2026, 11, 26)
+    h = replace(holding(), exchange=exchange, prices=(Observation(wednesday, D(50)),))
+    assert not holding_return(h, wednesday, thanksgiving, {}).flags

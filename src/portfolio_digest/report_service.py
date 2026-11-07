@@ -4,8 +4,6 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit
-from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr
@@ -15,6 +13,7 @@ from sqlalchemy.orm import Session
 from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
 from portfolio_digest.models import Portfolio
+from portfolio_digest.pings import PingError, ping
 from portfolio_digest.reports import ReportError, build_report, render
 from portfolio_digest.scheduling import DeliveryCheckpoint, ScheduleConfig, SchedulerStateError
 
@@ -26,14 +25,8 @@ def ping_monitor(url: SecretStr | None) -> None:
     if url is None or not url.get_secret_value():
         return
     try:
-        raw = url.get_secret_value()
-        if urlsplit(raw).scheme not in {"https", "http"}:
-            raise ValueError
-        # urllib does not emit HTTP request URLs (the push URL contains a secret).
-        with urlopen(raw, timeout=10) as response:  # noqa: S310
-            if response.status != 200:
-                raise ValueError
-    except Exception:
+        ping(url.get_secret_value())
+    except PingError:
         logger.warning("The monitoring push failed.")
 
 

@@ -14,7 +14,7 @@ Bottom mover: ASX:DEMO NZ$ -2.00
 ASX
 Holding | Price | Value NZ$ | Capital gain | Dividends | Currency gain | Total return | Gross dividends | Withholding tax | Imputation gross-up
 Demo & Co (20 units)
-DEMO (stale) | 8.50 AUD | 187.00 | -5.00 | 2.00 | 1.00 | -2.00 | 3.00 | 1.00 | 0.50
+DEMO (stale) | 8.5 AUD | 187.00 | -5.00 | 2.00 | 1.00 | -2.00 | 3.00 | 1.00 | 0.50
 Subtotal |  | 187.00 | -5.00 | 2.00 | 1.00 | -2.00 | 3.00 | 1.00 | 0.50
 
 NZX

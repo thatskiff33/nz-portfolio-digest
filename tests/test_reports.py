@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
-from portfolio_digest import cli, report_service
+from portfolio_digest import cli, pings, report_service
 from portfolio_digest.mailers import MailError, MailSettings
 from portfolio_digest.reports import Report, ValuePoint, render
 from portfolio_digest.returns import Components, Result, subtotal
@@ -87,6 +87,17 @@ def test_html_and_text_match_reviewable_synthetic_snapshots():
     assert html.count("Subtotal") == 4
     assert "(stale)" in html
     assert "Currency gain" in text
+
+
+def test_sold_units_and_subcent_prices_stay_readable():
+    base = example_report()
+    sold = replace(base.returns.holdings[0], units=D("0E-8"), price=D("0.0012"))
+    returns = replace(base.returns, holdings=(sold, base.returns.holdings[1]))
+    html, text = render(replace(base, returns=returns))
+    assert "(0 units)" in html and "(0 units)" in text
+    assert "0E-8" not in html and "0E-8" not in text
+    assert "0.0012 AUD" in html and "0.0012 AUD" in text
+    assert "0.00 AUD" not in html and "0.00 AUD" not in text
 
 
 def test_html_escapes_untrusted_instrument_labels():
@@ -196,7 +207,7 @@ def test_failed_monitoring_is_nonfatal_and_never_logs_secret_url(monkeypatch, ca
     def fail(*a, **kw):
         raise OSError("https://example.invalid/private-token")
 
-    monkeypatch.setattr(report_service, "urlopen", fail)
+    monkeypatch.setattr(pings._opener, "open", fail)
     report_service.ping_kuma(config)
     assert "monitoring push failed" in caplog.text
     assert "private-token" not in caplog.text

@@ -323,7 +323,7 @@ def test_cli_exit_and_kuma_only_on_match(local_engine, monkeypatch, capsys, rows
 def test_kuma_failure_does_not_leak_url(monkeypatch):
     opener = Mock()
     opener.open.side_effect = URLError("https://kuma.invalid/" + USER)
-    monkeypatch.setattr("portfolio_digest.akahu.build_opener", lambda *args: opener)
+    monkeypatch.setattr("portfolio_digest.pings._opener", opener)
     with pytest.raises(AkahuError) as exc:
         push_success(SecretStr("https://kuma.invalid/" + USER))
     assert USER not in str(exc.value)
@@ -365,7 +365,7 @@ def test_malformed_kuma_url_never_exposes_secret(suffix, monkeypatch):
 
     opener = Mock()
     opener.open.side_effect = InvalidURL(USER)
-    monkeypatch.setattr("portfolio_digest.akahu.build_opener", lambda *args: opener)
+    monkeypatch.setattr("portfolio_digest.pings._opener", opener)
     with pytest.raises(AkahuError) as exc:
         push_success(SecretStr("http://localhost/" + USER + suffix))
     assert USER not in str(exc.value)
@@ -439,7 +439,7 @@ def test_bad_account_ids_do_not_break_another_command(local_engine, monkeypatch)
 
 
 def test_redirects_are_not_followed():
-    from portfolio_digest.akahu import NoRedirect
+    from portfolio_digest.pings import NoRedirect
 
     assert NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid") is None
 
@@ -455,11 +455,14 @@ def test_inactive_investment_account_fails(local_engine):
 @pytest.mark.parametrize("status_query", ["", "&status=up", "&status=down&status=down"])
 def test_kuma_success_push_is_read_only_and_preserves_query(monkeypatch, status_query):
     opener = Mock()
-    opener.open.return_value = BytesIO(b'{"ok":true}')
-    monkeypatch.setattr("portfolio_digest.akahu.build_opener", lambda *args: opener)
+    opener.open.return_value.__enter__ = Mock(
+        return_value=Mock(status=200, read=lambda: b'{"ok":true}')
+    )
+    opener.open.return_value.__exit__ = Mock(return_value=False)
+    monkeypatch.setattr("portfolio_digest.pings._opener", opener)
     push_success(SecretStr("https://kuma.invalid/push/fake?msg=OK&ping=" + status_query))
     opener.open.assert_called_once_with(
-        "https://kuma.invalid/push/fake?msg=OK&ping=&status=up", timeout=15
+        "https://kuma.invalid/push/fake?msg=OK&ping=&status=up", timeout=10
     )
 
 

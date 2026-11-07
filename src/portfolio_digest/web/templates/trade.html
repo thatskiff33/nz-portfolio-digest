@@ -1,4 +1,13 @@
 {% extends "base.html" %}
+{% block title %}Add trade or correction · {{ portfolio.name }} · Portfolio digest{% endblock %}
+{% macro field_attributes(field, help='') -%}
+    id="{{ field }}"
+    {% if errors.get(field) %}aria-invalid="true"{% endif %}
+    {% if help or errors.get(field) %}aria-describedby="{{ help }}{% if errors.get(field) %} {{ field }}-error{% endif %}"{% endif %}
+{%- endmacro %}
+{% macro field_error(field) -%}
+    {% if errors.get(field) %}<small class="field-error" id="{{ field }}-error">{{ errors[field] }}</small>{% endif %}
+{%- endmacro %}
 {% block content %}
     <p class="eyebrow">{{ portfolio.name }}</p>
     <h1>Add trade or correction</h1>
@@ -6,62 +15,72 @@
         Corrections use a signed adjustment, preserving the original trade history.
         For a reversal, enter the opposite quantity and explain it in the notes.
     </p>
+    {% include "form_errors.html" %}
     <form class="panel entry-form"
           method="post"
           action="/p/{{ portfolio.id }}/trade">
         <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
         <label>
             Market
-            <select name="exchange" aria-label="Market">
-                <option>NZX</option>
-                <option>ASX</option>
-                <option>NYSE</option>
-                <option>NASDAQ</option>
+            <select name="exchange" {{ field_attributes("exchange", "") }} aria-label="Market">
+                {% for market in ['NZX','ASX','NYSE','NASDAQ'] %}
+                    <option {% if values.get('exchange', 'NZX') == market %}selected{% endif %}>{{ market }}</option>
+                {% endfor %}
+                {% if values.get('exchange') and values.exchange not in ['NZX','ASX','NYSE','NASDAQ'] %}
+                    <option selected>{{ values.exchange }}</option>
+                {% endif %}
             </select>
+            {{ field_error("exchange") }}
         </label>
         <label>
             Code
-            <input name="code" maxlength="32" required placeholder="e.g. KOW">
+            <input name="code" value="{{ values.get('code', '') }}" {{ field_attributes("code", "") }} maxlength="32" required placeholder="e.g. KOW">
+            {{ field_error("code") }}
         </label>
         <label>
             Trade date
-            <input type="date" name="trade_date" required>
+            <input type="date" name="trade_date" value="{{ values.get('trade_date', '') }}" {{ field_attributes("trade_date", "") }} required>
+            {{ field_error("trade_date") }}
         </label>
         <label>
             Type
-            <select name="trade_type" aria-label="Type">
-                <option value="buy">Buy</option>
-                <option value="sell">Sell</option>
-                <option value="opening_balance">Opening balance</option>
-                <option value="adjustment">Adjustment / correction</option>
+            <select name="trade_type" {{ field_attributes("trade_type", "") }} aria-label="Type">
+                {% for value,label in [('buy','Buy'),('sell','Sell'),('opening_balance','Opening balance'),('adjustment','Adjustment / correction')] %}
+                    <option value="{{ value }}" {% if values.get('trade_type', 'buy') == value %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+                {% if values.get('trade_type') and values.trade_type not in ['buy','sell','opening_balance','adjustment'] %}
+                    <option selected value="{{ values.trade_type }}">{{ values.trade_type }}</option>
+                {% endif %}
             </select>
+            {{ field_error("trade_type") }}
         </label>
         <label>
             Quantity
-            <input name="quantity"
+            <input name="quantity" value="{{ values.get('quantity', '') }}" {{ field_attributes("quantity", "quantity-help") }}
                    inputmode="decimal"
                    aria-label="Quantity"
-                   aria-describedby="quantity-help"
                    required>
             <small id="quantity-help">Negative quantities allowed for adjustments only.</small>
+            {{ field_error("quantity") }}
         </label>
         <label>
             Unit price
-            <input name="price"
+            <input name="price" value="{{ values.get('price', '') }}" {{ field_attributes("price", "price-help") }}
                    inputmode="decimal"
                    aria-label="Unit price"
-                   aria-describedby="price-help"
                    required>
             <small id="price-help">In the listing's currency.</small>
+            {{ field_error("price") }}
         </label>
         <label>
             Fees
-            <input name="fees" inputmode="decimal" value="0" required>
+            <input name="fees" value="{{ values.get('fees', '0') }}" {{ field_attributes("fees", "") }} inputmode="decimal" required>
+            {{ field_error("fees") }}
         </label>
         <label>
             Notes
-            <textarea name="notes" maxlength="4000" rows="3">
-</textarea>
+            <textarea name="notes" {{ field_attributes("notes", "") }} maxlength="4000" rows="3">{{ values.get("notes", "") }}</textarea>
+            {{ field_error("notes") }}
         </label>
         <button>Save trade</button>
     </form>

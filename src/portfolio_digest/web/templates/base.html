@@ -15,51 +15,57 @@
         <script src="/static/chart-4.4.8.umd.js" defer></script>
         <script src="/static/dashboard.js" defer></script>
     </head>
-    <body hx-boost="true" hx-target="body" hx-swap="outerHTML">
+    <body hx-boost="true" hx-target="#page" hx-select="#page" hx-swap="outerHTML">
         <a class="skip" href="#main">Skip to content</a>
-        <header>
-            <a class="brand" href="/">◈ <span>Portfolio digest</span>
-            </a>
-            <span class="private">Private workspace</span>
-            {% if request.state.browser.authenticated %}
-                <form action="/logout" method="post">
-                    <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
-                    <button class="quiet">Sign out</button>
-                </form>
-            {% else %}
-                <a href="/login">Sign in</a>
-            {% endif %}
-        </header>
-        <div class="shell">
-            <aside aria-label="Portfolio navigation">
-                <p class="eyebrow">Your portfolios</p>
-                {% for p in portfolios|default([]) %}
-                    <a class="portfolio-link {% if portfolio is defined and p.id == portfolio.id %} selected {% endif %}"
-                       href="/p/{{ p.id }}">{{ p.name }} <span>↗</span>
-                    </a>
-                {% endfor %}
-                {% if portfolio is defined %}
-                    <nav>
-                        <a href="/p/{{ portfolio.id }}">Overview &amp; holdings</a>
-                        <a href="/p/{{ portfolio.id }}/imports">Import history</a>
-                        <a href="/p/{{ portfolio.id }}/reconcile">Reconciliation</a>
-                        {% if request.state.browser.authenticated %}
-                            <a href="/p/{{ portfolio.id }}/trade">Add trade or correction</a>
-                        {% endif %}
-                    </nav>
+        <div id="status" role="status" aria-live="polite" aria-atomic="true">{{ status_message|default('') }}</div>
+        <div id="request-alert" role="alert" aria-atomic="true"></div>
+        <div id="page">
+            <span hidden data-status-message="{{ status_message|default('') }}"></span>
+            <header>
+                <a class="brand" href="/">◈ <span>Portfolio digest</span>
+                </a>
+                <span class="private">Private workspace</span>
+                {% if request.state.browser.authenticated %}
+                    <form action="/logout" method="post">
+                        <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
+                        <button class="quiet">Sign out</button>
+                    </form>
+                {% else %}
+                    <a href="/login">Sign in</a>
                 {% endif %}
-                <p class="aside-note">
-                    A clearer view between emails.
-                    <br>
-                    Stored prices. Exact amounts.
-                </p>
-            </aside>
-            <main id="main" tabindex="-1">
-                {% block content %}{% endblock %}
-            </main>
+            </header>
+            <div class="shell">
+                <aside aria-label="Portfolio navigation">
+                    <p class="eyebrow">Your portfolios</p>
+                    {% for p in portfolios|default([]) %}
+                        <a class="portfolio-link {% if portfolio is defined and p.id == portfolio.id %} selected {% endif %}"
+                           {% if portfolio is defined and p.id == portfolio.id %}aria-current="page"{% endif %}
+                           href="/p/{{ p.id }}">{{ p.name }} <span>↗</span>
+                        </a>
+                    {% endfor %}
+                    {% if portfolio is defined %}
+                        <nav>
+                            <a {% if page == "overview" %}aria-current="page"{% endif %} href="/p/{{ portfolio.id }}">Overview &amp; holdings</a>
+                            <a {% if page == "imports" %}aria-current="page"{% endif %} href="/p/{{ portfolio.id }}/imports">Import history</a>
+                            <a {% if page == "reconcile" %}aria-current="page"{% endif %} href="/p/{{ portfolio.id }}/reconcile">Reconciliation</a>
+                            {% if request.state.browser.authenticated %}
+                                <a {% if page == "trade" %}aria-current="page"{% endif %} href="/p/{{ portfolio.id }}/trade">Add trade or correction</a>
+                            {% endif %}
+                        </nav>
+                    {% endif %}
+                    <p class="aside-note">
+                        A clearer view between emails.
+                        <br>
+                        Stored prices. Exact amounts.
+                    </p>
+                </aside>
+                <main id="main" tabindex="-1">
+                    {% block content %}{% endblock %}
+                </main>
+            </div>
+            <footer>
+                Portfolio digest <span>Private access over Tailscale · Values exclude cash</span>
+            </footer>
         </div>
-        <footer>
-            Portfolio digest <span>Private access over Tailscale · Values exclude cash</span>
-        </footer>
     </body>
 </html>

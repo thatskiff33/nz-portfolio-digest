@@ -73,16 +73,20 @@ def render_html(report: YearEnd, name: str) -> str:
         head = "".join(
             f'<th scope="col" style="padding:8px;text-align:left">{escape(h)}</th>' for h in headers
         )
-        body = "".join(
-            "<tr>"
-            + "".join(
-                f'<td data-label="{escape(headers[i], quote=True)}" '
-                f'style="padding:8px;border-top:1px solid #d9e3e5">{escape(str(v))}</td>'
-                for i, v in enumerate(row)
-            )
-            + "</tr>"
-            for row in rows
-        )
+        body = ""
+        for row_index, row in enumerate(rows):
+            cells = []
+            for i, value in enumerate(row):
+                tag = "th" if i == 0 else "td"
+                scope = 'scope="row" ' if i == 0 else ""
+                content = escape(str(value))
+                if row_index == len(rows) - 1 and i > 0:
+                    content = f"<strong>{content}</strong>"
+                cells.append(
+                    f'<{tag} {scope}data-label="{escape(headers[i], quote=True)}" '
+                    f'style="padding:8px;border-top:1px solid #d9e3e5">{content}</{tag}>'
+                )
+            body += "<tr>" + "".join(cells) + "</tr>"
         return (
             f'<div style="overflow-x:auto"><table style="border-collapse:collapse;'
             f'width:100%;font-size:14px"><thead><tr>{head}</tr></thead>'
@@ -122,12 +126,7 @@ def render_html(report: YearEnd, name: str) -> str:
 <title>Year-end summary {report.year}</title>
 <style>
 @media (max-width:640px) {{
-  table, tbody, tr, td {{ display:block; }}
-  thead {{ display:none; }}
-  tr {{ margin-bottom:16px; border:1px solid #d9e3e5; }}
-  td {{ display:flex; justify-content:space-between; gap:16px; text-align:right; }}
-  td::before {{ content:attr(data-label); text-align:left; font-weight:bold; }}
-  td:first-child {{ background:#eef3f4; font-weight:bold; }}
+  table {{ min-width:640px; }}
 }}
 </style></head>
 <body style="margin:0;background:#eef3f4;color:#19383d;font-family:Arial,sans-serif">

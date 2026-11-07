@@ -76,3 +76,30 @@ document.addEventListener("htmx:beforeSwap", (event) => {
     .querySelectorAll(".portfolio-chart")
     .forEach((canvas) => Chart.getChart(canvas)?.destroy());
 });
+
+
+// These regions stay mounted while #page is replaced, so changes are announced.
+const announcementTimers = new Map();
+function announce(id, message) {
+  const region = document.getElementById(id);
+  if (!region) return;
+  clearTimeout(announcementTimers.get(id));
+  region.textContent = "";
+  announcementTimers.set(id, setTimeout(() => { region.textContent = message; }, 50));
+}
+function navigationFeedback() {
+  document.getElementById("main")?.focus();
+  announce("request-alert", "");
+  const message = document.querySelector("[data-status-message]")?.dataset.statusMessage;
+  announce("status", [document.title.trim(), message].filter(Boolean).join(". "));
+}
+document.addEventListener("htmx:afterSettle", (event) => {
+  if (event.detail.requestConfig?.boosted) navigationFeedback();
+});
+document.addEventListener("htmx:historyRestore", navigationFeedback);
+document.addEventListener("htmx:responseError", () => {
+  announce("request-alert", "We could not complete that request. Your entries have been kept. Try again.");
+});
+document.addEventListener("htmx:sendError", () => {
+  announce("request-alert", "We could not connect. Check your connection and try again. Your entries have been kept.");
+});

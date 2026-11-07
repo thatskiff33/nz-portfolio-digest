@@ -372,6 +372,16 @@ def test_email_dry_run_includes_engine_split_warning(tmp_path, monkeypatch):
     assert "FERN<&>" in out.with_suffix(".txt").read_text()
 
 
+def test_report_accessible_table_markup():
+    html, _ = render(example_report())
+    assert "<title>Portfolio digest |" in html
+    assert '<th scope="col"' in html
+    assert '<th scope="row"' in html
+    assert "<td style=" in html and "<strong>1,421.00</strong></td>" in html
+    assert "font-size:9px" not in html and "font-size:10px" not in html
+    assert "Demo &amp; Co" in html
+
+
 def test_report_checkpoints_distinguish_periods_and_subjects(monkeypatch):
     import json
 

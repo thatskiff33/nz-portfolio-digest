@@ -189,7 +189,7 @@ def test_anonymous_healthz_redirects_without_session_or_database():
 @pytest.mark.parametrize(
     "path,text",
     [
-        ("/", "Kōwhai Fund"),
+        ("/", "Harbour Fund"),
         ("/p/1?period=custom&start=2026-10-20&end=2026-10-20", "885.66"),
         ("/p/1?sort=value&direction=desc", "Holdings"),
         ("/p/1/holding/1", "Kōwhai Industries"),
@@ -984,6 +984,211 @@ def test_holding_future_activity_does_not_invert_report_dates(engine_web):
     assert response.context["returns_error"] is None
     # Future ledger rows remain visible, but are excluded from valuation inputs.
     assert len(response.context["trades"]) == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("exchange", "unknown"),
+        ("code", "bad code"),
+        ("trade_date", "bad"),
+        ("trade_type", "unknown"),
+        ("quantity", "NaN"),
+        ("price", "-1"),
+        ("fees", "-1"),
+        ("notes", "invalid\x01note"),
+    ],
+)
+def test_form_errors_retain_entries_and_link_fields(client, engine_web, field, value):
+    csrf = sign_in(client)
+    data = dict(
+        csrf=csrf,
+        exchange="NZX",
+        code="KOW",
+        trade_date=str(DAY),
+        trade_type="buy",
+        quantity="2",
+        price="3",
+        fees="0",
+        notes="Made-up note",
+    )
+    data[field] = value
+    response = client.post("/p/1/trade", data=data)
+    assert response.status_code == 400
+    assert response.context["values"][field] == value
+    assert field in response.context["errors"]
+    assert 'role="alert"' in response.text
+    assert f'href="#{field}"' in response.text
+    assert f'id="{field}-error"' in response.text
+    assert 'aria-invalid="true"' in response.text
+    assert "Made-up note" in response.text or field == "notes"
+    with Session(engine_web) as session:
+        assert len(list(session.scalars(select(Trade)))) == 2
+
+
+def test_snapshot_validation_and_success_retain_csv(client):
+    csrf = sign_in(client)
+    bad = "<script>bad</script>"
+    response = client.post("/p/1/reconcile", data={"csrf": csrf, "snapshot": bad})
+    assert response.status_code == 400
+    assert 'href="#snapshot"' in response.text
+    assert "snapshot-help snapshot-error" in response.text
+    assert "&lt;script&gt;bad&lt;/script&gt;" in response.text
+    snapshot = "Exchange,Code,Units\nNZX,KOW,100.125\nNYSE,FERN,10"
+    response = client.post("/p/1/reconcile", data={"csrf": csrf, "snapshot": snapshot})
+    assert response.context["values"]["snapshot"] == snapshot
+    assert response.context["status_message"] == "All holdings match the snapshot."
+
+
+@pytest.mark.parametrize(
+    "path,values",
+    [
+        ("/p/1/trade", {"code": "KOW", "quantity": "2"}),
+        ("/p/1/reconcile", {"snapshot": "Exchange,Code,Units\nNZX,KOW,3"}),
+    ],
+)
+def test_stale_csrf_recovers_authenticated_forms_without_write(client, engine_web, path, values):
+    csrf = sign_in(client)
+    response = client.post(path, data={"csrf": "stale", **values})
+    assert response.status_code == 403
+    assert "This form has expired. Check your entries and resubmit." in response.text
+    assert token(response) == csrf
+    for field, value in values.items():
+        assert response.context["values"][field] == value
+    with Session(engine_web) as session:
+        assert len(list(session.scalars(select(Trade)))) == 2
+
+
+def test_titles_current_navigation_and_private_error_sidebar(client):
+    paths = [
+        "/p/1",
+        "/p/1/holding/1",
+        "/p/1/imports",
+        "/p/1/reconcile",
+        "/p/1/trade",
+        "/login",
+        "/missing",
+    ]
+    assert "Kōwhai Fund" not in client.get("/missing").text
+    sign_in(client)
+    titles = []
+    for path in paths:
+        response = client.get(path)
+        titles.append(re.search(r"<title>(.*?)</title>", response.text, re.S)[1].strip())
+        if path == "/login":
+            assert "Kōwhai Fund" not in response.text
+        else:
+            assert "Kōwhai Fund" in response.text
+        if path.startswith("/p/1") and "/holding/" not in path:
+            assert response.text.count('aria-current="page"') == 2
+    assert len(set(titles)) == len(titles)
+    error = client.get("/missing")
+    assert "Error: 404" in error.text
+    assert ">Sign in</a>" not in error.text
+
+
+def test_save_and_undo_messages_are_consumed_once(client):
+    csrf = sign_in(client)
+    response = client.post(
+        "/p/1/trade",
+        data=dict(
+            csrf=csrf,
+            exchange="NZX",
+            code="KOW",
+            trade_date=str(DAY),
+            trade_type="buy",
+            quantity="2",
+            price="3",
+            fees="0",
+        ),
+    )
+    assert response.context["status_message"] == "Trade saved."
+    assert client.get("/p/1").context["status_message"] == ""
+    response = client.post("/p/1/imports/1/undo", data={"csrf": csrf})
+    assert response.context["status_message"] == "Import undone."
+    assert client.get("/p/1/imports").context["status_message"] == ""
+
+
+@pytest.mark.parametrize(
+    "period,start,end,original_start,original_end,expected",
+    [
+        ("week", "2026-09-20", "2026-10-20", "2026-09-20", "2026-10-20", "week"),
+        ("month", "2026-09-21", "2026-10-20", "2026-09-20", "2026-10-20", "custom"),
+        ("week", "2026-09-20", "2026-10-19", "2026-09-20", "2026-10-20", "custom"),
+        ("month", "2026-09-21", "2026-10-20", "", "", "custom"),
+        ("month", "2026-09-20", "2026-10-20", "", "", "month"),
+        ("month", "", "", "", "", "month"),
+    ],
+)
+def test_period_date_edit_matrix(period, start, end, original_start, original_end, expected):
+    from portfolio_digest.web.viewmodel import effective_period
+
+    assert effective_period(period, DAY, DAY, start, end, original_start, original_end) == expected
+    resolved = period_dates(period, DAY, DAY, start, end, original_start, original_end)
+    if expected == "custom":
+        assert resolved == (date.fromisoformat(start), date.fromisoformat(end))
+    elif expected == "week":
+        assert resolved == (DAY - timedelta(days=7), DAY)
+
+
+def test_custom_period_remains_selected_when_sorting(client):
+    sign_in(client)
+    response = client.get(
+        "/p/1",
+        params={
+            "period": "month",
+            "start": "2026-10-01",
+            "end": "2026-10-20",
+            "original_start": "2026-09-20",
+            "original_end": "2026-10-20",
+        },
+    )
+    assert response.context["period"] == "custom"
+    assert 'name="period" value="custom"' in response.text
+    response = client.get(
+        "/p/1",
+        params={
+            "period": "custom",
+            "start": "2026-10-01",
+            "end": "2026-10-20",
+            "sort": "value",
+        },
+    )
+    assert response.context["period"] == "custom"
+    assert str(response.context["start"]) == "2026-10-01"
+
+
+def test_persistence_error_preserves_form_without_exposing_details(client, monkeypatch):
+    from portfolio_digest.importing import ImportFailure
+
+    def fail(*args):
+        raise ImportFailure("Private persistence details")
+
+    monkeypatch.setattr("portfolio_digest.web.app.add_trade", fail)
+    csrf = sign_in(client)
+    response = client.post(
+        "/p/1/trade",
+        data=dict(
+            csrf=csrf,
+            exchange="NZX",
+            code="KOW",
+            trade_date=str(DAY),
+            trade_type="buy",
+            quantity="2",
+            price="3",
+            fees="0",
+            notes="Synthetic note",
+        ),
+    )
+    assert response.status_code == 400
+    assert "Synthetic note" in response.text
+    assert "Private persistence details" not in response.text
+
+
+def test_missing_static_file_has_accessible_error_page(client):
+    response = client.get("/static/missing.css")
+    assert response.status_code == 404
+    assert "Error: 404" in response.text
 
 
 def test_dashboard_cli_and_email_round_the_same_value_half_up():

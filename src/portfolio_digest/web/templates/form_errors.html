@@ -1,0 +1,11 @@
+{% if form_error or errors %}
+    <section class="error-summary" role="alert" aria-labelledby="error-heading">
+        <h2 id="error-heading">Check your entries</h2>
+        {% if form_error %}<p>{{ form_error }}</p>{% endif %}
+        {% if errors %}
+            <ul>{% for field, message in errors.items() %}
+                <li><a href="#{{ field }}">{{ message }}</a></li>
+            {% endfor %}</ul>
+        {% endif %}
+    </section>
+{% endif %}

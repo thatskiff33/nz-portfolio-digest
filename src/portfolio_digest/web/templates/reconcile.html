@@ -1,10 +1,12 @@
 {% extends "base.html" %}
+{% block title %}Reconciliation · {{ portfolio.name }} · Portfolio digest{% endblock %}
 {% block content %}
     <p class="eyebrow">{{ portfolio.name }}</p>
     <h1>Reconciliation</h1>
     <p class="muted">Compare all stored units with a complete broker or registry snapshot. A holding missing from the snapshot is treated as zero units.</p>
+    {% include "form_errors.html" %}
     {% if differences is defined %}
-        <section class="panel" aria-live="polite">
+        <section class="panel">
             <h2>Reconciliation results</h2>
             {% if not differences %}
                 <p>All holdings match the snapshot.</p>
@@ -46,9 +48,12 @@
               action="/p/{{ portfolio.id }}/reconcile">
             <input type="hidden" name="csrf" value="{{ request.state.browser.csrf }}">
             <label>
-                Snapshot CSV<textarea name="snapshot" rows="7" required placeholder="Exchange,Code,Units">
-</textarea>
-                <small>Use Exchange, Code and Units columns. Made-up example: NZX,KOW,100.</small>
+                Snapshot CSV<textarea id="snapshot" name="snapshot" rows="7" required
+                    aria-describedby="snapshot-help{% if errors.get('snapshot') %} snapshot-error{% endif %}"
+                    {% if errors.get('snapshot') %}aria-invalid="true"{% endif %}
+                    placeholder="Exchange,Code,Units">{{ values.get('snapshot', '') }}</textarea>
+                {% if errors.get('snapshot') %}<small class="field-error" id="snapshot-error">{{ errors.snapshot }}</small>{% endif %}
+                <small id="snapshot-help">Use Exchange, Code and Units columns. Made-up example: NZX,KOW,100.</small>
             </label>
             <button>Compare holdings</button>
         </form>

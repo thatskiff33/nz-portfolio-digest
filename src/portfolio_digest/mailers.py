@@ -3,6 +3,7 @@
 import base64
 import smtplib
 import ssl
+from dataclasses import replace
 from email.message import EmailMessage
 from typing import Literal
 
@@ -164,6 +165,9 @@ class PostmarkMailer:
         # One message per recipient, so no recipient sees another's address (Postmark has
         # no undisclosed-recipients form: its first address is always visible in To).
         progress = recipient_progress()
+        if progress is not None and not progress.message_id:
+            # Report subjects include their period; callers can supply a fuller identity.
+            progress = replace(progress, message_id=str(msg["Subject"]))
         failures = 0
         with httpx.Client(timeout=30) as client:
             for recipient in dict.fromkeys(recipients):

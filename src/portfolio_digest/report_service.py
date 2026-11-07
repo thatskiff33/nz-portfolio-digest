@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.config import ConfigError, runtime_settings
-from portfolio_digest.delivery import portfolio_delivery
+from portfolio_digest.delivery import message_delivery, portfolio_delivery
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
 from portfolio_digest.models import Portfolio
 from portfolio_digest.pings import PingError, ping
@@ -109,6 +109,7 @@ def run_report(
         dry_run=dry_run,
         out=out,
         settings=settings,
+        message_id=f"{start.isoformat()}\0{end.isoformat()}",
     )
     if not dry_run:
         ping_kuma(config)
@@ -140,6 +141,7 @@ def deliver_report(
     settings: MailSettings | None = None,
     csv: str | None = None,
     csv_name: str = "report.csv",
+    message_id: str = "",
 ) -> None:
     """Shared preview and mailer boundary for every report."""
     _validate_preview(dry_run, out)
@@ -160,5 +162,6 @@ def deliver_report(
     msg = message(settings.mail_from, recipients, subject, html, text)
     if csv is not None:
         msg.add_attachment(csv.encode("utf-8"), maintype="text", subtype="csv", filename=csv_name)
-    send(settings, msg, recipients)
+    with message_delivery(f"{subject}\0{message_id}"):
+        send(settings, msg, recipients)
     logger.info("Portfolio report sent successfully.")

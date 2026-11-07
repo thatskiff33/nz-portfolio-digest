@@ -1016,7 +1016,10 @@ def test_alert_percentages_round_half_up_like_other_channels(sample, closing, pe
     assert values in states["portfolio"].text
 
 
-def test_postmark_partial_failure_keeps_progress_after_alert_rollback(sample, monkeypatch):
+@pytest.mark.parametrize("extra_alert", [False, True])
+def test_postmark_partial_failure_keeps_progress_after_alert_rollback(
+    sample, monkeypatch, extra_alert
+):
     import json
 
     import httpx
@@ -1024,7 +1027,7 @@ def test_postmark_partial_failure_keeps_progress_after_alert_rollback(sample, mo
     from portfolio_digest import mailers
     from portfolio_digest.delivery import RecipientProgress, track_recipients
 
-    session, _, _ = sample
+    session, portfolio, _ = sample
     recipients = ["first@example.invalid", "second@example.invalid"]
     settings = MailSettings(
         _env_file=None,
@@ -1035,9 +1038,11 @@ def test_postmark_partial_failure_keeps_progress_after_alert_rollback(sample, mo
     monkeypatch.setattr(alerts, "mail_settings", lambda: settings)
     monkeypatch.setattr(alerts, "send", mailers.send)
     attempted = []
+    bodies = []
     rejecting = True
 
     def handle(request):
+        bodies.append(json.loads(request.content)["TextBody"])
         recipient = json.loads(request.content)["To"]
         attempted.append(recipient)
         code = 406 if rejecting and recipient == recipients[1] else 0
@@ -1060,9 +1065,17 @@ def test_postmark_partial_failure_keeps_progress_after_alert_rollback(sample, mo
     assert len(saved) == 1
     session.rollback()
     rejecting = False
+    evaluated = alerts.evaluate(session, portfolio, rules, NOW)
+    if extra_alert:
+        evaluated["stale:NZX:MADEUP"] = alerts.Trigger("stale:NZX:MADEUP", "New stale-price alert")
+    # An unchanged set in a different order must still use the same checkpoint.
+    monkeypatch.setattr(alerts, "evaluate", lambda *a: dict(reversed(list(evaluated.items()))))
     # Recreate progress as on restart, without retaining an EmailMessage or adapter.
     with track_recipients(RecipientProgress(set(saved[-1]), lambda: None)):
         assert alerts.run_alerts(session, rules, now=NOW + timedelta(minutes=30))
-    assert attempted == recipients + [recipients[1]]
+    assert attempted == recipients + (recipients if extra_alert else [recipients[1]])
+    if extra_alert:
+        assert all("New stale-price alert" in body for body in bodies[-2:])
+    assert all(re.fullmatch(r"[0-9a-f]{64}", key) for key in saved[-1])
     assert session.scalars(select(AlertState)).all()
     alerts.push.assert_called_once()

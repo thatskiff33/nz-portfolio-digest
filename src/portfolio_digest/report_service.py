@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_digest.config import ConfigError, runtime_settings
+from portfolio_digest.delivery import portfolio_delivery
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
 from portfolio_digest.models import Portfolio
 from portfolio_digest.pings import PingError, ping
@@ -71,15 +72,16 @@ def run_report(
                 out.with_name(f"{out.stem}-portfolio-{portfolio_id}{out.suffix}") if out else None
             )
             try:
-                run_year_end(
-                    session,
-                    config,
-                    name,
-                    year,
-                    dry_run=dry_run,
-                    out=preview,
-                    settings=settings,
-                )
+                with portfolio_delivery(portfolio_id):
+                    run_year_end(
+                        session,
+                        config,
+                        name,
+                        year,
+                        dry_run=dry_run,
+                        out=preview,
+                        settings=settings,
+                    )
             except SchedulerStateError:
                 raise
             except Exception:

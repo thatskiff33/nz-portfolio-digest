@@ -18,9 +18,15 @@ def digits_outside_dates(text: str) -> str:
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
 def test_standalone_failure_is_once_a_day_then_one_recovery(tmp_path, monkeypatch, platform):
+    from unittest.mock import Mock
+
     monkeypatch.setattr(operations.sys, "platform", platform)
+    lock = Mock()
     if platform == "win32":
         monkeypatch.setitem(operations.sys.modules, "fcntl", None)
+    else:
+        # Exercise the Unix lock path even when this test runs on Windows.
+        monkeypatch.setitem(operations.sys.modules, "fcntl", lock)
     monkeypatch.setenv("SCHEDULER_STATE", str(tmp_path / "scheduler.json"))
     sent = []
     monkeypatch.setattr(
@@ -41,6 +47,9 @@ def test_standalone_failure_is_once_a_day_then_one_recovery(tmp_path, monkeypatc
     assert len(sent) == 3
     for text in sent:
         assert not re.search(r"\d", digits_outside_dates(text))
+    if platform == "linux":
+        assert lock.flock.call_count == 5
+        assert all(call.args[1] == lock.LOCK_EX for call in lock.flock.call_args_list)
 
 
 def test_missing_state_directory_is_created_and_throttle_survives_retries(tmp_path, monkeypatch):
@@ -148,7 +157,7 @@ def test_email_uses_report_recipients_and_contains_only_the_operations_notice(mo
     assert email["Subject"] == "Portfolio job recovered"
     assert email.get_body(preferencelist=("plain",)).get_content().strip() == text
     assert "prices job recovered" in email.get_body(preferencelist=("html",)).get_content()
-    push.assert_called_once_with(text)
+    push.assert_called_once_with(text, recovered=True)
 
 
 def test_notice_error_does_not_change_command_result(tmp_path, monkeypatch, caplog):

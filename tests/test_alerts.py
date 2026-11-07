@@ -496,7 +496,12 @@ def test_operations_notice_push_respects_detail(monkeypatch, recovered, detail):
     if detail == "full":
         assert sent == text
     else:
-        assert sent == "A portfolio job failed. Check your email for details."
+        expected = (
+            "A portfolio job recovered. Check your email for details."
+            if recovered
+            else "A portfolio job failed. Check your email for details."
+        )
+        assert sent == expected
         assert "NZX:MADEUP" not in sent
         assert "prices" not in sent
 
@@ -988,3 +993,55 @@ def test_cli_partial_fetch_advances_but_total_failure_remains_pending(
     due = datetime.fromisoformat(state["prices"])
     assert (due > NOW) is partial
     assert (state["prices:retry"]["retry_at"] is None) is partial
+
+
+def test_postmark_partial_failure_keeps_progress_after_alert_rollback(sample, monkeypatch):
+    import json
+
+    import httpx
+
+    from portfolio_digest import mailers
+    from portfolio_digest.delivery import RecipientProgress, track_recipients
+
+    session, _, _ = sample
+    recipients = ["first@example.invalid", "second@example.invalid"]
+    settings = MailSettings(
+        _env_file=None,
+        mailer="postmark",
+        mail_from="sender@example.invalid",
+        postmark_server_token="test-only-token",  # noqa: S106 - fictitious sentinel
+    )
+    monkeypatch.setattr(alerts, "mail_settings", lambda: settings)
+    monkeypatch.setattr(alerts, "send", mailers.send)
+    attempted = []
+    rejecting = True
+
+    def handle(request):
+        recipient = json.loads(request.content)["To"]
+        attempted.append(recipient)
+        code = 406 if rejecting and recipient == recipients[1] else 0
+        return httpx.Response(200, json={"ErrorCode": code})
+
+    factory = httpx.Client
+    monkeypatch.setattr(
+        mailers.httpx, "Client", lambda **kw: factory(transport=httpx.MockTransport(handle))
+    )
+    rules = config()
+    rules.recipients = recipients
+    saved = []
+    progress = RecipientProgress(set(), lambda: saved.append(sorted(progress.delivered)))
+    with (
+        track_recipients(progress),
+        pytest.raises(MailError, match="Some portfolio alerts failed"),
+    ):
+        alerts.run_alerts(session, rules, now=NOW)
+    assert not session.scalars(select(AlertState)).all()
+    assert len(saved) == 1
+    session.rollback()
+    rejecting = False
+    # Recreate progress as on restart, without retaining an EmailMessage or adapter.
+    with track_recipients(RecipientProgress(set(saved[-1]), lambda: None)):
+        assert alerts.run_alerts(session, rules, now=NOW + timedelta(minutes=30))
+    assert attempted == recipients + [recipients[1]]
+    assert session.scalars(select(AlertState)).all()
+    alerts.push.assert_called_once()

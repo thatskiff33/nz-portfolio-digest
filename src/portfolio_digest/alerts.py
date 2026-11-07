@@ -15,6 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import func, select
 
 from portfolio_digest.config import ConfigError, runtime_settings
+from portfolio_digest.delivery import portfolio_delivery
 from portfolio_digest.formatting import display_price
 from portfolio_digest.mailers import MailError, mail_settings, message, send
 from portfolio_digest.models import AlertState, Instrument, Portfolio, Price, Split, Trade
@@ -48,12 +49,12 @@ def minimal_push_text(count: int) -> str:
     return f"{count} new portfolio alert{plural}. Open your email or the dashboard for details."
 
 
-def push(text: str, count: int | None = None) -> None:
+def push(text: str, count: int | None = None, *, recovered: bool = False) -> None:
     """Optional HTTPS notifications. Never log URLs, payloads or provider exceptions.
 
     `text` is the full alert email text and `count` the number of alerts in it. Unless
     ALERT_PUSH_DETAIL is "full", only the count leaves for the push provider.
-    Operations notices pass no count and use a fixed notice in minimal mode.
+    Operations notices pass no count and use a fixed failure or recovery notice in minimal mode.
     """
     try:
         settings = PushSettings()
@@ -64,7 +65,11 @@ def push(text: str, count: int | None = None) -> None:
         text = (
             minimal_push_text(count)
             if count is not None
-            else "A portfolio job failed. Check your email for details."
+            else (
+                "A portfolio job recovered. Check your email for details."
+                if recovered
+                else "A portfolio job failed. Check your email for details."
+            )
         )
     try:
         if settings.alert_ntfy_url:
@@ -275,7 +280,8 @@ def run_alerts(session, config, *, dry_run=False, now=None, checkpoint=None):
                 portfolio = session.scalar(query)
                 if portfolio is None:
                     continue
-                result = _run_portfolio(session, portfolio, config, now, dry_run)
+                with portfolio_delivery(portfolio_id):
+                    result = _run_portfolio(session, portfolio, config, now, dry_run)
                 if not dry_run:
                     # Includes cleared rules and evaluations with no email due.
                     session.commit()

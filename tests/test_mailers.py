@@ -218,3 +218,80 @@ def test_empty_compose_api_keys_do_not_select_ses_api(monkeypatch, msg):
     )
     mailers.send(settings, msg, ["reader@example.invalid"])
     assert calls == ["smtp"]
+
+
+@pytest.mark.parametrize(
+    "failure", ["rejection", "http", "timeout", "json", "shape", "boolean_code", "float_code"]
+)
+@pytest.mark.parametrize("failed_index", [0, 1])
+def test_postmark_attempts_every_recipient_and_retries_only_failures(
+    monkeypatch, msg, failure, failed_index
+):
+    import json
+
+    from portfolio_digest.delivery import RecipientProgress, track_recipients
+
+    recipients = ["first@example.invalid", "second@example.invalid"]
+    attempted = []
+    rejecting = True
+
+    def handle(request):
+        recipient = json.loads(request.content)["To"]
+        attempted.append(recipient)
+        if rejecting and recipient == recipients[failed_index]:
+            if failure == "timeout":
+                raise httpx.ReadTimeout("private-token", request=request)
+            if failure == "http":
+                return httpx.Response(422, json={"Message": "private-token"})
+            if failure == "json":
+                return httpx.Response(200, text="private-token")
+            if failure == "shape":
+                return httpx.Response(200, json=[])
+            if failure == "boolean_code":
+                return httpx.Response(200, json={"ErrorCode": False})
+            if failure == "float_code":
+                return httpx.Response(200, json={"ErrorCode": 0.0})
+            return httpx.Response(200, json={"ErrorCode": 406, "Message": "private-token"})
+        return httpx.Response(200, json={"ErrorCode": 0})
+
+    # Each send constructs a fresh adapter and HTTP client, as scheduler retries do.
+    factory = httpx.Client
+    monkeypatch.setattr(
+        mailers.httpx, "Client", lambda **kw: factory(transport=httpx.MockTransport(handle))
+    )
+    settings = mailers.MailSettings(
+        _env_file=None, mailer="postmark", postmark_server_token="test-only-token"
+    )
+    saved = []
+    progress = RecipientProgress(set(), lambda: saved.append(set(progress.delivered)))
+    with track_recipients(progress):
+        for _ in range(2):
+            with pytest.raises(mailers.MailError) as error:
+                mailers.send(settings, msg, recipients)
+            assert str(error.value) == "Mail delivery failed: 1 recipient(s) failed."
+        rejecting = False
+        mailers.send(settings, msg, recipients)
+    assert attempted == recipients + [recipients[failed_index]] * 2
+    assert len(saved) == 2
+    assert all("@" not in key for key in progress.delivered)
+
+
+def test_postmark_counts_all_failed_recipients(monkeypatch, msg):
+    factory = httpx.Client
+    monkeypatch.setattr(
+        mailers.httpx,
+        "Client",
+        lambda **kw: factory(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"ErrorCode": 406}))
+        ),
+    )
+    with pytest.raises(
+        mailers.MailError, match=r"^Mail delivery failed: 2 recipient\(s\) failed\.$"
+    ):
+        mailers.send(
+            mailers.MailSettings(
+                _env_file=None, mailer="postmark", postmark_server_token="test-only-token"
+            ),
+            msg,
+            ["first@example.invalid", "second@example.invalid"],
+        )

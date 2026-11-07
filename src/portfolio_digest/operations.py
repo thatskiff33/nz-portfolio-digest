@@ -83,7 +83,7 @@ def deliver_operations_notice(config, text: str, *, recovered: bool) -> None:
             logger.info("Operations notice was not emailed because mail is not configured.")
     except Exception:
         logger.warning("Operations notice could not be emailed.")
-    push(text)
+    push(text, recovered=recovered)
 
 
 def load_notice_config():

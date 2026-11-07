@@ -5,7 +5,7 @@ from portfolio_digest import __version__
 from portfolio_digest.cli import main
 from portfolio_digest.validation import PORTFOLIO_NAME_MAX
 
-UNREACHABLE = "postgresql+psycopg://user:s3cret-pass@127.0.0.1:1/nowhere"
+UNREACHABLE = "postgresql+psycopg://user:s3cret-pass@127.0.0.1:1/nowhere?connect_timeout=2"
 
 
 def test_version(capsys):

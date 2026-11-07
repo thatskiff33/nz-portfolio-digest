@@ -5,7 +5,8 @@ entry FX f0 (base currency per local unit). On sale or closing valuation p1, f1:
 capital = q * (p1 - p0) * f0; currency = q * p1 * (f1 - f0).
 The cross-term belongs to currency. Their sum is q * (p1*f1 - p0*f0).
 Fees reduce capital. All percentages share opening value plus purchase outlays
-as denominator. Sales are withdrawals, not a reduction in capital put at risk.
+plus non-cash value moved in as denominator. Sales and non-cash removals are
+withdrawals, not a reduction in capital put at risk.
 Non-split adjustments move units in or out at their recorded price without cash.
 A parcel keeps its local cost (q * p0) when a split rescales its units.
 See docs/RETURNS.md for boundaries, income and missing-data conventions.
@@ -13,7 +14,7 @@ See docs/RETURNS.md for boundaries, income and missing-data conventions.
 
 from bisect import bisect_right
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from itertools import groupby
 
@@ -28,6 +29,7 @@ from portfolio_digest.parcels import (
     ObservationSeries,
     ParcelLedger,
     ReturnError,
+    _require_aware,
     financial_math,
     lookup,
 )
@@ -160,6 +162,9 @@ class Result:
     price: Decimal | None = None
     currency: str = ""
     name: str = ""
+    # Gross non-cash value moved in by positive non-split adjustments, at recorded
+    # price and FX. Removals never reduce it; it counts towards the denominator.
+    adjustment_inflows: Decimal = ZERO
 
     @property
     @financial_math
@@ -169,7 +174,7 @@ class Result:
     @property
     @financial_math
     def denominator(self) -> Decimal:
-        return self.opening + self.purchases
+        return self.opening + self.purchases + self.adjustment_inflows
 
     @property
     @financial_math
@@ -368,17 +373,19 @@ def holding_return(
     base_currency: str = "NZD",
     *,
     gross_up: bool = False,
+    as_of: datetime | None = None,
 ) -> Result:
     if start > end:
         raise ReturnError("Period start must not be after its end.")
+    _require_aware(as_of)
     flags: set[str] = set(holding_history_flags(holding, end))
 
     calendar = for_exchange(holding.exchange)
 
-    fx = DatedFx(rates, base_currency, flags)
+    fx = DatedFx(rates, base_currency, flags, as_of=as_of)
 
     def price_on(day: date) -> Decimal:
-        close = lookup(holding.prices, day, f"{holding.code} price", flags, calendar)
+        close = lookup(holding.prices, day, f"{holding.code} price", flags, calendar, as_of=as_of)
         source = holding.prices[bisect_right(holding.prices, day, key=lambda p: p.day) - 1].day
         for split in holding.splits:
             if source < split.day <= day:
@@ -396,7 +403,7 @@ def holding_return(
         rate = fx(holding.currency, start)
         parcels.add(quantity, quantity * price, rate)
         opening = quantity * price * rate
-    capital = currency_gain = purchases = sales = adjustments = ZERO
+    capital = currency_gain = purchases = sales = adjustments = inflows = ZERO
 
     def remove(units: Decimal, p1: Decimal, f1: Decimal) -> None:
         """Realise `units` from the oldest parcels at local price p1 and FX f1."""
@@ -441,6 +448,7 @@ def holding_return(
             purchases += fee
             if trade.quantity > ZERO:
                 adjustments += trade.quantity * trade.price * rate
+                inflows += trade.quantity * trade.price * rate
                 parcels.add(trade.quantity, trade.quantity * trade.price, rate)
             else:
                 remove(-trade.quantity, trade.price, rate)
@@ -479,6 +487,7 @@ def holding_return(
         price,
         holding.currency,
         holding.name,
+        adjustment_inflows=inflows,
     )
 
 
@@ -502,6 +511,7 @@ def subtotal(label: str, rows: tuple[Result, ...]) -> Result:
         withholding_tax=sum((r.withholding_tax for r in rows), ZERO),
         imputation_gross_up=sum((r.imputation_gross_up for r in rows), ZERO),
         units=sum((r.units for r in rows), ZERO),
+        adjustment_inflows=sum((r.adjustment_inflows for r in rows), ZERO),
     )
 
 
@@ -523,15 +533,18 @@ def calculate_returns(
     base_currency: str = "NZD",
     *,
     gross_up: bool = False,
+    as_of: datetime | None = None,
 ) -> Report:
     if start > end:
         raise ReturnError("Period start must not be after its end.")
+    _require_aware(as_of)
     # Holdings sold before the period have nothing to report, so they are left out.
     ordered = sorted(
         (h for h in holdings if _active(h, start, end)), key=lambda h: (h.exchange, h.code)
     )
     rows = tuple(
-        holding_return(h, start, end, rates, base_currency, gross_up=gross_up) for h in ordered
+        holding_return(h, start, end, rates, base_currency, gross_up=gross_up, as_of=as_of)
+        for h in ordered
     )
     markets = tuple(
         subtotal(

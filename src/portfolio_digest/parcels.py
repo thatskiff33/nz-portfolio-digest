@@ -3,7 +3,7 @@
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
 from functools import wraps
 from typing import ParamSpec, TypeVar
@@ -51,10 +51,32 @@ class ObservationSeries(tuple):
         return super().__new__(cls, sorted(points, key=lambda p: p.day))
 
 
-def _skips_trading_day(calendar: TradingCalendar, source: date, day: date) -> bool:
-    """True when the market traded after `source` and on or before `day`."""
+def _require_aware(as_of: datetime | None) -> datetime | None:
+    """Reject a clock time that does not say which zone it belongs to."""
+    if as_of is not None and (as_of.tzinfo is None or as_of.tzinfo.utcoffset(as_of) is None):
+        raise ReturnError("Valuation instant must include a timezone.")
+    return as_of
+
+
+def _closed_day(calendar: TradingCalendar, day: date, as_of: datetime | None) -> date:
+    """Last day whose close counts as missing.
+
+    With no instant, the requested date itself counts: date-only reports never read
+    the clock. With an instant, a session that has not closed yet is not missing.
+    """
+    if as_of is None:
+        return day
+    _require_aware(as_of)
+    return min(day, calendar.latest_closed_day(as_of))
+
+
+def _skips_trading_day(
+    calendar: TradingCalendar, source: date, day: date, *, as_of: datetime | None = None
+) -> bool:
+    """True when the market traded after `source` and on or before the last due close."""
+    limit = _closed_day(calendar, day, as_of)
     current = source + timedelta(days=1)
-    while current <= day:
+    while current <= limit:
         if calendar.is_trading_day(current):
             return True
         current += timedelta(days=1)
@@ -67,22 +89,26 @@ def lookup(
     label: str,
     flags: set[str],
     calendar: TradingCalendar,
+    *,
+    as_of: datetime | None = None,
 ) -> Decimal:
     """Latest observation on or before `day`.
 
-    Flagged when stored as stale, or when a trading day passed without a fresh one.
-    Using Friday's close on a weekend or a market holiday is normal and not flagged.
+    Flagged when stored as stale, or when a trading day whose close was already due
+    passed without a fresh one. Using Friday's close on a weekend or a market holiday
+    is normal and not flagged. The observation itself is still chosen on or before
+    the requested date; `as_of` only limits which missing sessions count.
     """
     if not isinstance(points, ObservationSeries):
         points = ObservationSeries(points)
     index = bisect_right(points, day, key=lambda p: p.day) - 1
-    # Stable ordering preserves the first observation when dates are duplicated.
+    # Keep the original first-observation rule for duplicate dates.
     point = (
         points[bisect_left(points, points[index].day, key=lambda p: p.day)] if index >= 0 else None
     )
     if point is None:
         raise ReturnError(f"Missing {label} on or before {day}.")
-    if point.stale or _skips_trading_day(calendar, point.day, day):
+    if point.stale or _skips_trading_day(calendar, point.day, day, as_of=as_of):
         flags.add(f"Carried forward {label} for {day} (source {point.day})")
     return point.value
 
@@ -161,6 +187,7 @@ class DatedFx:
     rates: dict[str, tuple[Observation, ...]]
     base_currency: str
     flags: set[str]
+    as_of: datetime | None = None
 
     def __call__(self, currency: str, day: date, explicit: Decimal | None = None) -> Decimal:
         if currency == self.base_currency:
@@ -176,6 +203,7 @@ class DatedFx:
                 f"{currency}/{self.base_currency} FX",
                 self.flags,
                 FX,
+                as_of=self.as_of,
             )
         )
         if not isinstance(value, Decimal) or not value.is_finite() or value <= ZERO:

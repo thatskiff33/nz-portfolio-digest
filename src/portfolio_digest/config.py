@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     # Kept as a secret so it is never printed in logs or error messages.
     database_url: SecretStr
 
+    dashboard_password: SecretStr = SecretStr("")
+    dashboard_bind: str = "127.0.0.1"
+    dashboard_secure_cookie: bool = False
+    dashboard_hostnames: str = ""
+
     akahu_app_token: SecretStr | None = None
     akahu_user_token: SecretStr | None = None
     # Optional JSON array of account IDs. Empty selects all investment accounts. Kept as

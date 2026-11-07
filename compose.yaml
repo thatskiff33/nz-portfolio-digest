@@ -185,6 +185,7 @@ services:
       DATABASE_URL: postgresql+psycopg://portfolio:${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}@db:5432/portfolio
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-}
       DASHBOARD_BIND: ${DASHBOARD_BIND:-127.0.0.1}
+      DASHBOARD_HOSTNAMES: ${DASHBOARD_HOSTNAMES:-}
       DASHBOARD_SECURE_COOKIE: ${DASHBOARD_SECURE_COOKIE:-false}
       TIMEZONE: ${TIMEZONE:-Pacific/Auckland}
     healthcheck:
@@ -192,7 +193,7 @@ services:
         - CMD
         - python
         - -c
-        - 'import urllib.request; r=urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=3); raise SystemExit(0 if r.status==200 and r.read()==b"ok" else 1)'
+        - 'import urllib.request; opener=urllib.request.build_opener(type("NoRedirect", (urllib.request.HTTPErrorProcessor,), {"http_response": lambda self, request, response: response})()); r=opener.open("http://127.0.0.1:8000/healthz", timeout=3); raise SystemExit(0 if r.status==303 and r.headers.get("Location")=="/login?next=%2Fhealthz" else 1)'
       interval: 30s
       timeout: 5s
       retries: 3

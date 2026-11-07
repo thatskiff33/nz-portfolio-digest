@@ -1021,9 +1021,19 @@ def test_live_routes_and_dashboard_reuse_frozen_instant(engine_web, monkeypatch,
     assert all(value == instant for value in seen)
 
 
-@pytest.mark.parametrize("host", ["[fd7a:115c:a1e0::1234]", "[fd7a:115c:a1e0::1234]:8000"])
-def test_allowed_ipv6_host(engine_web, host):
-    settings = Settings(database_url="sqlite://", dashboard_bind="fd7a:115c:a1e0::1234")
+@pytest.mark.parametrize(
+    "bind", ["fd7a:115c:a1e0::1234", "fd7a:115c:a1e0:0:0:0:0:1234", "FD7A:115C:A1E0::1234"]
+)
+@pytest.mark.parametrize(
+    "host",
+    [
+        "[fd7a:115c:a1e0::1234]",
+        "[fd7a:115c:a1e0::1234]:8000",
+        "[fd7a:115c:a1e0:0:0:0:0:1234]:8000",
+    ],
+)
+def test_allowed_ipv6_host(engine_web, host, bind):
+    settings = Settings(database_url="sqlite://", dashboard_bind=bind)
     with TestClient(
         create_app(engine_web, PASSWORD, settings=settings), base_url="http://localhost"
     ) as browser:

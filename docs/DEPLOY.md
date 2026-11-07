@@ -187,9 +187,15 @@ Mail delivery is at least once: a crash after provider acceptance but before sav
 state or committing the database can cause a duplicate. Postmark attempts every recipient
 and reports only the number of failures. Scheduled retries skip recipients already accepted
 for that report or portfolio, including after a restart or alert transaction rollback.
-Recipient checkpoints store hashes, with no addresses or message contents, and expire when
-the occurrence completes. Manual sends do not use scheduler checkpoints. SMTP partial
-refusals can still leave some recipients with the email. Check the provider
+Recipient checkpoints store hashes protected by a random per-install HMAC key, with no
+addresses or message contents, and expire when the occurrence completes. The scheduler
+state file and its companion `<state-file>.key` file use mode `0600` (owner read/write
+only). Keep the key separate from copies of the state file shared for troubleshooting:
+a reader with both files can test candidate addresses. Retain the key in private backups
+and restore it alongside the state file. A missing or invalid key stops the scheduler;
+restore the original key before restarting. Existing unkeyed checkpoints are converted
+on startup without losing delivery progress. Manual sends do not use scheduler checkpoints.
+SMTP partial refusals can still leave some recipients with the email. Check the provider
 before a manual retry. Keep the state volume and run only one scheduler replica.
 Inspect it with `docker compose logs scheduler`.
 The scheduler writes `/tmp/scheduler-heartbeat` every time around its loop. Compose

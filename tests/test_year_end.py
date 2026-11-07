@@ -1187,7 +1187,11 @@ def test_scheduled_year_end_retry_keeps_recipient_checkpoints_per_portfolio(
     expected_checkpoints = set()
     for portfolio_id, subject in zip(portfolio_ids, subjects, strict=True):
         progress = RecipientProgress(
-            set(), lambda: None, scope=f"portfolio:{portfolio_id}", message_id=f"{subject}\0"
+            set(),
+            lambda: None,
+            scope=f"portfolio:{portfolio_id}",
+            message_id=f"{subject}\0",
+            secret=path.with_name(path.name + ".key").read_bytes(),
         )
         for recipient in recipients:
             if (subject, recipient) in accepted:

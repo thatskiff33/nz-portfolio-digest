@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from secrets import token_bytes
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -16,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, f
 
 from portfolio_digest.alert_config import AlertConfig
 from portfolio_digest.config import ConfigError, get_report_settings, runtime_settings
-from portfolio_digest.delivery import RecipientProgress, track_recipients
+from portfolio_digest.delivery import RecipientProgress, keyed_checkpoint, track_recipients
 from portfolio_digest.mailers import address
 
 logger = logging.getLogger(__name__)
@@ -248,8 +249,10 @@ class Pending:
         delivered = retry.get("delivered", [])
         retry_at = retry.get("retry_at")
         recipients = retry.get("recipients", [])
+        keyed = retry.get("recipients_keyed", False)
         if (
-            type(failures) is not int
+            type(keyed) is not bool
+            or type(failures) is not int
             or failures < 0
             or not isinstance(delivered, list)
             or any(type(value) is not int or value <= 0 for value in delivered)
@@ -279,7 +282,32 @@ class Pending:
             "retry_at": self.retry_at.isoformat() if self.retry_at else None,
             "delivered": sorted(self.delivered),
             "recipients": sorted(self.recipients),
+            "recipients_keyed": True,
         }
+
+
+def _recipient_secret(path: Path, *, required: bool) -> bytes:
+    """Keep the HMAC key outside JSON state and backups of that file alone."""
+    try:
+        stream = path.open("rb")
+    except FileNotFoundError:
+        if required:
+            raise ValueError("Missing recipient checkpoint key") from None
+        secret = token_bytes(32)
+        with open(path, "xb", opener=lambda p, flags: os.open(p, flags, 0o600)) as stream:
+            if hasattr(os, "fchmod"):
+                os.fchmod(stream.fileno(), 0o600)
+            stream.write(secret)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return secret
+    with stream:
+        if hasattr(os, "fchmod"):
+            os.fchmod(stream.fileno(), 0o600)
+        secret = stream.read(33)
+    if len(secret) != 32:
+        raise ValueError("Invalid recipient checkpoint key")
+    return secret
 
 
 @dataclass
@@ -330,15 +358,33 @@ class Scheduler:
                 if schedule.name not in pending:
                     pending[schedule.name] = Pending(schedule.next_run(now(), self.config.timezone))
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            secret = _recipient_secret(
+                self.state_path.with_name(self.state_path.name + ".key"),
+                required=any(
+                    isinstance(value, dict) and value.get("recipients_keyed") is True
+                    for name, value in state.items()
+                    if name.endswith(":retry")
+                ),
+            )
+            for name, item in pending.items():
+                if not state.get(name + ":retry", {}).get("recipients_keyed", False):
+                    item.recipients = {keyed_checkpoint(secret, value) for value in item.recipients}
         except (OSError, ValueError, TypeError, KeyError, OverflowError):
             raise SchedulerStateError(
-                "Cannot read scheduler state. Check the state volume."
+                "Cannot read scheduler state or checkpoint key. Check the state volume."
             ) from None
 
         def save():
             try:
                 temporary = self.state_path.with_suffix(".new")
-                with temporary.open("w", encoding="utf-8") as stream:
+                with open(
+                    temporary,
+                    "w",
+                    encoding="utf-8",
+                    opener=lambda p, flags: os.open(p, flags, 0o600),
+                ) as stream:
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(stream.fileno(), 0o600)
                     json.dump(
                         {
                             **{name: item.due.isoformat() for name, item in pending.items()},
@@ -399,7 +445,7 @@ class Scheduler:
                     continue
                 checkpoint = DeliveryCheckpoint(item.delivered, save)
                 try:
-                    with track_recipients(RecipientProgress(item.recipients, save)):
+                    with track_recipients(RecipientProgress(item.recipients, save, secret=secret)):
                         outcome = execute(schedule, item.due, checkpoint)
                     code, labels = outcome if isinstance(outcome, tuple) else (outcome, ())
                     if isinstance(labels, str):

@@ -3,8 +3,15 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
+from hmac import digest
+from secrets import token_bytes
+
+
+def keyed_checkpoint(secret: bytes, checkpoint: str) -> str:
+    """Key an existing digest so legacy progress can be migrated without addresses."""
+    return digest(secret, checkpoint.encode(), "sha256").hex()
 
 
 @dataclass
@@ -13,10 +20,11 @@ class RecipientProgress:
     save: Callable[[], None]
     scope: str = "report"
     message_id: str = ""
+    secret: bytes = field(default_factory=lambda: token_bytes(32), repr=False)
 
     def key(self, recipient: str) -> str:
-        # State needs identities, never mailbox addresses or message contents.
-        return sha256(f"{self.scope}\0{self.message_id}\0{recipient}".encode()).hexdigest()
+        checkpoint = sha256(f"{self.scope}\0{self.message_id}\0{recipient}".encode()).hexdigest()
+        return keyed_checkpoint(self.secret, checkpoint)
 
     def complete(self, recipient: str) -> None:
         self.delivered.add(self.key(recipient))
@@ -43,7 +51,7 @@ def track_recipients(progress: RecipientProgress | None) -> Iterator[None]:
 def portfolio_delivery(portfolio_id: int) -> Iterator[None]:
     progress = recipient_progress()
     scoped = (
-        RecipientProgress(progress.delivered, progress.save, f"portfolio:{portfolio_id}")
+        replace(progress, scope=f"portfolio:{portfolio_id}", message_id="")
         if progress is not None
         else None
     )

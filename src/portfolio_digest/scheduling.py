@@ -295,13 +295,15 @@ def _recipient_secret(path: Path, *, required: bool) -> bytes:
             raise ValueError("Missing recipient checkpoint key") from None
         secret = token_bytes(32)
         with open(path, "xb", opener=lambda p, flags: os.open(p, flags, 0o600)) as stream:
-            os.fchmod(stream.fileno(), 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(stream.fileno(), 0o600)
             stream.write(secret)
             stream.flush()
             os.fsync(stream.fileno())
         return secret
     with stream:
-        os.fchmod(stream.fileno(), 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(stream.fileno(), 0o600)
         secret = stream.read(33)
     if len(secret) != 32:
         raise ValueError("Invalid recipient checkpoint key")
@@ -381,7 +383,8 @@ class Scheduler:
                     encoding="utf-8",
                     opener=lambda p, flags: os.open(p, flags, 0o600),
                 ) as stream:
-                    os.fchmod(stream.fileno(), 0o600)
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(stream.fileno(), 0o600)
                     json.dump(
                         {
                             **{name: item.due.isoformat() for name, item in pending.items()},

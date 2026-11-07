@@ -940,7 +940,10 @@ def test_scheduler_state_and_key_are_private_before_writing(tmp_path, monkeypatc
     assert len(key_path.read_bytes()) == 32
 
 
-def test_legacy_recipient_checkpoints_are_keyed_without_resending(tmp_path):
+@pytest.mark.parametrize("missing_fchmod", [False, True])
+def test_legacy_recipient_checkpoints_are_keyed_without_resending(
+    tmp_path, monkeypatch, missing_fchmod
+):
     from hashlib import sha256
 
     from portfolio_digest.delivery import message_delivery, portfolio_delivery, recipient_progress
@@ -949,6 +952,8 @@ def test_legacy_recipient_checkpoints_are_keyed_without_resending(tmp_path):
     config = ScheduleConfig(schedules=[weekly()])
     due = datetime(2026, 10, 25, 7, tzinfo=UTC)
     seed(path, config, due)
+    if missing_fchmod:
+        monkeypatch.delattr(os, "fchmod", raising=False)
     recipient = "first@example.invalid"
     legacy = sha256(f"portfolio:7\0report-identity\0{recipient}".encode()).hexdigest()
     state = json.loads(path.read_text())

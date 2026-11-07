@@ -157,7 +157,6 @@ class SharesiesImporter(Importer):
             currency=currency,
             fees=fees,
             fx_rate=fx_rate,
-            fx_base="NZD" if fx_rate is not None else None,
             external_ref=reference,
             reference_aliases=(legacy_ref,) if order_id else (),
             notes=None if method.upper() in ("", "ORDER") else f"Sharesies: {method}",

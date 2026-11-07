@@ -121,6 +121,44 @@ def test_portfolio_add_rejects_bad_input_without_touching_the_database(engine, c
     assert "No portfolios yet" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("ok", [False, True])
+def test_manual_price_fetch_records_failure_and_recovery(monkeypatch, ok):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from portfolio_digest import cli
+
+    report = SimpleNamespace(
+        ok=ok,
+        outcomes=[
+            SimpleNamespace(
+                error=None if ok else "private provider error 123",
+                label="NZX:MADEUP",
+                describe=lambda: "fetch result",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: SimpleNamespace(price_source="fake", fx_source_names=[], base_currency="NZD"),
+    )
+    monkeypatch.setitem(cli.PRICE_SOURCES, "fake", lambda _: None)
+    monkeypatch.setattr(cli, "make_client", lambda: nullcontext(None))
+    monkeypatch.setattr(cli, "make_engine", lambda: None)
+    monkeypatch.setattr(cli, "run_fetch", lambda *a, **kw: report)
+    config = object()
+    monkeypatch.setattr(cli, "load_notice_config", lambda: config)
+    calls = []
+    monkeypatch.setattr(cli, "note_outcome", lambda *a, **kw: calls.append((a, kw)))
+    assert cli.cmd_prices_fetch(SimpleNamespace(backfill=False, start=None, instrument=None)) == (
+        0 if ok else 1
+    )
+    assert calls == [
+        ((config, "prices"), {"failed": not ok, "labels": () if ok else ("NZX:MADEUP",)})
+    ]
+
+
 def test_main_suppresses_http_request_details(monkeypatch, caplog):
     import logging
     from argparse import Namespace

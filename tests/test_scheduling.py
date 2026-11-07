@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -73,6 +74,7 @@ def test_checked_in_config_shares_prices_and_reports():
         'timezone="private-token"\nschedules=[]',
         'recipients=["bad\\nprivate-token"]\nschedules=[]',
         'kuma_push_url="private-token"\nschedules="wrong"',
+        'prices_kuma_push_url="private-token"\nschedules="wrong"',
         '[[schedules]]\nname="x"\nkind="report"\nfrequency="daily"\nat="09:00:12"',
     ],
 )
@@ -447,6 +449,24 @@ def test_report_environment_precedence_and_private_legacy_warning(
     assert "invented-token" not in caplog.text
 
 
+@pytest.mark.parametrize("override", [False, True])
+def test_price_monitor_environment_precedence_and_private_legacy_warning(
+    no_settings_file, tmp_path, monkeypatch, caplog, override
+):
+    path = tmp_path / "schedules.toml"
+    legacy_url = "https://monitor.example.invalid/invented-prices-token"
+    path.write_text(f'prices_kuma_push_url="{legacy_url}"\nschedules=[]')
+    monkeypatch.setenv(
+        "REPORT_PRICES_KUMA_PUSH_URL", "https://new.example.invalid/prices" if override else "  "
+    )
+    config = read_config(path)
+    assert config.prices_kuma_push_url.get_secret_value() == (
+        "https://new.example.invalid/prices" if override else legacy_url
+    )
+    assert "REPORT_PRICES_KUMA_PUSH_URL" in caplog.text
+    assert "invented-prices-token" not in caplog.text
+
+
 @pytest.mark.parametrize("value", ["", "  "])
 def test_empty_report_environment_keeps_owner_fallback(
     no_settings_file, monkeypatch, tmp_path, value
@@ -454,13 +474,14 @@ def test_empty_report_environment_keeps_owner_fallback(
     from portfolio_digest.mailers import MailSettings
     from portfolio_digest.report_service import deliver_report
 
-    for setting in ("REPORT_RECIPIENTS", "REPORT_KUMA_PUSH_URL"):
+    for setting in ("REPORT_RECIPIENTS", "REPORT_KUMA_PUSH_URL", "REPORT_PRICES_KUMA_PUSH_URL"):
         monkeypatch.setenv(setting, value)
     path = tmp_path / "schedule.toml"
     path.write_text("schedules=[]")
     config = read_config(path)
     assert config.recipients == []
     assert config.kuma_push_url is None
+    assert config.prices_kuma_push_url is None
     delivered = []
     monkeypatch.setattr("portfolio_digest.report_service.send", lambda s, m, r: delivered.extend(r))
     deliver_report(
@@ -508,6 +529,156 @@ def test_scheduler_writes_its_heartbeat_each_cycle(tmp_path, monkeypatch):
         )
     assert cycles == 2
     assert heartbeat.stat().st_mtime > datetime.now().timestamp() - 30
+
+
+def seeded_weekly(tmp_path):
+    schedule = weekly()
+    config = ScheduleConfig(schedules=[schedule])
+    path = tmp_path / "state.json"
+    due = datetime(2026, 11, 6, 6, tzinfo=UTC)
+    path.write_text(
+        json.dumps(
+            {
+                "weekly": due.isoformat(),
+                "weekly:config": schedule.model_dump_json() + config.timezone,
+            }
+        )
+    )
+    return config, path
+
+
+def digits_outside_dates(text: str) -> str:
+    return re.sub(r"\d{4}-\d{2}-\d{2}", "", text)
+
+
+def test_failing_job_notifies_once_a_day_and_once_when_it_recovers(tmp_path):
+    config, path = seeded_weekly(tmp_path)
+    sent = []
+    start = datetime(2026, 11, 6, 7, tzinfo=UTC)
+
+    def fail_at(when):
+        with pytest.raises(StopLoop):
+            Scheduler(config, path).run(
+                lambda *a: (1, ("NZX:MADEUP", "https://monitor.example/secret-token")),
+                now=lambda: when,
+                sleep=stop,
+                notify=sent.append,
+            )
+
+    fail_at(start)
+    fail_at(start + timedelta(hours=1))
+    fail_at(start + timedelta(hours=22))
+    assert len(sent) == 1
+    assert "NZX:MADEUP" in sent[0]
+    assert "secret-token" not in sent[0]
+    assert "https://" not in sent[0]
+    stored = json.loads(path.read_text())
+    assert stored["weekly"] == datetime(2026, 11, 6, 6, tzinfo=UTC).isoformat()
+    assert "weekly:notice" in stored
+
+    fail_at(start + timedelta(hours=24))
+    assert len(sent) == 2
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: 0,
+            now=lambda: start + timedelta(hours=30),
+            sleep=lambda _: (_ for _ in ()).throw(StopLoop()),
+            notify=sent.append,
+        )
+    assert len(sent) == 3
+    assert "recovered" in sent[-1]
+    assert "NZX:MADEUP" not in sent[-1]
+    assert "weekly:notice" not in json.loads(path.read_text())
+    for note in sent:
+        assert not re.search(r"\d", digits_outside_dates(note))
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: 0,
+            now=lambda: start + timedelta(hours=31),
+            sleep=lambda _: (_ for _ in ()).throw(StopLoop()),
+            notify=sent.append,
+        )
+    assert len(sent) == 3
+
+
+def test_job_exception_notifies_without_the_error_text(tmp_path):
+    config, path = seeded_weekly(tmp_path)
+    sent = []
+
+    def explode(*_args):
+        raise RuntimeError("provider said 42")
+
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            explode,
+            now=lambda: datetime(2026, 11, 6, 7, tzinfo=UTC),
+            notify=sent.append,
+            sleep=stop,
+        )
+    assert sent == [
+        "The weekly job failed on 2026-11-06.\n\nIt will be retried.",
+    ]
+    assert not re.search(r"\d", digits_outside_dates(sent[0]))
+
+
+def test_notice_delivery_failure_does_not_stop_the_scheduler(tmp_path, caplog):
+    config, path = seeded_weekly(tmp_path)
+    calls = []
+    start = datetime(2026, 11, 6, 7, tzinfo=UTC)
+
+    def notify(text):
+        calls.append(text)
+        raise RuntimeError("mailbox down")
+
+    with caplog.at_level("WARNING"), pytest.raises(StopLoop):
+        Scheduler(config, path).run(lambda *a: 1, now=lambda: start, notify=notify, sleep=stop)
+    assert len(calls) == 1
+    assert "could not be delivered" in caplog.text
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: 1, now=lambda: start + timedelta(hours=1), notify=notify, sleep=stop
+        )
+    assert len(calls) == 1
+
+
+def test_partial_price_fetch_advances_but_recovers_only_after_clean_fetch(tmp_path):
+    schedule = Schedule(name="prices", kind="prices", frequency="daily", at="20:00")
+    config = ScheduleConfig(schedules=[schedule])
+    path = tmp_path / "state.json"
+    due = datetime(2026, 11, 6, 7, tzinfo=UTC)
+    seed(path, config, due)
+    sent = []
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: (0, ("NZX:MADEUP",)), now=lambda: due, sleep=stop, notify=sent.append
+        )
+    state = json.loads(path.read_text())
+    assert state["prices:retry"]["failures"] == 0
+    assert datetime.fromisoformat(state["prices"]) > due
+    assert len(sent) == 1
+    assert "NZX:MADEUP" in sent[0]
+
+    # Restart before the next occurrence neither retries nor announces recovery.
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: pytest.fail("Partial fetch was retried"),
+            now=lambda: due + timedelta(hours=1),
+            sleep=stop,
+            notify=sent.append,
+        )
+    assert len(sent) == 1
+    with pytest.raises(StopLoop):
+        Scheduler(config, path).run(
+            lambda *a: (0, ()),
+            now=lambda: due + timedelta(days=1),
+            sleep=stop,
+            notify=sent.append,
+        )
+    assert len(sent) == 2
+    assert "recovered" in sent[-1]
+    assert "prices:notice" not in json.loads(path.read_text())
 
 
 @pytest.mark.parametrize(

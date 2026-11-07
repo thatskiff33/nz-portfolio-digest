@@ -65,8 +65,15 @@ def no_settings_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         "FX_SOURCES",
         "REPORT_RECIPIENTS",
         "REPORT_KUMA_PUSH_URL",
+        "REPORT_PRICES_KUMA_PUSH_URL",
     ):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def isolated_scheduler_state(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep operations notice state out of the checkout when a command records an outcome."""
+    monkeypatch.setenv("SCHEDULER_STATE", str(tmp_path / "state" / "scheduler.json"))

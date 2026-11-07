@@ -138,8 +138,6 @@ class PostmarkMailer:
         token = _secret(self.settings.postmark_server_token, "POSTMARK_SERVER_TOKEN")
         payload = {
             "From": str(msg["From"]),
-            "To": recipients[0],
-            "Bcc": ",".join(recipients[1:]),
             "Subject": str(msg["Subject"]),
             "HtmlBody": msg.get_body(preferencelist=("html",)).get_content(),
             "TextBody": msg.get_body(preferencelist=("plain",)).get_content(),
@@ -154,15 +152,18 @@ class PostmarkMailer:
         ]
         if attachments:
             payload["Attachments"] = attachments
+        # One message per recipient, so no recipient sees another's address (Postmark has
+        # no undisclosed-recipients form: its first address is always visible in To).
         with httpx.Client(timeout=30) as client:
-            response = client.post(
-                "https://api.postmarkapp.com/email",
-                headers={"X-Postmark-Server-Token": token},
-                json=payload,
-            )
-            response.raise_for_status()
-            if response.json().get("ErrorCode") != 0:
-                raise MailError("Mail delivery failed: Postmark rejected the message.")
+            for recipient in recipients:
+                response = client.post(
+                    "https://api.postmarkapp.com/email",
+                    headers={"X-Postmark-Server-Token": token},
+                    json={**payload, "To": recipient},
+                )
+                response.raise_for_status()
+                if response.json().get("ErrorCode") != 0:
+                    raise MailError("Mail delivery failed: Postmark rejected the message.")
 
 
 class SesMailer:

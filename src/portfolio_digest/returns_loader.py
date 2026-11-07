@@ -33,6 +33,7 @@ from portfolio_digest.returns import (
     Transaction,
     _financial_math,
     _lookup,
+    _require_aware,
     calculate_returns,
     period_range,
     subtotal,
@@ -50,6 +51,7 @@ class PortfolioInputs:
     start: date
     end: date
     conversion_flags: frozenset[str]
+    as_of: datetime | None = None
 
 
 def load_returns(
@@ -60,10 +62,17 @@ def load_returns(
     *,
     gross_up: bool = False,
     base_currency: str | None = None,
+    as_of: datetime | None = None,
 ) -> Report:
-    data = load_inputs(session, name, period, today, base_currency=base_currency)
+    data = load_inputs(session, name, period, today, base_currency=base_currency, as_of=as_of)
     report = calculate_returns(
-        data.holdings, data.start, data.end, data.rates, data.base_currency, gross_up=gross_up
+        data.holdings,
+        data.start,
+        data.end,
+        data.rates,
+        data.base_currency,
+        gross_up=gross_up,
+        as_of=data.as_of,
     )
     if data.conversion_flags:
         rows = tuple(
@@ -82,8 +91,14 @@ def load_inputs(
     today: date | None = None,
     *,
     base_currency: str | None = None,
+    as_of: datetime | None = None,
 ) -> PortfolioInputs:
-    today = today or datetime.now(ZoneInfo(get_settings().timezone)).date()
+    as_of = _require_aware(as_of)
+    if today is None:
+        # One instant supplies both the live date and the freshness bound.
+        zone = ZoneInfo(get_settings().timezone)
+        as_of = as_of or datetime.now(zone)
+        today = as_of.astimezone(zone).date()
     # Validate syntax before querying; 'all' is resolved from stored activity below.
     start, end = period_range(period, today)
     portfolio = session.scalar(
@@ -93,7 +108,9 @@ def load_inputs(
         raise ReturnError("Portfolio not found.")
     if period == "all":
         start, end = period_range(period, today, first_activity_date(session, portfolio.id, end))
-    return load_portfolio_inputs(session, portfolio, start, end, base_currency=base_currency)
+    return load_portfolio_inputs(
+        session, portfolio, start, end, base_currency=base_currency, as_of=as_of
+    )
 
 
 def first_activity_date(session: Session, portfolio_id: int, end: date) -> date | None:
@@ -113,7 +130,7 @@ def first_activity_date(session: Session, portfolio_id: int, end: date) -> date 
     return min((day for day in (first_trade, first_income) if day is not None), default=None)
 
 
-def _recorded_fx(value, day, currency, origin, target, start, rates, flags):
+def _recorded_fx(value, day, currency, origin, target, start, rates, flags, *, as_of=None):
     """Translate broker FX using the report's dates and target currency."""
     if origin == target:
         return value
@@ -121,7 +138,9 @@ def _recorded_fx(value, day, currency, origin, target, start, rates, flags):
         return None
     with localcontext() as context:
         context.prec = max(context.prec, FINANCIAL_PRECISION)
-        return value * _lookup(rates.get(origin, ()), day, f"{origin}/{target} FX", flags, FX)
+        return value * _lookup(
+            rates.get(origin, ()), day, f"{origin}/{target} FX", flags, FX, as_of=as_of
+        )
 
 
 @_financial_math
@@ -134,6 +153,7 @@ def load_portfolio_inputs(
     base_currency: str | None = None,
     instrument_id: int | None = None,
     raw_fx: bool = False,
+    as_of: datetime | None = None,
 ) -> PortfolioInputs:
     """Load stored inputs once for reports and sampled dashboard valuations."""
     target_currency = base_currency or portfolio.base_currency
@@ -195,6 +215,7 @@ def load_portfolio_inputs(
             start,
             rates,
             conversion_flags,
+            as_of=as_of,
         )
 
     trades_by_id = defaultdict(list)
@@ -261,6 +282,7 @@ def load_portfolio_inputs(
         start,
         end,
         frozenset(conversion_flags),
+        as_of,
     )
 
 

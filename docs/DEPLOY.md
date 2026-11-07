@@ -30,9 +30,9 @@ nowhere.
 
 ## Prices and exchange rates
 
-The first backfill starts at each instrument's first trade. To deliberately use a later
-date, add `--start YYYY-MM-DD`. Normal runs re-read recent history so corrections from the
-source replace carried-forward values. Commands are safe to repeat: an existing day is
+The first backfill starts seven calendar days before each instrument's first trade.
+To deliberately use a later date, add `--start YYYY-MM-DD`. Normal runs re-read recent
+history so corrections from the source replace carried-forward values. Commands are safe to repeat: an existing day is
 updated, not duplicated.
 
 ```sh
@@ -89,11 +89,17 @@ For rows fetched before this convention was introduced, run
 The `scheduler` container reads `schedules.toml`. This is the one place to change times,
 report periods and recipients. Prices run at 10:30 and 18:30 Auckland time. Weekly reports
 run Sunday at 20:00 for the preceding seven completed calendar days. Monthly reports run
-on the 1st at 08:00 for the previous calendar month. Year-end summaries run on 1 April
-at 09:00 for the NZ tax year just ended, one email per NZD portfolio. Weekly and monthly
+on the 1st at 19:00 for the previous calendar month. Year-end summaries run on 1 April
+at 19:00 for the NZ tax year just ended, one email per NZD portfolio. Weekly and monthly
 reports exclude today's unfinished markets.
 All schedules use `Pacific/Auckland`, including daylight saving. The US FX close can fall
 after the morning fetch during NZ summer, so the evening fetch supplies that day's rate.
+Monthly and year-end delivery at 19:00 follows that 18:30 fetch. The startup timing
+warning checks schedule order only, not whether the fetch succeeds or finishes.
+
+Existing servers preserve their private `schedules.toml` during deployment. Edit both
+the monthly and year-end entries there to `at = "19:00"`, then restart the scheduler
+with `docker compose restart scheduler`.
 
 If you previously installed the price systemd timer or PR #29's year-end timer, disable
 them before starting the container, so each job has just one scheduler:
@@ -122,7 +128,9 @@ To migrate an existing server, move recipients and the monitoring URL from its
 any TOML `kuma_push_url` emits a warning recommending `REPORT_KUMA_PUSH_URL`, even when
 an environment value overrides it. The warning never includes the URL.
 The deploy script continues preserving existing server schedules for compatibility.
-Monitoring is pinged only after successful delivery. Ping failures are logged without
+Monitoring is pinged only after successful delivery. Monitoring URLs must use HTTPS unless
+they point at `localhost`, a loopback address or a Tailscale address (100.64.0.0/10).
+Redirects count as a failed ping and are never followed. Ping failures are logged without
 the URL and do not fail the send.
 
 Each `[[schedules]]` needs a unique `name`, `kind` (`prices` or `report`), `frequency`
@@ -243,7 +251,7 @@ kind = "report"
 frequency = "yearly"
 month = 4
 day = 1
-at = "09:00"
+at = "19:00"
 period = "tax_year"
 ```
 
@@ -259,9 +267,9 @@ portfolio in the scheduler JSON file, scoped to the schedule and original due ti
 Retries skip recorded portfolios; these records are cleared when the occurrence advances.
 Monitoring is pinged only after every portfolio succeeds. Manual reruns send again.
 Check the provider after an uncertain send, since a crash before checkpointing or partial
-recipient acceptance can still cause duplicate email. US closing data may not yet be stored at 09:00 NZDT
-on 1 April; inspect carried-forward flags and refresh through 31 March before a manual
-rerun if needed.
+recipient acceptance can still cause duplicate email. The 19:00 delivery follows the
+18:30 fetch, but source failures can still leave stale observations. Inspect
+carried-forward flags and refresh through 31 March before a manual rerun if needed.
 
 The email model uses the shared period engine in `returns.py` through `returns_loader`,
 documented in [RETURNS.md](RETURNS.md). It combines all portfolios by listing in NZD.
@@ -511,8 +519,11 @@ atomically.
 Push is off by default. In the server's private `.env`, set `ALERT_NTFY_URL` to an HTTPS
 topic URL and optionally `ALERT_NTFY_TOKEN`, or set both `ALERT_PUSHOVER_TOKEN` and
 `ALERT_PUSHOVER_USER`. ntfy takes precedence if both providers are configured. Recreate
-the scheduler container after changing environment values. Push providers receive the
-same portfolio figures as the email; use only a private topic or account. Never put
+the scheduler container after changing environment values. By default
+(`ALERT_PUSH_DETAIL=minimal`) a push says only how many new alerts there are and points
+to your email or the dashboard, so no portfolio names, holdings or figures reach the push
+provider. Set `ALERT_PUSH_DETAIL=full` to push the same text as the email instead; then use
+only a private topic or account. Never put
 private URLs or tokens in TOML, commands or git. Legacy report monitoring in TOML
 is supported only for migration; move it to `REPORT_KUMA_PUSH_URL` in `.env`. Push requests
 refuse redirects to protect tokens and portfolio figures.

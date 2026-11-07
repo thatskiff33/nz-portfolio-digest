@@ -4,8 +4,6 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit
-from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -14,6 +12,7 @@ from sqlalchemy.orm import Session
 from portfolio_digest.config import ConfigError
 from portfolio_digest.mailers import MailSettings, mail_settings, message, send
 from portfolio_digest.models import Portfolio
+from portfolio_digest.pings import PingError, ping
 from portfolio_digest.reports import ReportError, build_report, render
 from portfolio_digest.scheduling import DeliveryCheckpoint, ScheduleConfig, SchedulerStateError
 
@@ -24,14 +23,8 @@ def ping_kuma(config: ScheduleConfig) -> None:
     if not config.kuma_push_url:
         return
     try:
-        url = config.kuma_push_url.get_secret_value()
-        if urlsplit(url).scheme not in {"https", "http"}:
-            raise ValueError
-        # urllib does not emit HTTP request URLs (the push URL contains a secret).
-        with urlopen(url, timeout=10) as response:  # noqa: S310
-            if response.status != 200:
-                raise ValueError
-    except Exception:
+        ping(config.kuma_push_url.get_secret_value())
+    except PingError:
         logger.warning("Report sent, but the monitoring push failed.")
 
 

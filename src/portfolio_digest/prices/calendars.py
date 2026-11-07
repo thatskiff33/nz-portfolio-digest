@@ -59,6 +59,10 @@ EXCHANGES: dict[str, TradingCalendar] = {
     "ASX": TradingCalendar("ASX", "Australia/Sydney", time(16, 15), "XASX"),
     "NYSE": TradingCalendar("NYSE", "America/New_York", time(16, 0), "XNYS"),
     "NASDAQ": TradingCalendar("NASDAQ", "America/New_York", time(16, 0), "XNAS"),
+    # These venues follow the NYSE session, including Thanksgiving and other XNYS holidays.
+    "NYSEARCA": TradingCalendar("NYSEARCA", "America/New_York", time(16, 0), "XNYS"),
+    "NYSEAMERICAN": TradingCalendar("NYSEAMERICAN", "America/New_York", time(16, 0), "XNYS"),
+    "CBOE": TradingCalendar("CBOE", "America/New_York", time(16, 0), "XNYS"),
 }
 
 # Currencies trade around the clock on weekdays; the day's rate is fixed at 5pm New York.
